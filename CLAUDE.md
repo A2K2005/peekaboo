@@ -1,37 +1,59 @@
 # Preview for Windows
 
-A free, native Windows app that opens PDFs and images in under 400 ms and does everyday edits. The product spec is [docs/PRD.md](docs/PRD.md). The PRD is the source of truth for scope, performance targets, and stack. Do not change scope or stack without owner approval.
+A free, native Windows app that opens PDFs and images in under 400 ms and does everyday edits. The product spec is [docs/PRD.md](docs/PRD.md). The PRD is the source of truth for scope and performance targets. The owner opened the language and stack choice (D3). Do not change scope without owner approval.
 
 ## Current status
 
-Phase 1 (research) is complete. Read [docs/research/SUMMARY.md](docs/research/SUMMARY.md) first. Phase 2 waits for owner answers on Windows 10 support and HEIC in v1 (SUMMARY, "Questions for the owner"). The owner's usage budget cut research short; unmeasured items are listed under "Pending measurements" in SUMMARY.
+Building v1 end to end. Plan and slice status: [docs/plan-v1.md](docs/plan-v1.md). Per-task acceptance: [docs/acceptance.md](docs/acceptance.md).
 
 | Phase | Status | Output |
 | --- | --- | --- |
 | 1. Research | Done (some measurements pending) | `docs/research/*.md`, `docs/research/SUMMARY.md` |
-| 2. Architecture | Not started | `docs/architecture.md`, `docs/adr/` |
-| 3. Speed spike | Not started | Shell, benchmark harness, `docs/benchmarks.md` |
-| Stop for owner review | — | Owner gives go before Phase 4 |
-| 4. Build v1 | Not started | 10 v1 tasks as vertical slices |
+| Codex development build | Merged here (D9) | Rust app: viewing, page edits, markup, images, OCR, background removal |
+| Wave 1: foundations | In progress | UI foundation, PDF engine, imaging and AI, Windows integration, benchmarks |
+| Wave 2: v1 tasks | Not started | 7 slices in PRD order |
+| Wave 3: release gates | Not started | Accessibility, performance, round trip, packaging, final review |
 
 ## Architecture summary
 
-Proposed by Phase 1, final in Phase 2 ADRs: C# on WinUI 3 (Windows App SDK 2.5.1), .NET 10 NativeAOT, packaged MSIX. PDFium without V8 on one dedicated thread, through hand-written `[LibraryImport]` bindings. WIC for images, libwebp for WebP export. Windows.Media.Ocr for text in images. Background removal model and runtime download on first use.
+Rust 2021 with windows-rs 0.62 on Win32 and Direct2D. One UI thread. One document worker owns every PDFium and WIC viewing call. A task worker runs OCR, background removal, and batch jobs. Results carry generation IDs, so stale results are dropped. Edits are recipes (`model::ImageEdit`, `model::PdfEdit`) applied to a fresh document at save time. Shared types and threading rules: [docs/plan-v1.md](docs/plan-v1.md) "Shared contracts". Details: [docs/architecture.md](docs/architecture.md).
+
+| Module | Role |
+| --- | --- |
+| `src/shell.rs` | Window, input, commands, painting (wave 1 splits it into `src/ui/`) |
+| `src/pdf.rs` | PDFium loading, rendering, text, forms, annotations, page edits, saves |
+| `src/imaging.rs` | WIC decode, edits, export |
+| `src/ocr.rs` | Windows.Media.Ocr |
+| `src/background.rs` | ONNX Runtime background removal, loaded on first use |
+| `src/printing.rs` | Print dialog, rasterizing, spooling |
+| `src/model.rs` | Shared types |
 
 ## Build and test commands
 
-None yet. Toolchain on the dev PC: see "Dev environment".
+Cargo: `C:\Users\Armaan\.cargo\bin\cargo.exe`.
+
+| Task | Command |
+| --- | --- |
+| Fetch PDFium into `runtime/` | `powershell -File tools/fetch-pdfium.ps1` |
+| Make test fixtures in `fixtures/` | `powershell -File tools/make-fixtures.ps1` |
+| Build | `cargo build --release` |
+| Test | `cargo test --release -- --test-threads=1` (PDFium is process-global, so tests run serially) |
+| Optional real OCR test | `cargo test --release --test ocr_smoke -- --ignored --nocapture` |
+| Package ZIP | `powershell -File tools/package.ps1` |
+
+`runtime/` (PDFium, ONNX Runtime, model) and `fixtures/` are not in git. In a git worktree, link them to the main checkout: `cmd /c mklink /J runtime C:\Users\Armaan\Desktop\extension\preview-for-windows\runtime` (same for `fixtures`).
 
 ## Conventions
 
-- Every claim in a research or design doc cites a source URL, a measured benchmark, or working code. Unverified claims say "unverified".
-- No GPL or AGPL code or dependencies. Read GPL projects for patterns only. Never copy their code.
-- No network calls, update checks, or telemetry on the launch path.
+- Every claim in a doc cites a source URL, a measured benchmark, or working code. Unverified claims say "unverified". Never invent benchmark results or API support.
+- No GPL or AGPL code or dependencies. Read GPL projects for patterns only.
+- No network calls, update checks, or telemetry on the launch path. OCR and AI load on first use.
 - Simple beats complex. One clear way to do each thing. No speculative abstractions.
 - Fix root causes, not symptoms.
 - An agent never reviews its own work.
-- Prose in docs, comments, commits, and UI text: Google Developer Documentation Style Guide, ASD-STE100-derived precision, Zinsser (clarity, simplicity, brevity, humanity).
-- Research docs live in `docs/research/<topic>.md`. Proof code lives in `docs/research/proofs/<topic>/`.
+- Never overwrite a user's file without the save model's consent rules (W2-3). Writes go to a temp file, then an atomic replace.
+- Prose in docs, comments, commits, and UI text: Google Developer Documentation Style Guide, ASD-STE100-derived precision, Zinsser (clarity, simplicity, brevity, humanity). No em dashes in UI text.
+- Research docs live in `docs/research/`. Proof code lives in `docs/research/proofs/<topic>/`.
 
 ## Dev environment
 
@@ -39,9 +61,9 @@ None yet. Toolchain on the dev PC: see "Dev environment".
 | --- | --- |
 | OS | Windows 10 Home 22H2, build 19045 |
 | CPU, RAM, GPU | Intel i7-11800H, 32 GB, NVIDIA RTX 3050 Ti Laptop + Intel UHD |
-| Installed | git 2.17, Python 3.14, Node.js, PowerShell 5.1, .NET Framework 4.8 `csc.exe` (C# 5), VS Build Tools 2026 (MSVC 14.50, x64 only), Windows 11 SDK 10.0.26100, Rust stable (`x86_64-pc-windows-msvc`) |
-| .NET SDK 10 | Per-user install at `%LOCALAPPDATA%\Microsoft\dotnet` (no admin). Call `%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe` or put that folder first on `PATH`. |
-| Missing | MSVC ARM64 tools, CMake |
+| Installed | git 2.17, Python 3.14, Node.js, PowerShell 5.1 (no PowerShell 7), VS Build Tools 2026 (MSVC 14.50, x64 only), Windows 11 SDK 10.0.26100, Rust stable (cargo 1.99) |
+| .NET SDK 10 | Per-user at `%LOCALAPPDATA%\Microsoft\dotnet` |
+| Missing | MSVC ARM64 tools, CMake, Adobe Acrobat Reader |
 
 This PC is not the PRD reference laptop (i5 12th gen, 8 GB, Windows 11) or the low-end check PC (4 GB, eMMC). Benchmarks from it do not prove the PRD gates.
 
@@ -50,8 +72,15 @@ This PC is not the PRD reference laptop (i5 12th gen, 8 GB, Windows 11) or the l
 | # | Date | Decision | Reason |
 | --- | --- | --- | --- |
 | D1 | 2026-10-06 | Repo lives at `Desktop/extension/preview-for-windows`, its own git repo. | Owner asked for a new folder. Inside the session folder so the app's file pane can open it. |
-| D2 | 2026-10-06 | Research agents may use Python venvs and official binaries in the session scratchpad for proofs. They do not install system software. | Proofs need working code. System installs need owner approval. |
-| D3 | 2026-10-06 | The language and UI stack are open (owner: "Rust, Go, or whatever you want"). A seventh research agent compares stacks in `docs/research/ui-stack.md`. Scope and targets stay fixed. | Owner approval to change the stack. Choose by measured evidence, not preference. |
-| D4 | 2026-10-06 | The owner leans toward Rust. Rust is a tie-breaker only when candidates are within measurement noise. A Rust core behind a native UI shell is also evaluated. | Owner asked for "best, fastest, efficient". A preference does not override hard requirements: accessibility, pen input, Fluent look, 15-week effort. |
-| D5 | 2026-10-06 | Propose C# + WinUI 3 + NativeAOT over Rust. D4's tie-breaker does not apply. | Rust lost on hard requirements (UIA, IME, drag-out, pen), not within measurement noise. See `docs/research/ui-stack.md`. Final in the Phase 2 ADR. |
-| D6 | 2026-10-06 | Research stopped early to save the owner's usage budget. Unrun measurements move to Phase 3. | Owner request. |
+| D2 | 2026-10-06 | Agents may use Python venvs and official binaries in the session scratchpad for proofs. They do not install system software. | Proofs need working code. System installs need owner approval. |
+| D3 | 2026-10-06 | The language and UI stack are open (owner: "Rust, Go, or whatever you want"). | Owner approval to change the stack. |
+| D4 | 2026-10-06 | The owner leans toward Rust. Rust is a tie-breaker only when candidates are within measurement noise. | A preference does not override hard requirements. |
+| D5 | 2026-10-06 | Research proposed C# + WinUI 3 + NativeAOT over a from-scratch Rust build. | Rust lost on UI effort (UIA, IME, drag-out, pen), not on speed. See `docs/research/ui-stack.md`. Superseded by D9. |
+| D6 | 2026-10-06 | Research stopped early to save the owner's usage budget. Unrun measurements move to later waves. | Owner request. |
+| D7 | 2026-10-06 | HEIC: no bundled decoder. Use the Windows codec when installed. | Owner: skip HEIC if it blocks. Patent and LGPL risk (`docs/research/licensing.md`). |
+| D8 | 2026-10-06 | A parallel Codex build existed at `Desktop/Portfolio/preview-for-windows` (Rust, Win32, Direct2D). It built, and 23 tests passed. | Checked before deciding which codebase continues. |
+| D9 | 2026-10-06 | Continue the Codex Rust build, merged into this repo. The Portfolio copy stays untouched. | Owner: "do everything end to end; build missing features properly". Working, tested code removes much of Rust's effort penalty from D5. |
+| D10 | 2026-10-06 | Support Windows 10 22H2 and Windows 11, as the PRD says. Mica on Windows 11 22H2+, solid backdrop elsewhere. | The Win32 stack has no WinUI-on-Windows-10 launch penalty, so the owner question from Phase 1 no longer changes a decision. |
+| D11 | 2026-10-06 | UI Automation through AccessKit (MIT/Apache-2.0) over hand-written UIA providers. Text input uses Win32 EDIT child controls for IME. Menus and dialogs are custom-drawn, so they follow dark mode without undocumented APIs. | Reuse a maintained UIA layer; Win32 menus have no documented dark mode. |
+| D12 | 2026-10-06 | One verifier agent per slice does both edge-case testing and review. | Keeps "never review your own work" at lower usage cost. |
+| D13 | 2026-10-06 | Fixed `pdfium.dll` lookup for test binaries in `target/<profile>/deps`. | Codex's tests passed only because a stray DLL copy existed in its build folder. |

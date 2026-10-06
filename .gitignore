@@ -1,3 +1,8 @@
+/target/
+/runtime/
+/fixtures/
+/dist/
+/artifacts/
 bin/
 obj/
 target/
