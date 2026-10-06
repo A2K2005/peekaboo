@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Minimal WinUI 3 launch probe. Variants:
+       -p:ProbePackaged=false      unpackaged (default: packaged single-project MSIX)
+       -p:ProbeSelfContained=true  Windows App SDK self-contained (default: framework-dependent)
+       -p:PublishAot=false         JIT baseline (default: NativeAOT) -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>LaunchProbe</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <PublishAot Condition="'$(PublishAot)' == ''">true</PublishAot>
+    <SelfContained>true</SelfContained>
+    <IsAotCompatible>true</IsAotCompatible>
+    <CsWinRTAotWarningLevel>2</CsWinRTAotWarningLevel>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <WindowsPackageType Condition="'$(ProbePackaged)' == 'false'">None</WindowsPackageType>
+    <WindowsAppSDKSelfContained Condition="'$(ProbeSelfContained)' == 'true'">true</WindowsAppSDKSelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+    <PackageReference Include="Microsoft.Windows.CsWinRT" Version="2.3.1" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\*.png" />
+    <Manifest Include="$(ApplicationManifest)" />
+  </ItemGroup>
+</Project>
