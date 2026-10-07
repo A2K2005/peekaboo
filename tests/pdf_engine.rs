@@ -692,21 +692,32 @@ fn inline_form_session_fills_every_field_kind_and_commits_recipes() {
     assert_eq!(previous.focus.unwrap().0, 0);
     send(&mut engine, 0, Blur, &mut edits);
     assert!(fill(&edits).contains(&(1, 0, "Page two".to_string())));
-    // After a failed event the session restarts from the recipe, so text
-    // typed but not committed is not committed later.
+    // A failed event closes the document. Text typed but not committed yet
+    // comes back as a commit with the next event.
     let committed = edits.len();
     click(&mut engine, &mut edits, 180.0, 80.0);
     send(&mut engine, 0, Char('Z'), &mut edits);
     assert!(engine.form_event(&path, 99, Blur, &edits).is_err());
     send(&mut engine, 0, Blur, &mut edits);
-    assert_eq!(edits.len(), committed);
+    assert_eq!(fill(&edits[committed..]), [(0, 0, "AdaZ".to_string())]);
+    // A changed recipe (Rotate, Undo) also closes the document; the typed
+    // text comes back from take_form_commits, once.
+    click(&mut engine, &mut edits, 180.0, 80.0);
+    send(&mut engine, 0, Char('!'), &mut edits);
+    let rotated = [edits.clone(), vec![PdfEdit::RotateRight { page: 1 }]].concat();
+    engine.render_edited(&path, 0, 100, 100, &rotated).unwrap();
+    assert_eq!(
+        fill(&engine.take_form_commits(&path)),
+        [(0, 0, "AdaZ!".to_string())]
+    );
+    assert!(engine.take_form_commits(&path).is_empty());
     // The recipe replays on a fresh document: saved values match.
     let saved = dir.join("filled.pdf");
     engine.save_copy(&path, &saved, &edits).unwrap();
     let fields = engine.form_fields(&saved, 0, &[]).unwrap();
     let values: Vec<&str> = fields.iter().map(|f| f.value.as_str()).collect();
     println!("saved field values: {values:?}");
-    assert_eq!(&values[..3], ["Ada", "e@x.io", "true"]);
+    assert_eq!(&values[..3], ["AdaZ", "e@x.io", "true"]);
     assert_eq!(values[4], "M");
     assert_eq!(values[5], "Green");
     assert_eq!(

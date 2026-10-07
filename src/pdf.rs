@@ -527,6 +527,8 @@ pub struct PdfEngine {
     document: Option<Document>,
     passwords: HashMap<PathBuf, Password>,
     revisions: HashMap<PathBuf, FileStamp>,
+    // Typed form text saved when its document closed, for `take_form_commits`.
+    form_commits: Vec<(PathBuf, PdfEdit)>,
     api: Api,
     _library: Library,
     // PDFium is process-global and not thread-safe. The engine cannot leave its worker.
@@ -700,6 +702,7 @@ impl PdfEngine {
                 document: None,
                 passwords: HashMap::new(),
                 revisions: HashMap::new(),
+                form_commits: Vec::new(),
                 api,
                 _library: library,
                 _thread: PhantomData,
@@ -984,7 +987,7 @@ impl PdfEngine {
             .as_ref()
             .is_some_and(|d| d.path == path && d.edits == edits && d.stamp == current)
         {
-            self.document = None;
+            self.close_document();
             self.document = Some(self.open(&path, edits)?);
         }
         if let Some(document) = self.document.as_ref() {
@@ -1008,6 +1011,7 @@ impl PdfEngine {
             .entry(path.clone())
             .or_insert_with(|| document.stamp.clone());
         self.passwords.insert(path, secret);
+        self.close_document();
         self.document = Some(document);
         Ok(())
     }
