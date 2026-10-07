@@ -128,6 +128,9 @@ pub fn run() -> Result<()> {
             sidebar_open: false,
             sidebar_tab: 0,
             markup_open: false,
+            markup_since: None,
+            markup_from: 0.0,
+            animations: theme::animations_enabled(),
             hover: None,
             hover_since: None,
             tooltip: None,
@@ -556,12 +559,7 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
                 Some(WidgetId::Command(Command::ToggleMarkup)) if scope == Scope::Root => {
                     // Alt, M opens the markup bar and its scope (Alt, M, H).
                     with_state(|s| {
-                        if !s.markup_open {
-                            s.markup_open = true;
-                            if s.frame.is_some() {
-                                s.due = Some(Instant::now() + Duration::from_millis(120));
-                            }
-                        }
+                        s.set_markup(true);
                         s.keytips = Some(Scope::Markup);
                     });
                 }
@@ -609,6 +607,7 @@ unsafe fn retheme(hwnd: HWND) {
     let theme = theme::apply(hwnd, theme::current());
     let edits = with_state(|s| {
         s.theme = theme;
+        s.animations = theme::animations_enabled();
         s.sheet.as_ref().map(|x| x.fields.iter().map(|f| f.edit).collect::<Vec<_>>()).unwrap_or_default()
     })
     .unwrap_or_default();
@@ -897,7 +896,7 @@ mod tests {
             title: "a.pdf",
             sidebar_open: false,
             sidebar_tab: 0,
-            markup_open: false,
+            markup: 0.0,
             ctx: Ctx { has_frame: true, tabs: 1, ..Default::default() },
             sheet: None,
         })

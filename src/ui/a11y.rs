@@ -292,7 +292,7 @@ mod tests {
             title: "report.pdf, page 1 of 20",
             sidebar_open: true,
             sidebar_tab: 0,
-            markup_open: true,
+            markup: 1.0,
             ctx: commands::Ctx { has_frame: true, pdf: true, tabs: 2, ..Default::default() },
             sheet: Some(SheetView { message_height: 0.0, fields: vec!["Text to find"], buttons: vec!["OK", "Cancel"] }),
         };

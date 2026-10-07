@@ -241,6 +241,21 @@ pub(super) fn current() -> Theme {
     palette(mode)
 }
 
+/// Windows "Animation effects" setting; apps skip motion when it is off.
+/// https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-systemparametersinfow
+pub(super) fn animations_enabled() -> bool {
+    let mut enabled = windows::core::BOOL::from(true);
+    unsafe {
+        let _ = SystemParametersInfoW(
+            windows::Win32::UI::WindowsAndMessaging::SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut enabled as *mut _ as _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    enabled.as_bool()
+}
+
 /// Startup value of the Windows text size setting (100 to 225 percent).
 /// UISettings.TextScaleFactor is authoritative and replaces this after the
 /// first frame; this registry value avoids its startup cost.

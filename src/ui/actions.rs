@@ -104,10 +104,11 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
             with_state(|s| {
                 if command == ToggleSidebar {
                     s.sidebar_open = !s.sidebar_open;
+                    relayout(s);
                 } else {
-                    s.markup_open = !s.markup_open;
+                    // The document renders again when the slide ends (tick).
+                    s.set_markup(!s.markup_open);
                 }
-                relayout(s);
             });
             invalidate(hwnd);
             return;
@@ -469,10 +470,7 @@ unsafe fn choose_tool(hwnd: HWND, command: Command) {
         s.markup = Some(kind);
         s.markup_text = text;
         s.signature = signature;
-        if !s.markup_open {
-            s.markup_open = true;
-            relayout(s);
-        }
+        s.set_markup(true);
         s.status = "Drag on the page to place the mark. Escape returns to navigation.".into();
     });
     invalidate(hwnd);

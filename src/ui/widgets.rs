@@ -111,7 +111,8 @@ pub(super) struct Input<'a> {
     pub(super) title: &'a str,
     pub(super) sidebar_open: bool,
     pub(super) sidebar_tab: usize,
-    pub(super) markup_open: bool,
+    /// Visible fraction of the markup bar, 0 to 1, while it slides.
+    pub(super) markup: f32,
     pub(super) ctx: Ctx,
     pub(super) sheet: Option<SheetView<'a>>,
 }
@@ -330,10 +331,12 @@ pub(super) fn layout(input: &Input) -> Layout {
 
     // Markup bar, under the toolbar when open.
     let mut top = title_h + row_h;
-    if input.markup_open {
-        let bar = Rect::new(0.0, top, width, row_h);
+    if input.markup > 0.0 {
+        let bar = Rect::new(0.0, top, width, row_h * input.markup.min(1.0));
         out.markup_bar = Some(bar);
-        let fits = ((width - 2.0 * PAD * s - step) / step).floor().max(0.0) as usize;
+        // Tools appear once the bar has slid fully open, so a half-open bar
+        // never takes clicks meant for the toolbar.
+        let fits = if input.markup < 1.0 { 0 } else { ((width - 2.0 * PAD * s - step) / step).floor().max(0.0) as usize };
         let drop: Vec<Command> = commands::MARKUP_TOOLS.iter().rev().copied().collect();
         let (tools, hidden) = overflow(commands::MARKUP_TOOLS, &drop, fits);
         let total = (tools.len() + usize::from(!hidden.is_empty())) as f32 * step - GAP * s;
@@ -342,7 +345,7 @@ pub(super) fn layout(input: &Input) -> Layout {
             w.push(command_widget(*command, Region::MarkupBar, Rect::new(x, top + (row_h - button) / 2.0, button, button), &input.ctx));
             x += step;
         }
-        if !hidden.is_empty() {
+        if !hidden.is_empty() && input.markup >= 1.0 {
             w.push(command_widget(
                 Command::MoreTools,
                 Region::MarkupBar,
@@ -351,7 +354,7 @@ pub(super) fn layout(input: &Input) -> Layout {
             ));
         }
         out.markup_overflow = hidden;
-        top += row_h;
+        top = bar.y1;
     }
 
     let status_h = status_height(ts) * s;
@@ -539,7 +542,7 @@ mod tests {
             title: "a.pdf",
             sidebar_open: false,
             sidebar_tab: 0,
-            markup_open: false,
+            markup: 0.0,
             ctx: Ctx { has_frame: !tabs.is_empty(), pdf: true, tabs: tabs.len(), ..Default::default() },
             sheet: None,
         }
@@ -598,7 +601,7 @@ mod tests {
         let tabs = vec!["a.pdf".to_string()];
         let base = layout(&input(1100.0, &tabs));
         let mut i = input(1100.0, &tabs);
-        i.markup_open = true;
+        i.markup = 1.0;
         i.sidebar_open = true;
         let open = layout(&i);
         let bar = open.markup_bar.unwrap();
@@ -609,11 +612,22 @@ mod tests {
         assert_eq!(ids(&open, Region::MarkupBar).len(), commands::MARKUP_TOOLS.len());
         assert!(open.document.height() > 0.0 && open.document.y1 == open.status.y0);
         let mut narrow = input(400.0, &tabs);
-        narrow.markup_open = true;
+        narrow.markup = 1.0;
         let narrow = layout(&narrow);
         assert!(!narrow.markup_overflow.is_empty());
         assert!(ids(&narrow, Region::MarkupBar).contains(&cmd(Command::MoreTools)));
         assert!(narrow.widgets.iter().all(|w| w.rect.x1 <= 400.0 + 0.01));
+    }
+
+    #[test]
+    fn half_open_markup_bar_has_no_tools_yet() {
+        let tabs = vec!["a.pdf".to_string()];
+        let mut i = input(1100.0, &tabs);
+        i.markup = 0.5;
+        let half = layout(&i);
+        assert_eq!(half.markup_bar.unwrap().height(), 24.0);
+        assert_eq!(half.document.y0, half.markup_bar.unwrap().y1);
+        assert!(ids(&half, Region::MarkupBar).is_empty());
     }
 
     #[test]
@@ -722,7 +736,7 @@ mod tests {
     fn f6_moves_between_panes() {
         let tabs = vec!["a.pdf".to_string()];
         let mut i = input(1100.0, &tabs);
-        i.markup_open = true;
+        i.markup = 1.0;
         i.sidebar_open = true;
         let layout = layout(&i);
         let mut current = Some(WidgetId::Tab(0));
@@ -739,7 +753,7 @@ mod tests {
     fn access_keys_resolve_per_scope() {
         let tabs = vec!["a.pdf".to_string()];
         let mut i = input(1100.0, &tabs);
-        i.markup_open = true;
+        i.markup = 1.0;
         let layout = layout(&i);
         assert_eq!(access_key_target(&layout.widgets, Scope::Root, 'm'), Some(cmd(Command::ToggleMarkup)));
         assert_eq!(access_key_target(&layout.widgets, Scope::Root, 'O'), Some(cmd(Command::AppMenu)));

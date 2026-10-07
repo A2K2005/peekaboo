@@ -27,6 +27,25 @@ use windows::{
 
 pub(super) const EMPTY_STATUS: &str = "Open a PDF or image with Ctrl+O.";
 const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
+/// Fluent "fast" duration for entering and exiting elements.
+/// https://learn.microsoft.com/windows/apps/design/motion/timing-and-easing
+const SLIDE: Duration = Duration::from_millis(167);
+
+/// Linear slide progress from `from` toward open (1) or closed (0).
+pub(super) fn slide_progress(from: f32, open: bool, elapsed: Duration, animate: bool) -> f32 {
+    let to = if open { 1.0 } else { 0.0 };
+    if !animate {
+        return to;
+    }
+    let t = (elapsed.as_secs_f32() / SLIDE.as_secs_f32()).min(1.0);
+    from + (to - from) * t
+}
+
+/// Cubic ease-out: decelerates when opening and accelerates when closing,
+/// close to Fluent's cubic-bezier(0, 0, 0, 1) entrance curve.
+pub(super) fn ease(progress: f32) -> f32 {
+    1.0 - (1.0 - progress.clamp(0.0, 1.0)).powi(3)
+}
 
 pub(super) struct State {
     pub(super) workers: Workers,
@@ -73,6 +92,11 @@ pub(super) struct State {
     pub(super) sidebar_open: bool,
     pub(super) sidebar_tab: usize,
     pub(super) markup_open: bool,
+    /// Markup bar slide: when it started and the progress it started from.
+    pub(super) markup_since: Option<Instant>,
+    pub(super) markup_from: f32,
+    /// Windows "Animation effects" setting (SPI_GETCLIENTAREAANIMATION).
+    pub(super) animations: bool,
     pub(super) hover: Option<WidgetId>,
     pub(super) hover_since: Option<Instant>,
     pub(super) tooltip: Option<WidgetId>,
@@ -125,6 +149,21 @@ impl State {
         }
         let kind = self.markup?;
         commands::MARKUP_TOOLS.iter().copied().find(|c| commands::annotation(*c) == Some(kind))
+    }
+    fn markup_progress(&self) -> f32 {
+        match self.markup_since {
+            Some(since) => slide_progress(self.markup_from, self.markup_open, since.elapsed(), self.animations),
+            None if self.markup_open => 1.0,
+            None => 0.0,
+        }
+    }
+    /// Opens or closes the markup bar with a slide.
+    pub(super) fn set_markup(&mut self, open: bool) {
+        if open != self.markup_open {
+            self.markup_from = self.markup_progress();
+            self.markup_open = open;
+            self.markup_since = Some(Instant::now());
+        }
     }
     pub(super) fn ctx(&self) -> Ctx {
         let pdf = self.is_pdf();
@@ -190,7 +229,7 @@ impl State {
             title: &label,
             sidebar_open: self.sidebar_open,
             sidebar_tab: self.sidebar_tab,
-            markup_open: self.markup_open,
+            markup: ease(self.markup_progress()),
             ctx: self.ctx(),
             sheet,
         })
@@ -533,6 +572,16 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                 advance = true;
             }
         }
+        if let Some(since) = state.markup_since {
+            if !state.animations || since.elapsed() >= SLIDE {
+                state.markup_since = None;
+                // The document area changed size; render at the new size.
+                if state.frame.is_some() {
+                    state.due = Some(Instant::now());
+                }
+            }
+            invalidate(hwnd);
+        }
         if state.tooltip.is_none() && state.hover_since.is_some_and(|t| t.elapsed() >= TOOLTIP_DELAY) {
             state.hover_since = None;
             state.tooltip = state.hover;
@@ -613,4 +662,22 @@ unsafe fn password_prompt(hwnd: HWND, generation: u64, path: PathBuf, page: u32)
         }
     });
     invalidate(hwnd);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markup_bar_slides_over_167_ms_unless_animations_are_off() {
+        let ms = Duration::from_millis;
+        assert_eq!(slide_progress(0.0, true, ms(0), true), 0.0);
+        assert!((slide_progress(0.0, true, ms(83), true) - 0.497).abs() < 0.01);
+        assert_eq!(slide_progress(0.0, true, ms(400), true), 1.0);
+        assert_eq!(slide_progress(1.0, false, ms(167), true), 0.0);
+        assert_eq!(slide_progress(0.4, true, ms(0), false), 1.0, "no animation jumps to the end");
+        assert!((slide_progress(0.5, false, ms(0), true) - 0.5).abs() < 1e-6, "a reversed slide starts where it was");
+        assert_eq!((ease(0.0), ease(1.0)), (0.0, 1.0));
+        assert!(ease(0.5) > 0.5, "decelerates");
+    }
 }
