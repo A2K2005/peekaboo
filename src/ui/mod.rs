@@ -24,6 +24,7 @@
 //! | a11y | UI Automation through AccessKit |
 //! | files | File dialogs, clipboard, saved signature |
 //! | imagetools | Image crop handles, resize, export, batch, and background removal results |
+//! | forms | Form fields, signature pad and placement, text markup, text boxes |
 //! | text | Text selection, copy, and image search over text layers |
 //! | findbar | Find bar with live search |
 //! | infobar | Info bar and toasts, the live regions for messages |
@@ -41,6 +42,7 @@ mod drop;
 mod empty;
 mod files;
 mod findbar;
+mod forms;
 mod imagetools;
 mod infobar;
 mod menu;

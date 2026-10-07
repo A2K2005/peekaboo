@@ -429,7 +429,9 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
     }
     if to_document && e.phase == Phase::Down {
         let edit_path = with_state(|s| {
-            ((s.crop || s.markup.is_some()) && !super::pan::held()).then(|| s.path.clone()).flatten()
+            (((s.crop || s.markup.is_some()) && !super::pan::held()) || super::forms::needs_consent(s, &e))
+                .then(|| s.path.clone())
+                .flatten()
         })
         .flatten();
         if let Some(path) = edit_path {
@@ -438,7 +440,9 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
             }
         }
     }
-    if to_document && with_state(|s| document::on_pointer(hwnd, s, &e)).unwrap_or(false) {
+    if to_document
+        && with_state(|s| super::forms::pointer(hwnd, s, &e).unwrap_or_else(|| document::on_pointer(hwnd, s, &e))).unwrap_or(false)
+    {
         repaint = true;
     }
     if let Some(id) = activate_id {
@@ -531,6 +535,10 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
             }
             _ => {}
         }
+        return true;
+    }
+    if super::forms::key_down(hwnd, vk, ctrl, shift, alt) {
+        invalidate(hwnd);
         return true;
     }
     // Keytips: Alt shows them; a letter runs that button. Alt+letter works
@@ -872,6 +880,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
         // Alt+letter is handled in WM_SYSKEYDOWN; only Alt+Space opens the
         // system menu. Other WM_SYSCHAR messages would beep.
         WM_SYSCHAR if wparam.0 != ' ' as usize => LRESULT(0),
+        WM_CHAR if super::forms::char_input(wparam.0 as u32) => LRESULT(0),
         WM_CONTEXTMENU => {
             // The keyboard (Shift+F10 or the menu key) sends (-1, -1).
             // https://learn.microsoft.com/windows/win32/menurc/wm-contextmenu

@@ -130,7 +130,7 @@ fn reader_paths(job: &Job) -> Vec<PathBuf> {
         | Job::Layer(request)
         | Job::Text(request, _)
         | Job::Find(request, _)
-        | Job::Fields(request)
+        | Job::Forms(request, _)
         | Job::Print(request, _)
         | Job::Tool(request, _)
         | Job::Password(request, _) => (request, None),
@@ -176,7 +176,7 @@ pub(super) enum Job {
     Layer(Request),
     Text(Request, Option<Selection>),
     Find(Request, super::findbar::Query),
-    Fields(Request),
+    Forms(Request, super::forms::Op),
     Print(Request, crate::printing::PrintJob),
     Batch(Request, PathBuf, String, Arc<AtomicBool>, Option<Vec<PathBuf>>),
     Password(Request, String),
@@ -196,7 +196,7 @@ pub(super) enum Event {
     Layer(u64, PathBuf, u32, std::result::Result<TextLayer, String>),
     Text(u64, PathBuf, std::result::Result<String, String>),
     Found(u64, PathBuf, std::result::Result<Vec<SearchHit>, String>),
-    Fields(u64, std::result::Result<Vec<crate::pdf::FormField>, String>),
+    Forms(u64, PathBuf, super::forms::Reply),
     Background(PathBuf, std::result::Result<String, String>),
     Finished(std::result::Result<String, String>),
     Progress(String),
@@ -734,7 +734,7 @@ impl Worker {
             | Job::Layer(r)
             | Job::Text(r, _)
             | Job::Find(r, _)
-            | Job::Fields(r)
+            | Job::Forms(r, _)
             | Job::Print(r, _)
             | Job::Batch(r, _, _, _, _) => r.clone(),
             _ => return true,
@@ -841,15 +841,10 @@ impl Worker {
                         .map(|layer| super::text::find(&layer, 0, &query.text, query.match_case))
                 },
             ),
-            Job::Fields(_) => Event::Fields(
+            Job::Forms(_, op) => Event::Forms(
                 request.generation,
-                match self.engine.as_mut() {
-                    Some(e) => {
-                        e.alias_password(&request.path, &source);
-                        e.form_fields(&source, request.page, &edits.pdf)
-                    }
-                    None => Err("Open a PDF first.".into()),
-                },
+                request.path.clone(),
+                super::forms::run(self.engine.as_mut(), &request.path, &source, &edits.pdf, op),
             ),
             Job::Print(..) | Job::Batch(..) if self.long.is_some() => {
                 Event::Finished(Err("Wait for the current print or conversion to finish, then try again.".into()))
@@ -1549,7 +1544,7 @@ mod tests {
         assert!(!runs_on_task_worker(&Job::Render(request("a.png"))));
         assert!(!runs_on_task_worker(&Job::Open(request("a.pdf"))));
         assert!(!runs_on_task_worker(&Job::Find(request("a.pdf"), "x".into())));
-        assert!(!runs_on_task_worker(&Job::Fields(request("a.pdf"))));
+        assert!(!runs_on_task_worker(&Job::Forms(request("a.pdf"), crate::ui::forms::Op::Annotations { page: 0 })));
         let mut snapshot_backed = request("a.png");
         snapshot_backed.sources.insert(PathBuf::from("a.png"), PathBuf::from("opened/a.png"));
         assert!(runs_on_task_worker(&Job::Layer(snapshot_backed.clone())), "snapshot-backed OCR remains off the document worker");

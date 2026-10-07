@@ -17,6 +17,7 @@ const NO_ACROFORM: &str =
     "This document does not contain supported AcroForm fields. XFA forms require another reader.";
 
 impl PdfEngine {
+    #[allow(dead_code)]
     pub fn form_fields(
         &mut self,
         path: &Path,
@@ -221,6 +222,10 @@ impl PdfEngine {
                 }
                 FormInput::Blur => {
                     (api.form_blur)(form);
+                }
+                FormInput::Focus(index) => {
+                    let annotation = api.annotation(handle, index)?;
+                    (api.form_focus)(form, annotation.handle);
                 }
             }
         }

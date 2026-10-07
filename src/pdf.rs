@@ -30,6 +30,8 @@ mod forms;
 mod pages;
 #[path = "pdf/save.rs"]
 mod save;
+#[path = "pdf/sign.rs"]
+mod sign;
 #[path = "pdf/text.rs"]
 mod text;
 
@@ -106,6 +108,7 @@ pub enum FormFieldKind {
     Checkbox,
     Unsupported,
 }
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct FormField {
     pub page: u32,
@@ -783,6 +786,7 @@ impl PdfEngine {
                         permissions & (1 << 8) != 0 || permissions & (1 << 5) != 0
                     }
                     PdfEdit::Annotate { .. }
+                    | PdfEdit::Sign { .. }
                     | PdfEdit::DeleteAnnotation { .. }
                     | PdfEdit::SetAnnotationText { .. } => permissions & (1 << 5) != 0,
                     _ => permissions & (1 << 3) != 0 || permissions & (1 << 10) != 0,
@@ -810,6 +814,7 @@ impl PdfEngine {
                 | PdfEdit::Annotate { page, .. }
                 | PdfEdit::FillField { page, .. }
                 | PdfEdit::Crop { page, .. }
+                | PdfEdit::Sign { page, .. }
                 | PdfEdit::DeleteAnnotation { page, .. }
                 | PdfEdit::SetAnnotationText { page, .. } => page,
                 PdfEdit::Move { from, to } => {
@@ -949,6 +954,12 @@ impl PdfEngine {
                 } => {
                     let page = self.api.page(handle, page_index)?;
                     self.annotate(page.handle, kind, points, text)?;
+                }
+                PdfEdit::Sign {
+                    rect, ref strokes, ..
+                } => {
+                    let page = self.api.page(handle, page_index)?;
+                    self.sign(page.handle, rect, strokes)?;
                 }
                 PdfEdit::DeleteAnnotation { index, .. } => {
                     let page = self.api.page(handle, page_index)?;
@@ -1250,6 +1261,10 @@ impl PdfEngine {
         if input.len() < 2 && !matches!(kind, Text | Note) {
             return Err("Drag to draw this annotation.".into());
         }
+        let text_markup = matches!(kind, Highlight | Underline | Strikeout);
+        if text_markup && input.len() % 2 != 0 {
+            return Err("Annotation coordinates are invalid.".into());
+        }
         unsafe {
             let convert = |p: [f32; 2]| -> Result<Point, String> {
                 let (mut x, mut y) = (0.0, 0.0);
@@ -1281,10 +1296,15 @@ impl PdfEngine {
             } else {
                 [(first[0] + 0.25).min(1.0), (first[1] + 0.08).min(1.0)]
             };
-            let l = first[0].min(last[0]);
-            let r = first[0].max(last[0]);
-            let t = first[1].min(last[1]);
-            let b = first[1].max(last[1]);
+            let mut l = first[0].min(last[0]);
+            let mut r = first[0].max(last[0]);
+            let mut t = first[1].min(last[1]);
+            let mut b = first[1].max(last[1]);
+            if text_markup {
+                for p in input {
+                    (l, r, t, b) = (l.min(p[0]), r.max(p[0]), t.min(p[1]), b.max(p[1]));
+                }
+            }
             let corners = [
                 convert([l, t])?,
                 convert([r, t])?,
@@ -1388,20 +1408,16 @@ impl PdfEngine {
             {
                 return Err("Cannot save the drawn stroke.".into());
             }
-            if matches!(kind, Highlight | Underline | Strikeout) {
-                let quad = Quad {
-                    values: [
-                        corners[0].x,
-                        corners[0].y,
-                        corners[1].x,
-                        corners[1].y,
-                        corners[2].x,
-                        corners[2].y,
-                        corners[3].x,
-                        corners[3].y,
-                    ],
-                };
-                check((self.api.annot_quad)(handle, &quad))?;
+            if text_markup {
+                for pair in input.chunks_exact(2) {
+                    let (l, r) = (pair[0][0].min(pair[1][0]), pair[0][0].max(pair[1][0]));
+                    let (t, b) = (pair[0][1].min(pair[1][1]), pair[0][1].max(pair[1][1]));
+                    let [ul, ur, ll, lr] = [convert([l, t])?, convert([r, t])?, convert([l, b])?, convert([r, b])?];
+                    let quad = Quad {
+                        values: [ul.x, ul.y, ur.x, ur.y, ll.x, ll.y, lr.x, lr.y],
+                    };
+                    check((self.api.annot_quad)(handle, &quad))?;
+                }
             }
             let content = wide(text);
             check((self.api.annot_string)(

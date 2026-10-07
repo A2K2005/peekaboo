@@ -29,6 +29,8 @@ pub enum PdfEdit {
     Delete {
         page: u32,
     },
+    /// Highlight, Underline, and Strikeout take `points` as corner pairs
+    /// (top-left, bottom-right): one quad per pair, for text over several lines.
     Annotate {
         page: u32,
         kind: AnnotationKind,
@@ -83,6 +85,13 @@ pub enum PdfEdit {
         at: u32,
         name: String,
         bytes: std::sync::Arc<[u8]>,
+    },
+    /// A drawn signature placed in `rect`. Each stroke point is
+    /// `[x, y, pressure]`, with x and y in 0..1 of `rect`.
+    Sign {
+        page: u32,
+        rect: NormRect,
+        strokes: Vec<Vec<[f32; 3]>>,
     },
 }
 
@@ -200,6 +209,8 @@ pub enum FormInput {
         alt: bool,
     },
     Blur,
+    /// Focuses the field with this annotation index on the page.
+    Focus(u32),
 }
 
 /// Result of one form input. `focus` is the page and rectangle of the

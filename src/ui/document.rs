@@ -214,7 +214,7 @@ fn screen(g: &Geometry, r: Rect) -> Rect {
     Rect { x0, y0, x1: x0 + r.width(), y1: y0 + r.height() }
 }
 
-fn text_rect(state: &State, page: u32, rect: crate::model::NormRect) -> Option<Rect> {
+pub(super) fn text_rect(state: &State, page: u32, rect: crate::model::NormRect) -> Option<Rect> {
     let page = match geometry(state) {
         Some(g) => {
             let (_, page) = g.layout.pages.iter().find(|(index, _)| *index == page)?;
@@ -745,6 +745,7 @@ pub(super) fn paint(p: &Painter, bitmap: Option<&ID2D1Bitmap>, state: &mut State
     let s = state.scale;
     p.push_clip(doc);
     paint_text(p, state);
+    super::forms::paint(p, state, doc);
     if state.markup == Some(AnnotationKind::Ink) && state.signature.is_none() {
         for pair in state.ink.windows(2) {
             p.line((pair[0][0], pair[0][1]), (pair[1][0], pair[1][1]), Rgba::hex(0x1b1b1b), 2.0 * s);
@@ -903,6 +904,9 @@ fn predecode(state: &State, doc: Rect) -> Vec<Item> {
 
 /// Sends the background work list when it changed since the last frame.
 pub(super) fn request(state: &mut State, layout: &widgets::Layout) {
+    if super::forms::sync(state, layout) {
+        return;
+    }
     if let Some(g) = geometry_in(state, layout.document) {
         let shown = view::visible(&g.layout, g.top, g.top + layout.document.height());
         let pages: Vec<u32> = g.layout.pages[shown].iter().map(|(page, _)| *page).collect();
@@ -1174,12 +1178,7 @@ unsafe fn finish_markup(hwnd: HWND, state: &mut State) {
     if matches!(kind, AnnotationKind::Note | AnnotationKind::Text) && (x1 - x2).abs() < 3.0 {
         last = [(first[0] + 0.25).min(1.0), (first[1] + 0.08).min(1.0)];
     }
-    let points = if let Some(signature) = &state.signature {
-        signature
-            .iter()
-            .map(|p| [first[0].min(last[0]) + p[0] * (first[0] - last[0]).abs(), first[1].min(last[1]) + p[1] * (first[1] - last[1]).abs()])
-            .collect()
-    } else if kind == AnnotationKind::Ink {
+    let points = if kind == AnnotationKind::Ink {
         state.ink.iter().map(|p| normalized(p[0], p[1])).collect()
     } else {
         vec![first, last]

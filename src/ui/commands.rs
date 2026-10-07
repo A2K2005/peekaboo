@@ -187,13 +187,13 @@ pub(super) fn info(command: Command) -> Info {
         Underline => i("Underline", "&Underline", Some(UNDERLINE), Some('U')),
         Strikethrough => i("Strikethrough", "Stri&kethrough", Some(STRIKETHROUGH), Some('K')),
         Note => i("Note", "&Note...", Some(COMMENT), Some('N')),
-        TextBox => i("Text box", "&Text box...", Some(FONT_SIZE), Some('T')),
+        TextBox => i("Text box", "&Text box", Some(FONT_SIZE), Some('T')),
         Rectangle => i("Rectangle", "&Rectangle", Some(SQUARE), Some('P')),
         Ellipse => i("Ellipse", "&Ellipse", Some(CIRCLE), Some('E')),
         Arrow => i("Arrow", "&Arrow", Some(ARROW), Some('A')),
-        SaveSignature => i("Save drawing as signature", "Sa&ve drawing as signature", Some(SAVE), Some('V')),
-        PlaceSignature => i("Sign", "Place &signature", Some(SIGNATURE), Some('G')),
-        FillForm => i("Fill a form field", "Fill a f&orm field...", Some(DOCUMENT), Some('F')),
+        SaveSignature => i("Draw a new signature", "Draw a ne&w signature", Some(ADD), Some('V')),
+        PlaceSignature => i("Sign", "&Sign", Some(SIGNATURE), Some('G')),
+        FillForm => i("Fill form", "Fill f&orm", Some(DOCUMENT), Some('F')),
         ZoomMenu => i("Zoom", "&Zoom", Some(ZOOM), Some('Z')),
         AppMenu => i("More", "More", Some(MORE), Some('O')),
         MoreTools => i("More tools", "More tools", Some(MORE), Some('O')),
@@ -437,6 +437,7 @@ impl MenuItem {
         self.pick.is_none() && self.children.is_empty()
     }
     /// A plain choice. `label` is shown as is, so `&` is doubled.
+    #[allow(dead_code)]
     pub(super) fn choice(label: &str, index: usize) -> Self {
         Self {
             label: label.replace('&', "&&"),
