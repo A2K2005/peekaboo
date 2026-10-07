@@ -49,10 +49,10 @@ fn page() -> PathBuf {
     };
     imaging::export_frame(&white, &paper).unwrap();
     let page = out.join("page.png");
-    // Lines are drawn out of order. "Right side" sits on the second row but
-    // starts a little higher than "Second line of text".
+    // Lines are drawn out of order. "Right side" sits on the second row, close
+    // after "Second line of text", but starts a little higher.
     let edits = [
-        text([0.7, 0.53], "Right side"),
+        text([0.35, 0.53], "Right side"),
         text([0.05, 0.55], "Second line of text"),
         text([0.05, 0.1], "Preview for Windows 12345"),
     ];
@@ -121,6 +121,42 @@ fn text_layer_has_lines_in_order_and_a_box_per_char() {
         "{:?}",
         cropped.boxes[0]
     );
+}
+
+/// Two columns of three lines each: the left column reads first.
+#[test]
+fn two_columns_keep_column_order() {
+    com();
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("artifacts/ocr")
+        .join(format!("columns-{}", std::process::id()));
+    std::fs::create_dir_all(&out).unwrap();
+    let paper = out.join("paper.png");
+    let white = Frame {
+        width: 1600,
+        height: 600,
+        pixels: vec![255; 1600 * 600 * 4],
+        page_count: 1,
+        source_width: 1600,
+        source_height: 600,
+    };
+    imaging::export_frame(&white, &paper).unwrap();
+    let left = ["Alpha bravo charlie", "Delta echo foxtrot", "Golf hotel india"];
+    let right = ["Kilo lima mike", "November oscar papa", "Quebec romeo sierra"];
+    let mut edits = Vec::new();
+    for (i, (l, r)) in left.iter().zip(right).enumerate() {
+        let y = 0.1 + 0.25 * i as f32;
+        edits.push(text([0.04, y], l));
+        edits.push(text([0.54, y], r));
+    }
+    let page = out.join("columns.png");
+    imaging::export(&paper, &page, &edits).unwrap();
+    let layer = ocr::recognize_layer(&page, &[]).unwrap();
+    println!("{:?}", layer.text);
+    let at = |word: &str| layer.text.find(word).unwrap_or_else(|| panic!("{word} missing: {:?}", layer.text));
+    assert!(at("Alpha") < at("Delta") && at("Delta") < at("Golf"));
+    assert!(at("Golf") < at("Kilo"), "Columns interleaved: {:?}", layer.text);
+    assert!(at("Kilo") < at("November") && at("November") < at("Quebec"));
 }
 
 #[test]

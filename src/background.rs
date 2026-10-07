@@ -7,14 +7,53 @@ use crate::model::{fit_size, Frame, ImageEdit};
 use ort::{session::Session, value::Tensor};
 use std::{
     cell::RefCell,
+    os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
     sync::OnceLock,
     time::Instant,
+};
+use windows::{
+    core::PCWSTR,
+    Win32::{
+        Foundation::{HANDLE, HWND},
+        Security::{
+            Cryptography::{
+                BCryptHash, CertGetNameStringW, BCRYPT_SHA256_ALG_HANDLE,
+                CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            },
+            WinTrust::{
+                WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
+                WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+                WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_FILE,
+                WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+            },
+        },
+        Storage::FileSystem::FILE_SHARE_READ,
+        System::LibraryLoader::{
+            LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
+        },
+    },
 };
 
 const DEPTH: &str = "depth_anything_v2_vits_slim.onnx";
 const MATTING: &str = "snap_matting_0.1.0.onnx";
 const REFINER: &str = "snap_refiner_0.1.0.onnx";
+/// SHA-256 of each model, as in tools/fetch-model.ps1.
+const MODELS: [(&str, &str); 3] = [
+    (
+        DEPTH,
+        "396BC234301510F59FD45ADA24CBB72CDC7CF201F6578DFCE76F42B67BC609F7",
+    ),
+    (
+        MATTING,
+        "094D9B674939CF0F75EDC1DDB768A786345205564E01A727F017A5457335197D",
+    ),
+    (
+        REFINER,
+        "9C10A55FCB01F871B35ACC5DB03DC30A8C92A15C0E445D4D8BA3C8F4DA3C3A80",
+    ),
+];
+const DAMAGED: &str = "The AI pack is damaged or was changed. Install the AI pack again, then try again.";
 /// The refiner's longest side. Full resolution took 4.6 s for 12 MP.
 const REFINE: u32 = 1024;
 /// The depth input's shorter side. 266 kept quality close to the 518 the
@@ -29,46 +68,142 @@ struct Snap {
 thread_local! {static MODEL: RefCell<Option<Snap>> = const { RefCell::new(None) };}
 static RUNTIME: OnceLock<Result<(), String>> = OnceLock::new();
 
-/// The AI pack folder: beside the app, in %LOCALAPPDATA%, or runtime/ai in development.
-fn pack() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe.parent().ok_or("Cannot locate the app.")?;
-    let mut paths = vec![dir.join("ai")];
+/// Folders that may hold the AI pack: beside the app and in the user's
+/// %LOCALAPPDATA%. Debug builds and tests also use the checkout's
+/// runtime/ai. Release builds never look elsewhere: a folder such as
+/// C:\runtime can be created by any user of the PC.
+fn pack_folders(app: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![app.join("ai")];
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         paths.push(PathBuf::from(local).join("PreviewForWindows").join("ai"));
     }
-    #[cfg(test)]
-    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime/ai"));
-    if let Some(root) = dir.parent().and_then(Path::parent) {
-        paths.push(root.join("runtime/ai"));
+    if cfg!(any(test, debug_assertions)) {
+        paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime").join("ai"));
     }
     paths
+}
+fn pack() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe.parent().ok_or("Cannot locate the app.")?;
+    pack_folders(dir)
         .into_iter()
         .find(|p| [ "onnxruntime.dll", DEPTH, MATTING, REFINER].iter().all(|f| p.join(f).is_file()))
         .ok_or_else(|| "Background removal needs the AI pack, which is not installed. Add the AI pack beside Preview, then try again. No image was uploaded.".into())
 }
 fn load(pack: &Path) -> Result<Snap, String> {
     RUNTIME
-        .get_or_init(|| {
-            ort::init_from(pack.join("onnxruntime.dll"))
-                .map(|environment| {
-                    environment.commit();
-                })
-                .map_err(|e| format!("Cannot load background removal: {e}"))
-        })
+        .get_or_init(|| load_runtime(&pack.join("onnxruntime.dll")))
         .clone()?;
     // CPU only. DirectML hung the GPU with the earlier BiRefNet model (see report).
-    let open = |name: &str| {
+    // Each model is read once, checked, and loaded from memory, so the file
+    // cannot change between the check and the load.
+    let open = |(name, hash): (&str, &str)| {
+        let bytes = read_model(&pack.join(name), hash)?;
         Session::builder()
             .map_err(|e| e.to_string())?
-            .commit_from_file(pack.join(name))
+            .commit_from_memory(&bytes)
             .map_err(|e| format!("Cannot load the background model {name}: {e}"))
     };
     Ok(Snap {
-        depth: open(DEPTH)?,
-        matting: open(MATTING)?,
-        refiner: open(REFINER)?,
+        depth: open(MODELS[0])?,
+        matting: open(MODELS[1])?,
+        refiner: open(MODELS[2])?,
     })
+}
+/// Load ONNX Runtime only when Microsoft signed this copy. The file stays
+/// open with no write or delete sharing from the check until both loads
+/// finish, so nobody can replace it in between. Its imports load from its
+/// own folder and System32 only.
+fn load_runtime(dll: &Path) -> Result<(), String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .open(dll)
+        .map_err(|e| format!("Cannot open the AI pack: {e}"))?;
+    verify_microsoft(dll, &file)?;
+    let wide: Vec<u16> = dll.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        LoadLibraryExW(
+            PCWSTR(wide.as_ptr()),
+            None,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    }
+    .map_err(|e| format!("Cannot load background removal: {e}"))?;
+    // ort opens the same path, so Windows returns the module loaded above.
+    let result = ort::init_from(dll)
+        .map(|environment| {
+            environment.commit();
+        })
+        .map_err(|e| format!("Cannot load background removal: {e}"));
+    drop(file);
+    result
+}
+/// Check the Authenticode signature with WinVerifyTrust, offline, and that
+/// the signer is Microsoft Corporation.
+fn verify_microsoft(path: &Path, file: &std::fs::File) -> Result<(), String> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut info = WINTRUST_FILE_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: PCWSTR(wide.as_ptr()),
+        hFile: HANDLE(file.as_raw_handle()),
+        pgKnownSubject: std::ptr::null_mut(),
+    };
+    let mut data = WINTRUST_DATA {
+        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_NONE,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        Anonymous: WINTRUST_DATA_0 { pFile: &mut info },
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        dwProvFlags: WTD_CACHE_ONLY_URL_RETRIEVAL,
+        ..Default::default()
+    };
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let action = &mut action as *mut _;
+    unsafe {
+        let status = WinVerifyTrust(HWND::default(), action, (&mut data as *mut WINTRUST_DATA).cast());
+        let signer = (status == 0)
+            .then(|| {
+                let provider = WTHelperProvDataFromStateData(data.hWVTStateData);
+                let signer = WTHelperGetProvSignerFromChain(provider, 0, false, 0);
+                let certificate = signer.as_ref()?.pasCertChain.as_ref()?.pCert;
+                let mut name = [0u16; 256];
+                let length = CertGetNameStringW(
+                    certificate,
+                    CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                    0,
+                    None,
+                    Some(&mut name),
+                ) as usize;
+                Some(String::from_utf16_lossy(&name[..length.saturating_sub(1)]))
+            })
+            .flatten();
+        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        WinVerifyTrust(HWND::default(), action, (&mut data as *mut WINTRUST_DATA).cast());
+        match signer {
+            Some(name) if name == "Microsoft Corporation" => Ok(()),
+            _ => Err(DAMAGED.into()),
+        }
+    }
+}
+/// Read a model file and check its SHA-256.
+fn read_model(path: &Path, sha256: &str) -> Result<Vec<u8>, String> {
+    let length = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if length > 1 << 30 {
+        return Err(DAMAGED.into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read the AI pack: {e}"))?;
+    let mut digest = [0u8; 32];
+    unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, &bytes, &mut digest) }
+        .ok()
+        .map_err(|e| e.to_string())?;
+    let hex: String = digest.iter().map(|b| format!("{b:02X}")).collect();
+    if hex == sha256 {
+        Ok(bytes)
+    } else {
+        Err(DAMAGED.into())
+    }
 }
 /// Run one model and return its first output's height, width, and values.
 fn run(
@@ -258,6 +393,45 @@ fn sample(mask: &[f32], width: usize, height: usize, x: f32, y: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_pack_loads_only_from_the_app_profile_or_checkout() {
+        // The old search also tried two folders up from the app: C:\runtime\ai.
+        let app = Path::new(r"C:\Tools\Preview");
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let folders = pack_folders(app);
+        assert_eq!(folders[0], app.join("ai"));
+        for folder in &folders {
+            assert!(
+                folder.starts_with(app)
+                    || local.as_ref().is_some_and(|l| folder.starts_with(l))
+                    || folder.starts_with(env!("CARGO_MANIFEST_DIR")),
+                "{folder:?}"
+            );
+        }
+    }
+    #[test]
+    fn only_a_microsoft_signed_runtime_and_known_models_pass() {
+        let pack = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime/ai");
+        let check = |p: &Path| verify_microsoft(p, &std::fs::File::open(p).unwrap());
+        let dll = pack.join("onnxruntime.dll");
+        assert_eq!(check(&dll), Ok(()));
+        // Unsigned: this test program.
+        assert!(check(&std::env::current_exe().unwrap()).is_err());
+        // Signed, then changed by one byte.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("artifacts/background")
+            .join(format!("verify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = std::fs::read(&dll).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
+        let changed = dir.join("onnxruntime.dll");
+        std::fs::write(&changed, bytes).unwrap();
+        assert!(check(&changed).is_err());
+        let (name, hash) = MODELS[1];
+        assert!(read_model(&pack.join(name), hash).is_ok());
+        assert_eq!(read_model(&pack.join(name), MODELS[2].1), Err(DAMAGED.into()));
+    }
     #[test]
     fn depth_sizes_are_patch_multiples() {
         assert_eq!(depth_size(1024, 768), (350, 266));
