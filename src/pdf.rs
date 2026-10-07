@@ -1,4 +1,4 @@
-use crate::model::{frame_bytes, AnnotationKind, Frame, PdfEdit};
+use crate::model::{frame_bytes, AnnotationKind, Frame, NormRect, PdfEdit};
 use std::{
     collections::HashMap,
     ffi::c_void,
@@ -22,8 +22,23 @@ use windows::{
     },
 };
 
+// Each submodule adds `impl PdfEngine` blocks. The paths keep working when
+// tests include this file with `#[path]`.
+#[path = "pdf/forms.rs"]
+mod forms;
+#[path = "pdf/pages.rs"]
+mod pages;
+#[path = "pdf/save.rs"]
+mod save;
+#[path = "pdf/text.rs"]
+mod text;
+
 static ENGINE_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub const PASSWORD_REQUIRED: &str = "This PDF requires a password.";
+#[allow(dead_code)]
+pub const XFA_FORM: &str = "This form needs Adobe Acrobat Reader.";
+#[allow(dead_code)]
+pub const SEARCH_CANCELED: &str = "Search was canceled.";
 struct Password(Vec<u8>);
 impl Drop for Password {
     fn drop(&mut self) {
@@ -56,11 +71,18 @@ struct Point {
     y: f32,
 }
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
 struct Rect {
     left: f32,
     top: f32,
     right: f32,
     bottom: f32,
+}
+#[repr(C)]
+#[derive(Default)]
+struct SizeF {
+    width: f32,
+    height: f32,
 }
 #[repr(C)]
 struct Quad {
@@ -119,8 +141,18 @@ struct FormInfo {
     page: Handle,
     index: i32,
     page_rotation: i32,
+    invalidated: bool,
 }
-unsafe extern "C" fn form_invalidate(_: *mut FormInfo, _: Handle, _: f64, _: f64, _: f64, _: f64) {}
+unsafe extern "C" fn form_invalidate(
+    info: *mut FormInfo,
+    _: Handle,
+    _: f64,
+    _: f64,
+    _: f64,
+    _: f64,
+) {
+    (*info).invalidated = true;
+}
 unsafe extern "C" fn form_cursor(_: *mut FormInfo, _: i32) {}
 unsafe extern "C" fn form_timer(
     _: *mut FormInfo,
@@ -143,19 +175,41 @@ unsafe extern "C" fn form_rotation(info: *mut FormInfo, _: Handle) -> i32 {
     (*info).page_rotation
 }
 
-struct FormSession<'a> {
+/// The document's form-fill environment. It lives as long as the document,
+/// so the inline form session keeps its focus and caret between calls.
+struct Form {
     handle: Handle,
     info: Box<FormInfo>,
-    api: &'a Api,
+    blur: unsafe extern "system" fn(Handle) -> i32,
+    before: unsafe extern "system" fn(Handle, Handle),
+    exit: unsafe extern "system" fn(Handle),
 }
-impl Drop for FormSession<'_> {
-    fn drop(&mut self) {
-        unsafe {
-            (self.api.form_blur)(self.handle);
-            (self.api.form_before)(self.info.page, self.handle);
-            (self.api.form_exit)(self.handle);
-        }
+impl Form {
+    /// Tells the callbacks which page is current. Pass null to clear it.
+    fn target(&mut self, page: Handle, index: u32, rotation: i32) {
+        self.info.page = page;
+        self.info.index = if page.is_null() { -1 } else { index as i32 };
+        self.info.page_rotation = rotation;
     }
+}
+impl Drop for Form {
+    fn drop(&mut self) {
+        unsafe { (self.exit)(self.handle) }
+    }
+}
+
+/// The page that holds the inline form session's focus.
+struct FillPage {
+    index: u32,
+    page: NativeHandle,
+}
+
+/// The field the form session last saw with focus, with the value it had then.
+#[derive(Clone, Debug, PartialEq)]
+struct FocusedField {
+    page: u32,
+    index: u32,
+    value: String,
 }
 
 #[repr(C)]
@@ -191,6 +245,9 @@ impl Drop for Library {
         }
     }
 }
+
+type FieldRead = unsafe extern "system" fn(Handle, Handle, *mut u16, u32) -> u32;
+type MouseEvent = unsafe extern "system" fn(Handle, Handle, i32, f64, f64) -> i32;
 
 struct Api {
     init: unsafe extern "system" fn(),
@@ -252,8 +309,8 @@ struct Api {
     form_char: unsafe extern "system" fn(Handle, Handle, i32, i32) -> i32,
     field_type: unsafe extern "system" fn(Handle, Handle) -> i32,
     field_flags: unsafe extern "system" fn(Handle, Handle) -> i32,
-    field_name: unsafe extern "system" fn(Handle, Handle, *mut u16, u32) -> u32,
-    field_value: unsafe extern "system" fn(Handle, Handle, *mut u16, u32) -> u32,
+    field_name: FieldRead,
+    field_value: FieldRead,
     field_checked: unsafe extern "system" fn(Handle, Handle) -> i32,
     form_draw: unsafe extern "system" fn(Handle, Handle, Handle, i32, i32, i32, i32, i32, i32),
     page_new: unsafe extern "system" fn(Handle, i32, f64, f64) -> Handle,
@@ -267,6 +324,67 @@ struct Api {
     permissions: unsafe extern "system" fn(Handle) -> u32,
     move_pages: unsafe extern "system" fn(Handle, *const i32, u32, i32) -> i32,
     crop_box: unsafe extern "system" fn(Handle, f32, f32, f32, f32),
+    // fpdfview.h
+    page_to_device: unsafe extern "system" fn(
+        Handle,
+        i32,
+        i32,
+        i32,
+        i32,
+        i32,
+        f64,
+        f64,
+        *mut i32,
+        *mut i32,
+    ) -> i32,
+    page_box: unsafe extern "system" fn(Handle, *mut Rect) -> i32,
+    page_size: unsafe extern "system" fn(Handle, i32, *mut SizeF) -> i32,
+    file_version: unsafe extern "system" fn(Handle, *mut i32) -> i32,
+    // fpdf_doc.h
+    meta_text: unsafe extern "system" fn(Handle, *const u8, *mut c_void, u32) -> u32,
+    bookmark_child: unsafe extern "system" fn(Handle, Handle) -> Handle,
+    bookmark_sibling: unsafe extern "system" fn(Handle, Handle) -> Handle,
+    bookmark_title: unsafe extern "system" fn(Handle, *mut c_void, u32) -> u32,
+    bookmark_dest: unsafe extern "system" fn(Handle, Handle) -> Handle,
+    bookmark_action: unsafe extern "system" fn(Handle) -> Handle,
+    action_type: unsafe extern "system" fn(Handle) -> u32,
+    action_dest: unsafe extern "system" fn(Handle, Handle) -> Handle,
+    dest_page: unsafe extern "system" fn(Handle, Handle) -> i32,
+    // fpdf_text.h
+    text_unicode: unsafe extern "system" fn(Handle, i32) -> u32,
+    text_generated: unsafe extern "system" fn(Handle, i32) -> i32,
+    text_loose_box: unsafe extern "system" fn(Handle, i32, *mut Rect) -> i32,
+    find_start: unsafe extern "system" fn(Handle, *const u16, u32, i32) -> Handle,
+    find_next: unsafe extern "system" fn(Handle) -> i32,
+    find_index: unsafe extern "system" fn(Handle) -> i32,
+    find_count: unsafe extern "system" fn(Handle) -> i32,
+    find_close: unsafe extern "system" fn(Handle),
+    text_rects: unsafe extern "system" fn(Handle, i32, i32) -> i32,
+    text_rect:
+        unsafe extern "system" fn(Handle, i32, *mut f64, *mut f64, *mut f64, *mut f64) -> i32,
+    // fpdf_annot.h
+    annot_subtype: unsafe extern "system" fn(Handle) -> i32,
+    annot_get_rect: unsafe extern "system" fn(Handle, *mut Rect) -> i32,
+    annot_get_string: unsafe extern "system" fn(Handle, *const u8, *mut u16, u32) -> u32,
+    annot_remove: unsafe extern "system" fn(Handle, i32) -> i32,
+    annot_linked: unsafe extern "system" fn(Handle, *const u8) -> Handle,
+    annot_index: unsafe extern "system" fn(Handle, Handle) -> i32,
+    annot_set_ap: unsafe extern "system" fn(Handle, i32, *const u16) -> i32,
+    option_count: unsafe extern "system" fn(Handle, Handle) -> i32,
+    option_label: unsafe extern "system" fn(Handle, Handle, i32, *mut u16, u32) -> u32,
+    option_selected: unsafe extern "system" fn(Handle, Handle, i32) -> i32,
+    // fpdf_formfill.h
+    form_down: MouseEvent,
+    form_up: MouseEvent,
+    form_move: MouseEvent,
+    form_key: unsafe extern "system" fn(Handle, Handle, i32, i32) -> i32,
+    form_focused: unsafe extern "system" fn(Handle, *mut i32, *mut Handle) -> i32,
+    form_select_index: unsafe extern "system" fn(Handle, Handle, i32, i32) -> i32,
+    // fpdf_edit.h
+    jpeg_inline: unsafe extern "system" fn(*mut Handle, i32, Handle, *mut FileAccess) -> i32,
+    image_size: unsafe extern "system" fn(Handle, *mut u32, *mut u32) -> i32,
+    // fpdf_flatten.h
+    flatten: unsafe extern "system" fn(Handle, i32) -> i32,
 }
 
 #[repr(C)]
@@ -306,6 +424,79 @@ impl Drop for NativeHandle {
     }
 }
 
+/// A loaded page. Pages loaded while a form environment exists are registered
+/// with it, so form fields draw and respond. The form session's own page is
+/// borrowed, not closed.
+struct Page<'a> {
+    handle: Handle,
+    owned: bool,
+    form: Handle,
+    api: &'a Api,
+}
+impl Drop for Page<'_> {
+    fn drop(&mut self) {
+        if self.owned {
+            unsafe {
+                if !self.form.is_null() {
+                    (self.api.form_before)(self.handle, self.form);
+                }
+                (self.api.close_page)(self.handle);
+            }
+        }
+    }
+}
+
+/// Maps PDF user space to the displayed page: points from the top-left
+/// corner, after rotation and crop. `x' = a x + c y + e`, `y' = b x + d y + f`.
+#[derive(Clone, Copy, Debug)]
+struct Display {
+    m: [f64; 6],
+    width: f64,
+    height: f64,
+}
+impl Display {
+    fn point(&self, x: f64, y: f64) -> (f64, f64) {
+        let [a, b, c, d, e, f] = self.m;
+        (a * x + c * y + e, b * x + d * y + f)
+    }
+    fn user(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let [a, b, c, d, e, f] = self.m;
+        let det = a * d - b * c;
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let (x, y) = (x - e, y - f);
+        Some(((d * x - c * y) / det, (a * y - b * x) / det))
+    }
+    /// A user-space rectangle as `[left, top, right, bottom]` display points.
+    fn rect(&self, left: f64, bottom: f64, right: f64, top: f64) -> [f32; 4] {
+        let corners = [
+            self.point(left, bottom),
+            self.point(right, bottom),
+            self.point(left, top),
+            self.point(right, top),
+        ];
+        let fold = |pick: fn(&(f64, f64)) -> f64, init: f64, f: fn(f64, f64) -> f64| {
+            corners.iter().map(pick).fold(init, f) as f32
+        };
+        [
+            fold(|p| p.0, f64::INFINITY, f64::min),
+            fold(|p| p.1, f64::INFINITY, f64::min),
+            fold(|p| p.0, f64::NEG_INFINITY, f64::max),
+            fold(|p| p.1, f64::NEG_INFINITY, f64::max),
+        ]
+    }
+    fn norm(&self, rect: [f32; 4]) -> NormRect {
+        let (w, h) = (self.width as f32, self.height as f32);
+        [
+            (rect[0] / w).clamp(0.0, 1.0),
+            (rect[1] / h).clamp(0.0, 1.0),
+            (rect[2] / w).clamp(0.0, 1.0),
+            (rect[3] / h).clamp(0.0, 1.0),
+        ]
+    }
+}
+
 struct Document {
     native: NativeHandle,
     // Both allocations must outlive the native document and keep stable addresses.
@@ -314,6 +505,22 @@ struct Document {
     path: PathBuf,
     edits: Vec<PdfEdit>,
     stamp: FileStamp,
+    form: Option<Form>,
+    fill: Option<FillPage>,
+    focus: Option<FocusedField>,
+}
+impl Drop for Document {
+    fn drop(&mut self) {
+        // Close the session page and the form environment before the document.
+        if let (Some(fill), Some(form)) = (self.fill.take(), self.form.as_ref()) {
+            unsafe {
+                (form.blur)(form.handle);
+                (form.before)(fill.page.handle, form.handle);
+            }
+            drop(fill);
+        }
+        self.form.take();
+    }
 }
 
 pub struct PdfEngine {
@@ -325,7 +532,6 @@ pub struct PdfEngine {
     // PDFium is process-global and not thread-safe. The engine cannot leave its worker.
     _thread: PhantomData<Rc<()>>,
 }
-
 impl PdfEngine {
     pub fn new() -> Result<Self, String> {
         if ENGINE_ACTIVE
@@ -374,244 +580,120 @@ impl PdfEngine {
                 )
                 .map_err(|e| format!("Cannot load PDF support: {e}"))?,
             );
+            // Each field's type in `Api` gives the signature from the PDFium header.
             macro_rules! symbol {
-                ($name:literal, $type:ty) => {{
+                ($name:literal) => {{
                     let address = GetProcAddress(library.0, PCSTR(concat!($name, "\0").as_ptr()))
                         .ok_or(concat!("PDF runtime is missing ", $name))?;
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, $type>(address)
+                    std::mem::transmute::<unsafe extern "system" fn() -> isize, _>(address)
                 }};
             }
             let api = Api {
-                init: symbol!("FPDF_InitLibrary", unsafe extern "system" fn()),
-                destroy: symbol!("FPDF_DestroyLibrary", unsafe extern "system" fn()),
-                load: symbol!(
-                    "FPDF_LoadCustomDocument",
-                    unsafe extern "system" fn(*mut FileAccess, *const u8) -> Handle
-                ),
-                close_doc: symbol!("FPDF_CloseDocument", unsafe extern "system" fn(Handle)),
-                count: symbol!(
-                    "FPDF_GetPageCount",
-                    unsafe extern "system" fn(Handle) -> i32
-                ),
-                load_page: symbol!(
-                    "FPDF_LoadPage",
-                    unsafe extern "system" fn(Handle, i32) -> Handle
-                ),
-                close_page: symbol!("FPDF_ClosePage", unsafe extern "system" fn(Handle)),
-                width: symbol!(
-                    "FPDF_GetPageWidthF",
-                    unsafe extern "system" fn(Handle) -> f32
-                ),
-                height: symbol!(
-                    "FPDF_GetPageHeightF",
-                    unsafe extern "system" fn(Handle) -> f32
-                ),
-                bitmap: symbol!(
-                    "FPDFBitmap_CreateEx",
-                    unsafe extern "system" fn(i32, i32, i32, *mut c_void, i32) -> Handle
-                ),
-                close_bitmap: symbol!("FPDFBitmap_Destroy", unsafe extern "system" fn(Handle)),
-                render: symbol!(
-                    "FPDF_RenderPageBitmap",
-                    unsafe extern "system" fn(Handle, Handle, i32, i32, i32, i32, i32, i32)
-                ),
-                error: symbol!("FPDF_GetLastError", unsafe extern "system" fn() -> u32),
-                rotation: symbol!(
-                    "FPDFPage_GetRotation",
-                    unsafe extern "system" fn(Handle) -> i32
-                ),
-                set_rotation: symbol!(
-                    "FPDFPage_SetRotation",
-                    unsafe extern "system" fn(Handle, i32)
-                ),
-                delete: symbol!("FPDFPage_Delete", unsafe extern "system" fn(Handle, i32)),
-                create: symbol!(
-                    "FPDF_CreateNewDocument",
-                    unsafe extern "system" fn() -> Handle
-                ),
-                import: symbol!(
-                    "FPDF_ImportPagesByIndex",
-                    unsafe extern "system" fn(Handle, Handle, *const i32, u32, i32) -> i32
-                ),
-                form_type: symbol!("FPDF_GetFormType", unsafe extern "system" fn(Handle) -> i32),
-                save: symbol!(
-                    "FPDF_SaveAsCopy",
-                    unsafe extern "system" fn(Handle, *mut FileWrite, u32) -> i32
-                ),
-                text_load: symbol!(
-                    "FPDFText_LoadPage",
-                    unsafe extern "system" fn(Handle) -> Handle
-                ),
-                text_close: symbol!("FPDFText_ClosePage", unsafe extern "system" fn(Handle)),
-                text_count: symbol!(
-                    "FPDFText_CountChars",
-                    unsafe extern "system" fn(Handle) -> i32
-                ),
-                text_get: symbol!(
-                    "FPDFText_GetText",
-                    unsafe extern "system" fn(Handle, i32, i32, *mut u16) -> i32
-                ),
-                device_to_page: symbol!(
-                    "FPDF_DeviceToPage",
-                    unsafe extern "system" fn(
-                        Handle,
-                        i32,
-                        i32,
-                        i32,
-                        i32,
-                        i32,
-                        i32,
-                        i32,
-                        *mut f64,
-                        *mut f64,
-                    ) -> i32
-                ),
-                annot_create: symbol!(
-                    "FPDFPage_CreateAnnot",
-                    unsafe extern "system" fn(Handle, i32) -> Handle
-                ),
-                annot_close: symbol!("FPDFPage_CloseAnnot", unsafe extern "system" fn(Handle)),
-                annot_rect: symbol!(
-                    "FPDFAnnot_SetRect",
-                    unsafe extern "system" fn(Handle, *const Rect) -> i32
-                ),
-                annot_color: symbol!(
-                    "FPDFAnnot_SetColor",
-                    unsafe extern "system" fn(Handle, i32, u32, u32, u32, u32) -> i32
-                ),
-                annot_flags: symbol!(
-                    "FPDFAnnot_SetFlags",
-                    unsafe extern "system" fn(Handle, i32) -> i32
-                ),
-                annot_border: symbol!(
-                    "FPDFAnnot_SetBorder",
-                    unsafe extern "system" fn(Handle, f32, f32, f32) -> i32
-                ),
-                annot_string: symbol!(
-                    "FPDFAnnot_SetStringValue",
-                    unsafe extern "system" fn(Handle, *const u8, *const u16) -> i32
-                ),
-                annot_ink: symbol!(
-                    "FPDFAnnot_AddInkStroke",
-                    unsafe extern "system" fn(Handle, *const Point, usize) -> i32
-                ),
-                annot_quad: symbol!(
-                    "FPDFAnnot_AppendAttachmentPoints",
-                    unsafe extern "system" fn(Handle, *const Quad) -> i32
-                ),
-                annot_ap: symbol!(
-                    "FPDFAnnot_GetAP",
-                    unsafe extern "system" fn(Handle, i32, *mut u16, u32) -> u32
-                ),
-                annot_count: symbol!(
-                    "FPDFPage_GetAnnotCount",
-                    unsafe extern "system" fn(Handle) -> i32
-                ),
-                annot_get: symbol!(
-                    "FPDFPage_GetAnnot",
-                    unsafe extern "system" fn(Handle, i32) -> Handle
-                ),
-                form_init: symbol!(
-                    "FPDFDOC_InitFormFillEnvironment",
-                    unsafe extern "system" fn(Handle, *mut FormInfo) -> Handle
-                ),
-                form_exit: symbol!(
-                    "FPDFDOC_ExitFormFillEnvironment",
-                    unsafe extern "system" fn(Handle)
-                ),
-                form_after: symbol!(
-                    "FORM_OnAfterLoadPage",
-                    unsafe extern "system" fn(Handle, Handle)
-                ),
-                form_before: symbol!(
-                    "FORM_OnBeforeClosePage",
-                    unsafe extern "system" fn(Handle, Handle)
-                ),
-                form_focus: symbol!(
-                    "FORM_SetFocusedAnnot",
-                    unsafe extern "system" fn(Handle, Handle) -> i32
-                ),
-                form_blur: symbol!(
-                    "FORM_ForceToKillFocus",
-                    unsafe extern "system" fn(Handle) -> i32
-                ),
-                form_select: symbol!(
-                    "FORM_SelectAllText",
-                    unsafe extern "system" fn(Handle, Handle) -> i32
-                ),
-                form_replace: symbol!(
-                    "FORM_ReplaceSelection",
-                    unsafe extern "system" fn(Handle, Handle, *const u16)
-                ),
-                form_char: symbol!(
-                    "FORM_OnChar",
-                    unsafe extern "system" fn(Handle, Handle, i32, i32) -> i32
-                ),
-                field_type: symbol!(
-                    "FPDFAnnot_GetFormFieldType",
-                    unsafe extern "system" fn(Handle, Handle) -> i32
-                ),
-                field_flags: symbol!(
-                    "FPDFAnnot_GetFormFieldFlags",
-                    unsafe extern "system" fn(Handle, Handle) -> i32
-                ),
-                field_name: symbol!(
-                    "FPDFAnnot_GetFormFieldName",
-                    unsafe extern "system" fn(Handle, Handle, *mut u16, u32) -> u32
-                ),
-                field_value: symbol!(
-                    "FPDFAnnot_GetFormFieldValue",
-                    unsafe extern "system" fn(Handle, Handle, *mut u16, u32) -> u32
-                ),
-                field_checked: symbol!(
-                    "FPDFAnnot_IsChecked",
-                    unsafe extern "system" fn(Handle, Handle) -> i32
-                ),
-                form_draw: symbol!(
-                    "FPDF_FFLDraw",
-                    unsafe extern "system" fn(Handle, Handle, Handle, i32, i32, i32, i32, i32, i32)
-                ),
-                page_new: symbol!(
-                    "FPDFPage_New",
-                    unsafe extern "system" fn(Handle, i32, f64, f64) -> Handle
-                ),
-                image_new: symbol!(
-                    "FPDFPageObj_NewImageObj",
-                    unsafe extern "system" fn(Handle) -> Handle
-                ),
-                object_destroy: symbol!("FPDFPageObj_Destroy", unsafe extern "system" fn(Handle)),
-                image_bitmap: symbol!(
-                    "FPDFImageObj_SetBitmap",
-                    unsafe extern "system" fn(*mut Handle, i32, Handle, Handle) -> i32
-                ),
-                image_matrix: symbol!(
-                    "FPDFImageObj_SetMatrix",
-                    unsafe extern "system" fn(Handle, f64, f64, f64, f64, f64, f64) -> i32
-                ),
-                page_insert: symbol!(
-                    "FPDFPage_InsertObject",
-                    unsafe extern "system" fn(Handle, Handle) -> i32
-                ),
-                page_generate: symbol!(
-                    "FPDFPage_GenerateContent",
-                    unsafe extern "system" fn(Handle) -> i32
-                ),
-                security_revision: symbol!(
-                    "FPDF_GetSecurityHandlerRevision",
-                    unsafe extern "system" fn(Handle) -> i32
-                ),
-                permissions: symbol!(
-                    "FPDF_GetDocPermissions",
-                    unsafe extern "system" fn(Handle) -> u32
-                ),
-                move_pages: symbol!(
-                    "FPDF_MovePages",
-                    unsafe extern "system" fn(Handle, *const i32, u32, i32) -> i32
-                ),
-                crop_box: symbol!(
-                    "FPDFPage_SetCropBox",
-                    unsafe extern "system" fn(Handle, f32, f32, f32, f32)
-                ),
+                init: symbol!("FPDF_InitLibrary"),
+                destroy: symbol!("FPDF_DestroyLibrary"),
+                load: symbol!("FPDF_LoadCustomDocument"),
+                close_doc: symbol!("FPDF_CloseDocument"),
+                count: symbol!("FPDF_GetPageCount"),
+                load_page: symbol!("FPDF_LoadPage"),
+                close_page: symbol!("FPDF_ClosePage"),
+                width: symbol!("FPDF_GetPageWidthF"),
+                height: symbol!("FPDF_GetPageHeightF"),
+                bitmap: symbol!("FPDFBitmap_CreateEx"),
+                close_bitmap: symbol!("FPDFBitmap_Destroy"),
+                render: symbol!("FPDF_RenderPageBitmap"),
+                error: symbol!("FPDF_GetLastError"),
+                rotation: symbol!("FPDFPage_GetRotation"),
+                set_rotation: symbol!("FPDFPage_SetRotation"),
+                delete: symbol!("FPDFPage_Delete"),
+                create: symbol!("FPDF_CreateNewDocument"),
+                import: symbol!("FPDF_ImportPagesByIndex"),
+                form_type: symbol!("FPDF_GetFormType"),
+                save: symbol!("FPDF_SaveAsCopy"),
+                text_load: symbol!("FPDFText_LoadPage"),
+                text_close: symbol!("FPDFText_ClosePage"),
+                text_count: symbol!("FPDFText_CountChars"),
+                text_get: symbol!("FPDFText_GetText"),
+                device_to_page: symbol!("FPDF_DeviceToPage"),
+                annot_create: symbol!("FPDFPage_CreateAnnot"),
+                annot_close: symbol!("FPDFPage_CloseAnnot"),
+                annot_rect: symbol!("FPDFAnnot_SetRect"),
+                annot_color: symbol!("FPDFAnnot_SetColor"),
+                annot_flags: symbol!("FPDFAnnot_SetFlags"),
+                annot_border: symbol!("FPDFAnnot_SetBorder"),
+                annot_string: symbol!("FPDFAnnot_SetStringValue"),
+                annot_ink: symbol!("FPDFAnnot_AddInkStroke"),
+                annot_quad: symbol!("FPDFAnnot_AppendAttachmentPoints"),
+                annot_ap: symbol!("FPDFAnnot_GetAP"),
+                annot_count: symbol!("FPDFPage_GetAnnotCount"),
+                annot_get: symbol!("FPDFPage_GetAnnot"),
+                form_init: symbol!("FPDFDOC_InitFormFillEnvironment"),
+                form_exit: symbol!("FPDFDOC_ExitFormFillEnvironment"),
+                form_after: symbol!("FORM_OnAfterLoadPage"),
+                form_before: symbol!("FORM_OnBeforeClosePage"),
+                form_focus: symbol!("FORM_SetFocusedAnnot"),
+                form_blur: symbol!("FORM_ForceToKillFocus"),
+                form_select: symbol!("FORM_SelectAllText"),
+                form_replace: symbol!("FORM_ReplaceSelection"),
+                form_char: symbol!("FORM_OnChar"),
+                field_type: symbol!("FPDFAnnot_GetFormFieldType"),
+                field_flags: symbol!("FPDFAnnot_GetFormFieldFlags"),
+                field_name: symbol!("FPDFAnnot_GetFormFieldName"),
+                field_value: symbol!("FPDFAnnot_GetFormFieldValue"),
+                field_checked: symbol!("FPDFAnnot_IsChecked"),
+                form_draw: symbol!("FPDF_FFLDraw"),
+                page_new: symbol!("FPDFPage_New"),
+                image_new: symbol!("FPDFPageObj_NewImageObj"),
+                object_destroy: symbol!("FPDFPageObj_Destroy"),
+                image_bitmap: symbol!("FPDFImageObj_SetBitmap"),
+                image_matrix: symbol!("FPDFImageObj_SetMatrix"),
+                page_insert: symbol!("FPDFPage_InsertObject"),
+                page_generate: symbol!("FPDFPage_GenerateContent"),
+                security_revision: symbol!("FPDF_GetSecurityHandlerRevision"),
+                permissions: symbol!("FPDF_GetDocPermissions"),
+                move_pages: symbol!("FPDF_MovePages"),
+                crop_box: symbol!("FPDFPage_SetCropBox"),
+                page_to_device: symbol!("FPDF_PageToDevice"),
+                page_box: symbol!("FPDF_GetPageBoundingBox"),
+                page_size: symbol!("FPDF_GetPageSizeByIndexF"),
+                file_version: symbol!("FPDF_GetFileVersion"),
+                meta_text: symbol!("FPDF_GetMetaText"),
+                bookmark_child: symbol!("FPDFBookmark_GetFirstChild"),
+                bookmark_sibling: symbol!("FPDFBookmark_GetNextSibling"),
+                bookmark_title: symbol!("FPDFBookmark_GetTitle"),
+                bookmark_dest: symbol!("FPDFBookmark_GetDest"),
+                bookmark_action: symbol!("FPDFBookmark_GetAction"),
+                action_type: symbol!("FPDFAction_GetType"),
+                action_dest: symbol!("FPDFAction_GetDest"),
+                dest_page: symbol!("FPDFDest_GetDestPageIndex"),
+                text_unicode: symbol!("FPDFText_GetUnicode"),
+                text_generated: symbol!("FPDFText_IsGenerated"),
+                text_loose_box: symbol!("FPDFText_GetLooseCharBox"),
+                find_start: symbol!("FPDFText_FindStart"),
+                find_next: symbol!("FPDFText_FindNext"),
+                find_index: symbol!("FPDFText_GetSchResultIndex"),
+                find_count: symbol!("FPDFText_GetSchCount"),
+                find_close: symbol!("FPDFText_FindClose"),
+                text_rects: symbol!("FPDFText_CountRects"),
+                text_rect: symbol!("FPDFText_GetRect"),
+                annot_subtype: symbol!("FPDFAnnot_GetSubtype"),
+                annot_get_rect: symbol!("FPDFAnnot_GetRect"),
+                annot_get_string: symbol!("FPDFAnnot_GetStringValue"),
+                annot_remove: symbol!("FPDFPage_RemoveAnnot"),
+                annot_linked: symbol!("FPDFAnnot_GetLinkedAnnot"),
+                annot_index: symbol!("FPDFPage_GetAnnotIndex"),
+                annot_set_ap: symbol!("FPDFAnnot_SetAP"),
+                option_count: symbol!("FPDFAnnot_GetOptionCount"),
+                option_label: symbol!("FPDFAnnot_GetOptionLabel"),
+                option_selected: symbol!("FPDFAnnot_IsOptionSelected"),
+                form_down: symbol!("FORM_OnLButtonDown"),
+                form_up: symbol!("FORM_OnLButtonUp"),
+                form_move: symbol!("FORM_OnMouseMove"),
+                form_key: symbol!("FORM_OnKeyDown"),
+                form_focused: symbol!("FORM_GetFocusedAnnot"),
+                form_select_index: symbol!("FORM_SetIndexSelected"),
+                jpeg_inline: symbol!("FPDFImageObj_LoadJpegFileInline"),
+                image_size: symbol!("FPDFImageObj_GetImagePixelSize"),
+                flatten: symbol!("FPDFPage_Flatten"),
             };
             (api.init)();
             Ok(Self {
@@ -688,7 +770,7 @@ impl PdfEngine {
                 }
                 .into());
             }
-            let document = Document {
+            let mut document = Document {
                 native: NativeHandle {
                     handle,
                     close: self.api.close_doc,
@@ -698,6 +780,9 @@ impl PdfEngine {
                 path,
                 edits: edits.to_vec(),
                 stamp: source_stamp,
+                form: None,
+                fill: None,
+                focus: None,
             };
             let permissions = (self.api.permissions)(handle);
             for edit in edits {
@@ -705,354 +790,169 @@ impl PdfEngine {
                     PdfEdit::FillField { .. } => {
                         permissions & (1 << 8) != 0 || permissions & (1 << 5) != 0
                     }
-                    PdfEdit::Annotate { .. } => permissions & (1 << 5) != 0,
+                    PdfEdit::Annotate { .. }
+                    | PdfEdit::DeleteAnnotation { .. }
+                    | PdfEdit::SetAnnotationText { .. } => permissions & (1 << 5) != 0,
                     _ => permissions & (1 << 3) != 0 || permissions & (1 << 10) != 0,
                 };
                 if !allowed {
                     return Err("This PDF's permissions do not allow this edit.".into());
                 }
-                let count = (self.api.count)(handle);
-                if count <= 0 {
-                    return Err("This PDF has no editable pages.".into());
-                }
-                let page_index = match *edit {
-                    PdfEdit::RotateRight { page }
-                    | PdfEdit::Delete { page }
-                    | PdfEdit::Annotate { page, .. }
-                    | PdfEdit::FillField { page, .. }
-                    | PdfEdit::Crop { page, .. } => page,
-                    PdfEdit::Move { from, to } => {
-                        if to >= count as u32 {
-                            return Err("Choose a page position within this PDF.".into());
-                        }
-                        from
-                    }
-                    PdfEdit::InsertBlank { at } => {
-                        if at > count as u32 {
-                            return Err("Choose an insertion position within this PDF.".into());
-                        }
-                        at.min(count as u32 - 1)
-                    }
-                };
-                if count <= 0 || page_index >= count as u32 {
-                    return Err("This PDF page does not exist.".into());
-                }
-                match *edit {
-                    PdfEdit::Move { from, to } => {
-                        let index = from as i32;
-                        if from != to && (self.api.move_pages)(handle, &index, 1, to as i32) == 0 {
-                            return Err(
-                                "Could not move this page. The original document is unchanged."
-                                    .into(),
-                            );
-                        }
-                    }
-                    PdfEdit::InsertBlank { at } => {
-                        let neighbor = self.page(handle, page_index)?;
-                        let width = dimension((self.api.width)(neighbor.handle))?;
-                        let height = dimension((self.api.height)(neighbor.handle))?;
-                        drop(neighbor);
-                        let inserted =
-                            (self.api.page_new)(handle, at as i32, width as f64, height as f64);
-                        if inserted.is_null() {
-                            return Err("Cannot insert a blank page.".into());
-                        }
-                        let _page = NativeHandle {
-                            handle: inserted,
-                            close: self.api.close_page,
-                        };
-                        if (self.api.count)(handle) != count + 1 {
-                            return Err("The blank page was not inserted.".into());
-                        }
-                    }
-                    PdfEdit::Crop {
-                        left,
-                        top,
-                        right,
-                        bottom,
-                        ..
-                    } => {
-                        if [left, top, right, bottom]
-                            .iter()
-                            .any(|n| !n.is_finite() || !(0.0..=1.0).contains(n))
-                            || left >= right
-                            || top >= bottom
-                        {
-                            return Err("Select a crop rectangle inside this PDF page.".into());
-                        }
-                        let page = self.page(handle, page_index)?;
-                        let mut points = Vec::with_capacity(4);
-                        for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
-                            let (mut px, mut py) = (0.0, 0.0);
-                            if (self.api.device_to_page)(
-                                page.handle,
-                                0,
-                                0,
-                                100_000,
-                                100_000,
-                                0,
-                                (x * 100_000.0).round() as i32,
-                                (y * 100_000.0).round() as i32,
-                                &mut px,
-                                &mut py,
-                            ) == 0
-                                || !px.is_finite()
-                                || !py.is_finite()
-                            {
-                                return Err("Cannot map the crop to this page.".into());
-                            }
-                            points.push((px as f32, py as f32));
-                        }
-                        let l = points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-                        let r = points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-                        let b = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-                        let t = points.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-                        if r - l < 1.0 || t - b < 1.0 {
-                            return Err("The PDF crop selection is too small.".into());
-                        }
-                        (self.api.crop_box)(page.handle, l, b, r, t);
-                    }
-                    PdfEdit::RotateRight { .. } => {
-                        let page = self.page(handle, page_index)?;
-                        let rotation = (self.api.rotation)(page.handle);
-                        if rotation < 0 {
-                            return Err("Cannot read page rotation.".into());
-                        }
-                        (self.api.set_rotation)(page.handle, (rotation + 1) % 4);
-                    }
-                    PdfEdit::Delete { .. } => {
-                        if count <= 1 {
-                            return Err("A PDF must keep at least one page.".into());
-                        }
-                        (self.api.delete)(handle, page_index as i32);
-                        if (self.api.count)(handle) != count - 1 {
-                            return Err("Cannot delete this PDF page.".into());
-                        }
-                    }
-                    PdfEdit::FillField {
-                        annotation_index,
-                        ref value,
-                        ..
-                    } => {
-                        let page = self.page(handle, page_index)?;
-                        self.fill_field(handle, page.handle, page_index, annotation_index, value)?;
-                    }
-                    PdfEdit::Annotate {
-                        kind,
-                        ref points,
-                        ref text,
-                        ..
-                    } => {
-                        let page = self.page(handle, page_index)?;
-                        self.annotate(page.handle, kind, points, text)?;
-                    }
-                }
+                self.apply(&mut document, edit)?;
             }
             Ok(document)
         }
     }
 
-    fn page(&self, document: Handle, index: u32) -> Result<NativeHandle, String> {
+    /// Applies one recipe step to an open document.
+    fn apply(&self, document: &mut Document, edit: &PdfEdit) -> Result<(), String> {
+        let handle = document.native.handle;
         unsafe {
-            let count = (self.api.count)(document);
-            if count <= 0 || index >= count as u32 {
+            let count = (self.api.count)(handle);
+            if count <= 0 {
+                return Err("This PDF has no editable pages.".into());
+            }
+            let page_index = match *edit {
+                PdfEdit::RotateRight { page }
+                | PdfEdit::Delete { page }
+                | PdfEdit::Annotate { page, .. }
+                | PdfEdit::FillField { page, .. }
+                | PdfEdit::Crop { page, .. }
+                | PdfEdit::DeleteAnnotation { page, .. }
+                | PdfEdit::SetAnnotationText { page, .. } => page,
+                PdfEdit::Move { from, to } => {
+                    if to >= count as u32 {
+                        return Err("Choose a page position within this PDF.".into());
+                    }
+                    from
+                }
+                PdfEdit::InsertBlank { at } | PdfEdit::InsertImage { at, .. } => {
+                    if at > count as u32 {
+                        return Err("Choose an insertion position within this PDF.".into());
+                    }
+                    at.min(count as u32 - 1)
+                }
+            };
+            if page_index >= count as u32 {
                 return Err("This PDF page does not exist.".into());
             }
-            let handle = (self.api.load_page)(document, index as i32);
-            if handle.is_null() {
-                return Err("This PDF page could not be read.".into());
-            }
-            Ok(NativeHandle {
-                handle,
-                close: self.api.close_page,
-            })
-        }
-    }
-
-    fn form_session(
-        &self,
-        document: Handle,
-        page: Handle,
-        index: u32,
-    ) -> Result<FormSession<'_>, String> {
-        unsafe {
-            if (self.api.form_type)(document) != 1 {
-                return Err("This document does not contain supported AcroForm fields. XFA forms require another reader.".into());
-            }
-            let mut info = Box::new(FormInfo {
-                version: 1,
-                release: None,
-                invalidate: Some(form_invalidate),
-                selected: None,
-                cursor: Some(form_cursor),
-                timer: Some(form_timer),
-                kill_timer: Some(form_cursor),
-                local_time: None,
-                change: None,
-                get_page: Some(form_page),
-                current_page: Some(form_current),
-                rotation: Some(form_rotation),
-                named_action: None,
-                focus: None,
-                uri: None,
-                goto: None,
-                javascript: std::ptr::null_mut(),
-                page,
-                index: index as i32,
-                page_rotation: (self.api.rotation)(page),
-            });
-            let handle = (self.api.form_init)(document, &mut *info);
-            if handle.is_null() {
-                return Err("Cannot initialize PDF form fields.".into());
-            }
-            (self.api.form_after)(page, handle);
-            Ok(FormSession {
-                handle,
-                info,
-                api: &self.api,
-            })
-        }
-    }
-
-    fn field_string(
-        &self,
-        form: Handle,
-        annotation: Handle,
-        read: unsafe extern "system" fn(Handle, Handle, *mut u16, u32) -> u32,
-    ) -> Result<String, String> {
-        unsafe {
-            let size = read(form, annotation, std::ptr::null_mut(), 0);
-            if size < 2 || size > 2_000_000 || size % 2 != 0 {
-                return Err("Cannot read this form field.".into());
-            }
-            let mut buffer = vec![0u16; size as usize / 2];
-            if read(form, annotation, buffer.as_mut_ptr(), size) != size {
-                return Err("Cannot read this form field.".into());
-            }
-            Ok(String::from_utf16_lossy(&buffer[..buffer.len() - 1]))
-        }
-    }
-
-    pub fn form_fields(
-        &mut self,
-        path: &Path,
-        page_index: u32,
-        edits: &[PdfEdit],
-    ) -> Result<Vec<FormField>, String> {
-        self.ensure(path, edits)?;
-        let doc = self
-            .document
-            .as_ref()
-            .ok_or("No PDF is open.")?
-            .native
-            .handle;
-        let page = self.page(doc, page_index)?;
-        let form = self.form_session(doc, page.handle, page_index)?;
-        let mut fields = Vec::new();
-        unsafe {
-            let count = (self.api.annot_count)(page.handle);
-            for index in 0..count {
-                let handle = (self.api.annot_get)(page.handle, index);
-                if handle.is_null() {
-                    return Err("Cannot read a page annotation.".into());
+            match *edit {
+                PdfEdit::Move { from, to } => {
+                    let index = from as i32;
+                    if from != to && (self.api.move_pages)(handle, &index, 1, to as i32) == 0 {
+                        return Err(
+                            "Could not move this page. The original document is unchanged.".into(),
+                        );
+                    }
                 }
-                let annotation = NativeHandle {
-                    handle,
-                    close: self.api.annot_close,
-                };
-                let kind = match (self.api.field_type)(form.handle, handle) {
-                    -1 | 0 => continue,
-                    6 => FormFieldKind::Text,
-                    2 => FormFieldKind::Checkbox,
-                    _ => FormFieldKind::Unsupported,
-                };
-                let flags = (self.api.field_flags)(form.handle, handle);
-                let value = if kind == FormFieldKind::Checkbox {
-                    ((self.api.field_checked)(form.handle, handle) != 0).to_string()
-                } else {
-                    self.field_string(form.handle, handle, self.api.field_value)?
-                };
-                let name =
-                    self.field_string(form.handle, annotation.handle, self.api.field_name)?;
-                fields.push(FormField {
-                    page: page_index,
-                    annotation_index: index as u32,
-                    name,
-                    value,
+                PdfEdit::InsertBlank { at } => {
+                    let (width, height) = self.api.page_size(handle, page_index)?;
+                    let inserted =
+                        (self.api.page_new)(handle, at as i32, width as f64, height as f64);
+                    if inserted.is_null() {
+                        return Err("Cannot insert a blank page.".into());
+                    }
+                    let _page = NativeHandle {
+                        handle: inserted,
+                        close: self.api.close_page,
+                    };
+                    if (self.api.count)(handle) != count + 1 {
+                        return Err("The blank page was not inserted.".into());
+                    }
+                }
+                PdfEdit::InsertImage { at, ref path } => {
+                    self.insert_image(handle, at, path, pages::ImageFit::Neighbor)?;
+                }
+                PdfEdit::Crop {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    ..
+                } => {
+                    if [left, top, right, bottom]
+                        .iter()
+                        .any(|n| !n.is_finite() || !(0.0..=1.0).contains(n))
+                        || left >= right
+                        || top >= bottom
+                    {
+                        return Err("Select a crop rectangle inside this PDF page.".into());
+                    }
+                    let page = self.api.page(handle, page_index)?;
+                    let mut points = Vec::with_capacity(4);
+                    for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
+                        let (mut px, mut py) = (0.0, 0.0);
+                        if (self.api.device_to_page)(
+                            page.handle,
+                            0,
+                            0,
+                            100_000,
+                            100_000,
+                            0,
+                            (x * 100_000.0).round() as i32,
+                            (y * 100_000.0).round() as i32,
+                            &mut px,
+                            &mut py,
+                        ) == 0
+                            || !px.is_finite()
+                            || !py.is_finite()
+                        {
+                            return Err("Cannot map the crop to this page.".into());
+                        }
+                        points.push((px as f32, py as f32));
+                    }
+                    let l = points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+                    let r = points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+                    let b = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+                    let t = points.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+                    if r - l < 1.0 || t - b < 1.0 {
+                        return Err("The PDF crop selection is too small.".into());
+                    }
+                    (self.api.crop_box)(page.handle, l, b, r, t);
+                }
+                PdfEdit::RotateRight { .. } => {
+                    let page = self.api.page(handle, page_index)?;
+                    let rotation = (self.api.rotation)(page.handle);
+                    if rotation < 0 {
+                        return Err("Cannot read page rotation.".into());
+                    }
+                    (self.api.set_rotation)(page.handle, (rotation + 1) % 4);
+                }
+                PdfEdit::Delete { .. } => {
+                    if count <= 1 {
+                        return Err("A PDF must keep at least one page.".into());
+                    }
+                    (self.api.delete)(handle, page_index as i32);
+                    if (self.api.count)(handle) != count - 1 {
+                        return Err("Cannot delete this PDF page.".into());
+                    }
+                }
+                PdfEdit::FillField {
+                    annotation_index,
+                    ref value,
+                    ..
+                } => {
+                    self.fill_field(document, page_index, annotation_index, value)?;
+                }
+                PdfEdit::Annotate {
                     kind,
-                    read_only: flags < 0 || flags & 1 != 0,
-                });
-            }
-        }
-        Ok(fields)
-    }
-
-    fn fill_field(
-        &self,
-        document: Handle,
-        page: Handle,
-        page_index: u32,
-        index: u32,
-        value: &str,
-    ) -> Result<(), String> {
-        if value.len() > 32_000 || value.contains('\0') {
-            return Err("Form text is too long or contains invalid characters.".into());
-        }
-        let form = self.form_session(document, page, page_index)?;
-        unsafe {
-            let count = (self.api.annot_count)(page);
-            if count <= 0 || index >= count as u32 {
-                return Err("The form field no longer exists.".into());
-            }
-            let handle = (self.api.annot_get)(page, index as i32);
-            if handle.is_null() {
-                return Err("Cannot read the form field.".into());
-            }
-            let annotation = NativeHandle {
-                handle,
-                close: self.api.annot_close,
-            };
-            let flags = (self.api.field_flags)(form.handle, handle);
-            if flags < 0 || flags & 1 != 0 {
-                return Err("This form field is read-only.".into());
-            }
-            let kind = (self.api.field_type)(form.handle, handle);
-            if kind != 6 && kind != 2 {
-                return Err(
-                    "This field type is not yet editable. Its original value is preserved.".into(),
-                );
-            }
-            if (self.api.form_focus)(form.handle, annotation.handle) == 0 {
-                return Err("Cannot focus this form field.".into());
-            }
-            if kind == 6 {
-                if (self.api.form_select)(form.handle, page) == 0 {
-                    return Err("Cannot select the field text.".into());
+                    ref points,
+                    ref text,
+                    ..
+                } => {
+                    let page = self.api.page(handle, page_index)?;
+                    self.annotate(page.handle, kind, points, text)?;
                 }
-                let text: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
-                (self.api.form_replace)(form.handle, page, text.as_ptr());
-            } else {
-                let desired = match value {
-                    "true" => true,
-                    "false" => false,
-                    _ => return Err("Checkbox values must be true or false.".into()),
-                };
-                if desired != ((self.api.field_checked)(form.handle, handle) != 0)
-                    && (self.api.form_char)(form.handle, page, 32, 0) == 0
-                {
-                    return Err("Cannot change this checkbox.".into());
+                PdfEdit::DeleteAnnotation { index, .. } => {
+                    let page = self.api.page(handle, page_index)?;
+                    self.delete_annotation(page.handle, index)?;
                 }
-            }
-            (self.api.form_blur)(form.handle);
-            let actual = if kind == 2 {
-                ((self.api.field_checked)(form.handle, handle) != 0).to_string()
-            } else {
-                self.field_string(form.handle, handle, self.api.field_value)?
-            };
-            if actual != value {
-                return Err(
-                    "The form rejected or shortened this value. Check its input limits.".into(),
-                );
+                PdfEdit::SetAnnotationText {
+                    index, ref text, ..
+                } => {
+                    let page = self.api.page(handle, page_index)?;
+                    self.set_annotation_text(page.handle, index, text)?;
+                }
             }
         }
         Ok(())
@@ -1079,6 +979,7 @@ impl PdfEngine {
             .as_ref()
             .is_some_and(|d| d.path == path && d.edits == edits && d.stamp == current)
         {
+            self.document = None;
             self.document = Some(self.open(&path, edits)?);
         }
         if let Some(document) = self.document.as_ref() {
@@ -1148,42 +1049,119 @@ impl PdfEngine {
         flags: i32,
     ) -> Result<Frame, String> {
         self.ensure(path, edits)?;
+        let document = self.document.as_ref().ok_or("No PDF is open.")?;
+        let (count, (width, height)) = self.page_metrics(document.native.handle, page_index)?;
+        let source_width = dimension(width)?;
+        let source_height = dimension(height)?;
+        let permissions = unsafe { (self.api.permissions)(document.native.handle) };
+        if flags & 0x800 != 0 && permissions & 4 == 0 {
+            return Err("This PDF's permissions do not allow printing.".into());
+        }
+        let (max_width, max_height) = if flags & 0x800 != 0 && permissions & 0x800 == 0 {
+            (
+                max_width.min(source_width.saturating_mul(150) / 72),
+                max_height.min(source_height.saturating_mul(150) / 72),
+            )
+        } else {
+            (max_width, max_height)
+        };
+        let (width, height) = pdf_size(source_width, source_height, max_width, max_height)?;
+        let pixels = self.draw(
+            page_index,
+            (0, 0),
+            (width as i32, height as i32),
+            (width, height),
+            flags,
+        )?;
+        Ok(Frame {
+            width,
+            height,
+            pixels,
+            page_count: count,
+            source_width,
+            source_height,
+        })
+    }
+
+    /// Renders one tile of a page. The page is laid out at `scale` device
+    /// pixels per point; `region` is `[x, y, width, height]` in those pixels,
+    /// from the page's top-left corner. Annotations and form fields are drawn.
+    #[allow(dead_code)]
+    pub fn render_region(
+        &mut self,
+        path: &Path,
+        page_index: u32,
+        scale: f32,
+        region: [u32; 4],
+        edits: &[PdfEdit],
+    ) -> Result<Frame, String> {
+        if !scale.is_finite() || scale <= 0.0 || scale > 64.0 {
+            return Err("The zoom level is out of range.".into());
+        }
+        let [x, y, width, height] = region;
+        frame_bytes(width, height)?;
+        if x > i32::MAX as u32 || y > i32::MAX as u32 {
+            return Err("The page region is out of range.".into());
+        }
+        self.ensure(path, edits)?;
+        let document = self.document.as_ref().ok_or("No PDF is open.")?;
+        let (count, (page_width, page_height)) =
+            self.page_metrics(document.native.handle, page_index)?;
+        let size = |points: f32| -> Result<i32, String> {
+            let pixels = (points as f64 * scale as f64).round().max(1.0);
+            if pixels > i32::MAX as f64 {
+                return Err("The zoom level is too high for this page.".into());
+            }
+            Ok(pixels as i32)
+        };
+        let page = (size(page_width)?, size(page_height)?);
+        let pixels = self.draw(page_index, (x as i32, y as i32), page, (width, height), 1)?;
+        Ok(Frame {
+            width,
+            height,
+            pixels,
+            page_count: count,
+            source_width: dimension(page_width)?,
+            source_height: dimension(page_height)?,
+        })
+    }
+
+    /// Page count and the size in points of one page.
+    fn page_metrics(&self, document: Handle, index: u32) -> Result<(u32, (f32, f32)), String> {
+        let count = unsafe { (self.api.count)(document) };
+        if count <= 0 || index >= count as u32 {
+            return Err("This PDF page does not exist.".into());
+        }
+        Ok((count as u32, self.api.page_size(document, index)?))
+    }
+
+    /// Draws a page into a white buffer of `pixels` size. The whole page
+    /// spans `page` pixels, and the buffer shows it from `origin`.
+    fn draw(
+        &mut self,
+        page_index: u32,
+        origin: (i32, i32),
+        page: (i32, i32),
+        pixels: (u32, u32),
+        flags: i32,
+    ) -> Result<Vec<u8>, String> {
+        let document = self.document.as_mut().ok_or("No PDF is open.")?;
+        // Form fields are best effort: a broken form must not block viewing.
+        let form = if unsafe { (self.api.form_type)(document.native.handle) } != 0 {
+            self.api.form(document).ok()
+        } else {
+            None
+        };
+        let loaded = self.api.open_page(document, page_index)?;
+        let (width, height) = pixels;
+        let mut buffer = vec![255; frame_bytes(width, height)?];
         unsafe {
-            let document = self.document.as_ref().ok_or("No PDF is open.")?;
-            let count = (self.api.count)(document.native.handle);
-            if count <= 0 || page_index >= count as u32 {
-                return Err("This PDF page does not exist.".into());
-            }
-            let handle = (self.api.load_page)(document.native.handle, page_index as i32);
-            if handle.is_null() {
-                return Err("This PDF page could not be read.".into());
-            }
-            let page = NativeHandle {
-                handle,
-                close: self.api.close_page,
-            };
-            let source_width = dimension((self.api.width)(page.handle))?;
-            let source_height = dimension((self.api.height)(page.handle))?;
-            let permissions = (self.api.permissions)(document.native.handle);
-            if flags & 0x800 != 0 && permissions & 4 == 0 {
-                return Err("This PDF's permissions do not allow printing.".into());
-            }
-            let (max_width, max_height) = if flags & 0x800 != 0 && permissions & 0x800 == 0 {
-                (
-                    max_width.min(source_width.saturating_mul(150) / 72),
-                    max_height.min(source_height.saturating_mul(150) / 72),
-                )
-            } else {
-                (max_width, max_height)
-            };
-            let (width, height) = pdf_size(source_width, source_height, max_width, max_height)?;
-            let mut pixels = vec![255; frame_bytes(width, height)?];
             // BGRx on an opaque white surface is also valid premultiplied BGRA.
             let handle = (self.api.bitmap)(
                 width as i32,
                 height as i32,
                 3,
-                pixels.as_mut_ptr().cast(),
+                buffer.as_mut_ptr().cast(),
                 (width * 4) as i32,
             );
             if handle.is_null() {
@@ -1195,41 +1173,32 @@ impl PdfEngine {
             };
             (self.api.render)(
                 bitmap.handle,
-                page.handle,
-                0,
-                0,
-                width as i32,
-                height as i32,
+                loaded.handle,
+                -origin.0,
+                -origin.1,
+                page.0,
+                page.1,
                 0,
                 flags,
             );
-            if (self.api.form_type)(document.native.handle) == 1 {
-                let form = self.form_session(document.native.handle, page.handle, page_index)?;
+            if let Some(form) = form {
                 (self.api.form_draw)(
-                    form.handle,
+                    form,
                     bitmap.handle,
-                    page.handle,
-                    0,
-                    0,
-                    width as i32,
-                    height as i32,
+                    loaded.handle,
+                    -origin.0,
+                    -origin.1,
+                    page.0,
+                    page.1,
                     0,
                     flags,
                 );
             }
-            drop(bitmap);
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel[3] = 255;
-            }
-            Ok(Frame {
-                width,
-                height,
-                pixels,
-                page_count: count as u32,
-                source_width,
-                source_height,
-            })
         }
+        for pixel in buffer.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        Ok(buffer)
     }
 
     fn annotate(
@@ -1303,7 +1272,9 @@ impl PdfEngine {
                 .iter()
                 .map(|p| convert(*p))
                 .collect::<Result<_, _>>()?;
-            // PDFium cannot create Line annotations. A standard Ink arrow keeps its visible strokes portable.
+            // PDFium cannot create Line annotations (FPDFPage_CreateAnnot
+            // returns NULL for them), so an arrow is a standard Ink annotation:
+            // every reader draws its /AP, and Acrobat edits it as a pen stroke.
             if kind == Arrow {
                 let a = points[0];
                 let z = *points.last().unwrap();
@@ -1405,24 +1376,28 @@ impl PdfEngine {
                 };
                 check((self.api.annot_quad)(handle, &quad))?;
             }
-            let content: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            let content = wide(text);
             check((self.api.annot_string)(
                 handle,
                 b"Contents\0".as_ptr(),
                 content.as_ptr(),
             ))?;
             if kind == Text {
-                let appearance: Vec<u16> = "/Helv 12 Tf 0.08 0.27 0.7 rg"
-                    .encode_utf16()
-                    .chain(Some(0))
-                    .collect();
+                let appearance = wide("/Helv 12 Tf 0.08 0.27 0.7 rg");
                 check((self.api.annot_string)(
                     handle,
                     b"DA\0".as_ptr(),
                     appearance.as_ptr(),
                 ))?;
             }
-            // Rendering generates font resources and standard appearance streams before a save.
+            self.generate_appearance(page, annotation.handle)
+        }
+    }
+
+    /// Rendering makes PDFium write font resources and a standard appearance
+    /// stream (/AP), which other readers draw.
+    fn generate_appearance(&self, page: Handle, annotation: Handle) -> Result<(), String> {
+        unsafe {
             let mut scratch = vec![255u8; 64 * 64 * 4];
             let bitmap_handle = (self.api.bitmap)(64, 64, 3, scratch.as_mut_ptr().cast(), 64 * 4);
             if bitmap_handle.is_null() {
@@ -1433,11 +1408,11 @@ impl PdfEngine {
                 close: self.api.close_bitmap,
             };
             (self.api.render)(bitmap.handle, page, 0, 0, 64, 64, 0, 1);
-            if (self.api.annot_ap)(annotation.handle, 0, std::ptr::null_mut(), 0) <= 2 {
+            if (self.api.annot_ap)(annotation, 0, std::ptr::null_mut(), 0) <= 2 {
                 return Err("The annotation has no portable appearance. It was not saved.".into());
             }
-            Ok(())
         }
+        Ok(())
     }
 
     pub fn page_text(&mut self, path: &Path, page: u32) -> Result<String, String> {
@@ -1462,19 +1437,10 @@ impl PdfEngine {
     }
 
     fn text(&self, document: Handle, index: u32) -> Result<String, String> {
-        if unsafe { (self.api.permissions)(document) } & 16 == 0 {
-            return Err("This PDF's permissions do not allow copying or extracting text.".into());
-        }
-        let page = self.page(document, index)?;
+        self.allow_copy(document)?;
+        let page = self.api.page(document, index)?;
         unsafe {
-            let handle = (self.api.text_load)(page.handle);
-            if handle.is_null() {
-                return Err("Cannot read text on this PDF page.".into());
-            }
-            let text = NativeHandle {
-                handle,
-                close: self.api.text_close,
-            };
+            let text = self.api.text_page(page.handle)?;
             let count = (self.api.text_count)(text.handle);
             if !(0..=16_000_000).contains(&count) {
                 return Err("The page contains too much text to copy safely.".into());
@@ -1488,6 +1454,13 @@ impl PdfEngine {
                 &buffer[..(written as usize).saturating_sub(1)],
             ))
         }
+    }
+
+    fn allow_copy(&self, document: Handle) -> Result<(), String> {
+        if unsafe { (self.api.permissions)(document) } & 16 == 0 {
+            return Err("This PDF's permissions do not allow copying or extracting text.".into());
+        }
+        Ok(())
     }
 
     pub fn find(
@@ -1538,7 +1511,7 @@ impl PdfEngine {
     ) -> Result<(), String> {
         let document = self.open(path, edits)?;
         self.reject_protected_export(document.native.handle)?;
-        self.write_new(document.native.handle, output)
+        self.write_new(document.native.handle, output, FULL_SAVE)
     }
 
     pub fn create_from_image(&mut self, frame: &Frame, output: &Path) -> Result<(), String> {
@@ -1558,40 +1531,8 @@ impl PdfEngine {
                 handle: page_handle,
                 close: self.api.close_page,
             };
-            let mut pixels = frame.pixels.clone();
-            for p in pixels.chunks_exact_mut(4) {
-                let alpha = p[3] as u32;
-                if alpha > 0 {
-                    for channel in &mut p[..3] {
-                        *channel = ((*channel as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
-                    }
-                }
-            }
-            let bitmap_handle = (self.api.bitmap)(
-                frame.width as i32,
-                frame.height as i32,
-                4,
-                pixels.as_mut_ptr().cast(),
-                (frame.width * 4) as i32,
-            );
-            if bitmap_handle.is_null() {
-                return Err("Cannot prepare the image for PDF export.".into());
-            }
-            let bitmap = NativeHandle {
-                handle: bitmap_handle,
-                close: self.api.close_bitmap,
-            };
-            let image_handle = (self.api.image_new)(document.handle);
-            if image_handle.is_null() {
-                return Err("Cannot create a PDF image object.".into());
-            }
-            let image = NativeHandle {
-                handle: image_handle,
-                close: self.api.object_destroy,
-            };
-            if (self.api.image_bitmap)(std::ptr::null_mut(), 0, image.handle, bitmap.handle) == 0
-                || (self.api.image_matrix)(image.handle, width, 0.0, 0.0, height, 0.0, 0.0) == 0
-            {
+            let image = self.image_from_frame(document.handle, frame)?;
+            if (self.api.image_matrix)(image.handle, width, 0.0, 0.0, height, 0.0, 0.0) == 0 {
                 return Err("Cannot encode the image in PDF.".into());
             }
             let image_handle = image.handle;
@@ -1601,7 +1542,7 @@ impl PdfEngine {
             {
                 return Err("Cannot generate the image PDF page.".into());
             }
-            self.write_new(document.handle, output)
+            self.write_new(document.handle, output, FULL_SAVE)
         }
     }
 
@@ -1615,7 +1556,7 @@ impl PdfEngine {
         let source = self.open(path, edits)?;
         self.reject_protected_export(source.native.handle)?;
         self.reject_forms(source.native.handle)?;
-        let checked = self.page(source.native.handle, page)?;
+        let checked = self.api.page(source.native.handle, page)?;
         drop(checked);
         let destination = self.new_document()?;
         let index = page as i32;
@@ -1623,7 +1564,7 @@ impl PdfEngine {
         {
             return Err("Could not extract this PDF page.".into());
         }
-        self.write_new(destination.handle, output)
+        self.write_new(destination.handle, output, FULL_SAVE)
     }
 
     pub fn merge(
@@ -1633,26 +1574,7 @@ impl PdfEngine {
         output: &Path,
         edits: &[PdfEdit],
     ) -> Result<(), String> {
-        let first = self.open(path, edits)?;
-        let second = self.open(other, &[])?;
-        self.reject_protected_export(first.native.handle)?;
-        self.reject_protected_export(second.native.handle)?;
-        self.reject_forms(first.native.handle)?;
-        self.reject_forms(second.native.handle)?;
-        let destination = self.new_document()?;
-        unsafe {
-            for source in [first.native.handle, second.native.handle] {
-                let count = (self.api.count)(source);
-                if count <= 0 {
-                    return Err("Cannot merge a PDF without pages.".into());
-                }
-                let index = (self.api.count)(destination.handle);
-                if (self.api.import)(destination.handle, source, std::ptr::null(), 0, index) == 0 {
-                    return Err("Could not merge these PDF pages.".into());
-                }
-            }
-        }
-        self.write_new(destination.handle, output)
+        self.merge_with(path, other, output, edits, false)
     }
 
     fn reject_forms(&self, document: Handle) -> Result<(), String> {
@@ -1683,61 +1605,276 @@ impl PdfEngine {
         })
     }
 
-    fn write_new(&self, document: Handle, output: &Path) -> Result<(), String> {
+    /// Saves to a sibling temporary file, reopens it, and only then moves it
+    /// to `output`. `flags` are FPDF_SaveAsCopy flags from fpdf_save.h.
+    fn write_new(&self, document: Handle, output: &Path, flags: u32) -> Result<(), String> {
         let output = std::path::absolute(output).map_err(|e| e.to_string())?;
         if output.try_exists().map_err(|e| e.to_string())? {
             return Err("Choose a new file name. Existing files are never overwritten.".into());
         }
         let parent = output.parent().ok_or("Choose a valid output folder.")?;
-        let mut selected = None;
-        for suffix in 0..100 {
-            let path = parent.join(format!(".preview-{}-{suffix}.tmp", std::process::id()));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => {
-                    selected = Some((Temporary(path), file));
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(format!("Cannot create the PDF copy: {e}")),
-            }
-        }
-        let (temporary, file) = selected.ok_or("Cannot create a temporary PDF file.")?;
-        let mut writer = FileWrite {
-            version: 1,
-            write: write_block,
-            file,
-        };
-        if unsafe { (self.api.save)(document, &mut writer, 2) } == 0 {
-            return Err("The PDF could not be saved. Your original is unchanged.".into());
-        }
-        writer
-            .file
-            .sync_all()
-            .map_err(|e| format!("Cannot finish the PDF copy: {e}"))?;
-        drop(writer);
+        let (temporary, file) = temporary_in(parent)?;
+        self.write_file(document, file, flags)?;
         // Reopen before committing so a failed writer never leaves a visible PDF.
         let verification = self.open(&temporary.0, &[])?;
         if unsafe { (self.api.count)(verification.native.handle) != (self.api.count)(document) } {
             return Err("The saved PDF did not pass validation.".into());
         }
         drop(verification);
-        let source: Vec<u16> = temporary
-            .0
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        let target: Vec<u16> = output.as_os_str().encode_wide().chain(Some(0)).collect();
-        unsafe {
-            MoveFileExW(
-                PCWSTR(source.as_ptr()),
-                PCWSTR(target.as_ptr()),
-                MOVEFILE_WRITE_THROUGH,
-            )
-        }
-        .map_err(|e| format!("Cannot commit the PDF copy. Choose a new filename: {e}"))?;
-        Ok(())
+        commit(&temporary, &output)
     }
+
+    fn write_file(&self, document: Handle, file: File, flags: u32) -> Result<(), String> {
+        let mut writer = FileWrite {
+            version: 1,
+            write: write_block,
+            file,
+        };
+        if unsafe { (self.api.save)(document, &mut writer, flags) } == 0 {
+            return Err("The PDF could not be saved. Your original is unchanged.".into());
+        }
+        writer
+            .file
+            .sync_all()
+            .map_err(|e| format!("Cannot finish the PDF copy: {e}"))
+    }
+}
+
+// FPDF_SaveAsCopy flags (fpdf_save.h).
+const INCREMENTAL_SAVE: u32 = 1;
+const FULL_SAVE: u32 = 2;
+
+fn temporary_in(folder: &Path) -> Result<(Temporary, File), String> {
+    for suffix in 0..100 {
+        let path = folder.join(format!(".preview-{}-{suffix}.tmp", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((Temporary(path), file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Cannot create the PDF copy: {e}")),
+        }
+    }
+    Err("Cannot create a temporary PDF file.".into())
+}
+
+fn commit(temporary: &Temporary, output: &Path) -> Result<(), String> {
+    let source: Vec<u16> = temporary
+        .0
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let target: Vec<u16> = output.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|e| format!("Cannot commit the PDF copy. Choose a new filename: {e}"))
+}
+
+impl Api {
+    fn page(&self, document: Handle, index: u32) -> Result<NativeHandle, String> {
+        unsafe {
+            let count = (self.count)(document);
+            if count <= 0 || index >= count as u32 {
+                return Err("This PDF page does not exist.".into());
+            }
+            let handle = (self.load_page)(document, index as i32);
+            if handle.is_null() {
+                return Err("This PDF page could not be read.".into());
+            }
+            Ok(NativeHandle {
+                handle,
+                close: self.close_page,
+            })
+        }
+    }
+
+    /// Loads a page and registers it with the form environment, or borrows
+    /// the form session's page when it is the same page.
+    fn open_page<'a>(&'a self, document: &Document, index: u32) -> Result<Page<'a>, String> {
+        if let Some(fill) = document.fill.as_ref().filter(|f| f.index == index) {
+            return Ok(Page {
+                handle: fill.page.handle,
+                owned: false,
+                form: std::ptr::null_mut(),
+                api: self,
+            });
+        }
+        let page = self.page(document.native.handle, index)?;
+        let handle = page.handle;
+        std::mem::forget(page);
+        let form = document
+            .form
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |f| f.handle);
+        if !form.is_null() {
+            unsafe { (self.form_after)(handle, form) };
+        }
+        Ok(Page {
+            handle,
+            owned: true,
+            form,
+            api: self,
+        })
+    }
+
+    /// The document's form environment, created on first use.
+    fn form(&self, document: &mut Document) -> Result<Handle, String> {
+        if let Some(form) = &document.form {
+            return Ok(form.handle);
+        }
+        let mut info = Box::new(FormInfo {
+            version: 1,
+            release: None,
+            invalidate: Some(form_invalidate),
+            selected: None,
+            cursor: Some(form_cursor),
+            timer: Some(form_timer),
+            kill_timer: Some(form_cursor),
+            local_time: None,
+            change: None,
+            get_page: Some(form_page),
+            current_page: Some(form_current),
+            rotation: Some(form_rotation),
+            named_action: None,
+            focus: None,
+            uri: None,
+            goto: None,
+            javascript: std::ptr::null_mut(),
+            page: std::ptr::null_mut(),
+            index: -1,
+            page_rotation: 0,
+            invalidated: false,
+        });
+        let handle = unsafe { (self.form_init)(document.native.handle, &mut *info) };
+        if handle.is_null() {
+            return Err("Cannot initialize PDF form fields.".into());
+        }
+        document.form = Some(Form {
+            handle,
+            info,
+            blur: self.form_blur,
+            before: self.form_before,
+            exit: self.form_exit,
+        });
+        Ok(handle)
+    }
+
+    /// Page size in points after rotation, without parsing the page content.
+    fn page_size(&self, document: Handle, index: u32) -> Result<(f32, f32), String> {
+        let mut size = SizeF::default();
+        if unsafe { (self.page_size)(document, index as i32, &mut size) } == 0
+            || !size.width.is_finite()
+            || !size.height.is_finite()
+            || size.width <= 0.0
+            || size.height <= 0.0
+        {
+            return Err("This PDF has invalid or unsupported page dimensions.".into());
+        }
+        Ok((size.width, size.height))
+    }
+
+    /// The mapping from user space to displayed page points, taken from
+    /// FPDF_PageToDevice so it matches rendering, rotation, and crop exactly.
+    fn display(&self, page: Handle) -> Result<Display, String> {
+        unsafe {
+            let width = (self.width)(page);
+            let height = (self.height)(page);
+            dimension(width)?;
+            dimension(height)?;
+            let (width, height) = (width as f64, height as f64);
+            let mut bounds = Rect::default();
+            if (self.page_box)(page, &mut bounds) == 0 {
+                return Err("Cannot read the size of this PDF page.".into());
+            }
+            let (l, b, r, t) = (
+                bounds.left as f64,
+                bounds.bottom as f64,
+                bounds.right as f64,
+                bounds.top as f64,
+            );
+            if r - l < 1e-3 || t - b < 1e-3 {
+                return Err("This PDF has invalid or unsupported page dimensions.".into());
+            }
+            // 1000 device units per point keeps the mapping exact to 0.001 pt.
+            let size = (
+                (width * 1000.0).round() as i32,
+                (height * 1000.0).round() as i32,
+            );
+            let map = |x: f64, y: f64| -> Result<(f64, f64), String> {
+                let (mut dx, mut dy) = (0, 0);
+                if (self.page_to_device)(page, 0, 0, size.0, size.1, 0, x, y, &mut dx, &mut dy) == 0
+                {
+                    return Err("Cannot map this PDF page.".into());
+                }
+                Ok((
+                    dx as f64 * width / size.0 as f64,
+                    dy as f64 * height / size.1 as f64,
+                ))
+            };
+            let p0 = map(l, b)?;
+            let p1 = map(r, b)?;
+            let p2 = map(l, t)?;
+            let a = (p1.0 - p0.0) / (r - l);
+            let bb = (p1.1 - p0.1) / (r - l);
+            let c = (p2.0 - p0.0) / (t - b);
+            let d = (p2.1 - p0.1) / (t - b);
+            Ok(Display {
+                m: [a, bb, c, d, p0.0 - a * l - c * b, p0.1 - bb * l - d * b],
+                width,
+                height,
+            })
+        }
+    }
+
+    fn text_page(&self, page: Handle) -> Result<NativeHandle, String> {
+        let handle = unsafe { (self.text_load)(page) };
+        if handle.is_null() {
+            return Err("Cannot read text on this PDF page.".into());
+        }
+        Ok(NativeHandle {
+            handle,
+            close: self.text_close,
+        })
+    }
+
+    fn annotation(&self, page: Handle, index: u32) -> Result<NativeHandle, String> {
+        unsafe {
+            let count = (self.annot_count)(page);
+            if count <= 0 || index >= count as u32 {
+                return Err("This annotation no longer exists.".into());
+            }
+            let handle = (self.annot_get)(page, index as i32);
+            if handle.is_null() {
+                return Err("Cannot read this annotation.".into());
+            }
+            Ok(NativeHandle {
+                handle,
+                close: self.annot_close,
+            })
+        }
+    }
+}
+
+/// UTF-16 with a terminating zero, as PDFium's FPDF_WIDESTRING expects.
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Reads a UTF-16LE string from a PDFium (buffer, byte length) getter.
+fn read_utf16(read: impl Fn(*mut u16, u32) -> u32) -> String {
+    let size = read(std::ptr::null_mut(), 0);
+    if !(2..=4_000_000).contains(&size) {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; size.div_ceil(2) as usize];
+    let written = read(buffer.as_mut_ptr(), buffer.len() as u32 * 2).min(size);
+    let units = &buffer[..(written as usize / 2)];
+    let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+    String::from_utf16_lossy(&units[..end])
 }
 
 fn pdf_size(

@@ -54,6 +54,27 @@ pub enum PdfEdit {
         right: f32,
         bottom: f32,
     },
+    // PDF types (W1-B). The shell starts using these in wave 2.
+    /// Removes the annotation at `index` in the page's annotation list.
+    #[allow(dead_code)]
+    DeleteAnnotation {
+        page: u32,
+        index: u32,
+    },
+    /// Replaces the annotation's text (its Contents entry).
+    #[allow(dead_code)]
+    SetAnnotationText {
+        page: u32,
+        index: u32,
+        text: String,
+    },
+    /// Inserts an image file as a new page at `at`. The page takes the size
+    /// of its neighbor page, turned to match the image orientation.
+    #[allow(dead_code)]
+    InsertImage {
+        at: u32,
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,6 +110,108 @@ pub struct TextLayer {
 pub struct SearchHit {
     pub page: u32,
     pub rects: Vec<NormRect>,
+}
+
+// PDF types (W1-B)
+
+/// One table-of-contents entry. `level` is 0 for top-level entries.
+/// `page` is `None` when the entry has no destination in this document.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutlineItem {
+    pub title: String,
+    pub page: Option<u32>,
+    pub level: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PdfFormType {
+    None,
+    AcroForm,
+    XfaFull,
+    XfaForeground,
+}
+
+/// Document information. Dates are raw PDF date strings, such as
+/// `D:20261006120000Z`. `version` is like `1.7`.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PdfMetadata {
+    pub title: String,
+    pub author: String,
+    pub subject: String,
+    pub keywords: String,
+    pub creator: String,
+    pub producer: String,
+    pub created: String,
+    pub modified: String,
+    pub version: String,
+    pub page_count: u32,
+    pub encrypted: bool,
+    pub form: PdfFormType,
+}
+
+/// An annotation on a page. `kind` is the PDF subtype name, such as
+/// `Highlight`, `Ink`, `Link`, or `Widget`. `index` is the position in the
+/// page's annotation list, as used by `PdfEdit::DeleteAnnotation`.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PdfAnnotation {
+    pub index: u32,
+    pub kind: String,
+    pub rect: NormRect,
+    pub contents: String,
+}
+
+/// Input for the inline form session. Coordinates are points from the
+/// top-left corner of the displayed page, in the units of `page_sizes`.
+/// Send WM_KEYDOWN keys as `Key` (virtual-key codes) and WM_CHAR text as
+/// `Char`. Tab goes only through `Key`.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FormInput {
+    PointerDown {
+        x: f32,
+        y: f32,
+    },
+    PointerUp {
+        x: f32,
+        y: f32,
+    },
+    PointerMove {
+        x: f32,
+        y: f32,
+    },
+    Char(char),
+    Key {
+        code: u32,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+    },
+    Blur,
+}
+
+/// Result of one form input. `focus` is the page and rectangle of the
+/// focused field. Append `commits` to the edit recipe in order: the open
+/// document already holds those values, so the session stays intact.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FormFeedback {
+    pub focus: Option<(u32, NormRect)>,
+    pub redraw: bool,
+    pub commits: Vec<PdfEdit>,
+}
+
+/// How `save_incremental` wrote the file.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SaveMode {
+    /// The original bytes, unchanged, plus an appended update.
+    Incremental,
+    /// A complete rewrite, because the incremental update did not verify.
+    Full,
 }
 
 #[derive(Clone)]
