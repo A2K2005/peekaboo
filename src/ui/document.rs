@@ -10,13 +10,13 @@
 //! drawn scaled, and new tiles are asked for once the zoom has been still
 //! for `SETTLE`.
 use super::{
-    app::{schedule, State},
-    cache::Lru,
+    app::{State, schedule},
+    cache::{Lru, TILE_BUDGET},
     render::Painter,
-    theme::Rgba,
+    theme::{Mode, Rgba, Theme},
     view::{self, Layout, Position, ViewMode, Zoom},
     widgets::{self, Rect},
-    worker::{doc_id, Item, Key, Note, Work},
+    worker::{Item, Key, Note, Work, doc_id},
 };
 use crate::model::{AnnotationKind, ImageEdit, OutlineItem, PdfEdit};
 use std::{
@@ -25,11 +25,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use windows::Win32::{
-    Foundation::HWND,
-    Graphics::Direct2D::ID2D1Bitmap,
-    UI::Input::KeyboardAndMouse::*,
-};
+use windows::Win32::{Foundation::HWND, Graphics::Direct2D::ID2D1Bitmap, UI::Input::KeyboardAndMouse::*};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PointerKind {
@@ -107,6 +103,7 @@ pub(super) struct Scroll {
     to: f32,
     start: Instant,
     scale: f32,
+    target_page: Option<u32>,
 }
 
 /// An open PDF as the view shows it.
@@ -217,6 +214,64 @@ fn screen(g: &Geometry, r: Rect) -> Rect {
     Rect { x0, y0, x1: x0 + r.width(), y1: y0 + r.height() }
 }
 
+fn text_rect(state: &State, page: u32, rect: crate::model::NormRect) -> Option<Rect> {
+    let page = match geometry(state) {
+        Some(g) => {
+            let (_, page) = g.layout.pages.iter().find(|(index, _)| *index == page)?;
+            screen(&g, *page)
+        }
+        None if page == 0 && state.frame.is_some() => state.image_rect,
+        None => return None,
+    };
+    Some(Rect {
+        x0: page.x0 + rect[0] * page.width(),
+        y0: page.y0 + rect[1] * page.height(),
+        x1: page.x0 + rect[2] * page.width(),
+        y1: page.y0 + rect[3] * page.height(),
+    })
+}
+
+fn paint_text(p: &Painter, state: &State) {
+    // The overlay is painted after the page bitmap, so it stays translucent
+    // in high contrast too; an opaque fill would cover the glyphs.
+    let alpha = 0.32;
+    let color = Rgba(state.theme.accent.0, state.theme.accent.1, state.theme.accent.2, alpha);
+    for (index, hit) in state.find_hits.iter().enumerate() {
+        let hit_color = if index == state.find_index { color } else { Rgba(color.0, color.1, color.2, alpha * 0.55) };
+        for rect in &hit.rects {
+            if let Some(rect) = text_rect(state, hit.page, *rect) {
+                p.fill(rect, hit_color);
+            }
+        }
+    }
+    if let Some(selection) = state.text_selection {
+        for (&page, layer) in &state.text_layers {
+            if let Some(range) = selection.range(page, layer.boxes.len()) {
+                for rect in super::text::rects(layer, range) {
+                    if let Some(rect) = text_rect(state, page, rect) {
+                        p.fill(rect, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The page or image under a client point, the normalized point in it, and
+/// its displayed pixel size. Text selection and hit painting share this map.
+pub(super) fn text_point(state: &State, x: f32, y: f32) -> Option<(u32, [f32; 2], [f32; 2])> {
+    let (page, r) = match geometry(state) {
+        Some(g) => page_at(&g, x, y)?,
+        None if state.frame.is_some() && state.image_rect.contains(x, y) => (0, state.image_rect),
+        None => return None,
+    };
+    Some((
+        page,
+        [(x - r.x0) / r.width().max(1.0), (y - r.y0) / r.height().max(1.0)],
+        [r.width(), r.height()],
+    ))
+}
+
 /// Moves the view top to content `y` and makes the page in the middle of
 /// the view the current page.
 fn set_top(state: &mut State, g: &Geometry, y: f32) {
@@ -226,7 +281,7 @@ fn set_top(state: &mut State, g: &Geometry, y: f32) {
         return;
     };
     v.position = view::from_y(&g.layout, y, g.scale);
-    if let Some(page) = current {
+    if let Some(page) = v.scroll.and_then(|scroll| scroll.target_page).or(current) {
         if page != state.page && !state.pending && state.view_mode != ViewMode::Single {
             state.page = page;
             state.status = state.subtitle();
@@ -243,7 +298,7 @@ fn scroll_to(state: &mut State, g: &Geometry, y: f32, smooth: bool) {
         return;
     };
     if animate {
-        v.scroll = Some(Scroll { from: g.top, to, start: Instant::now(), scale: g.scale });
+        v.scroll = Some(Scroll { from: g.top, to, start: Instant::now(), scale: g.scale, target_page: None });
     } else {
         v.scroll = None;
         set_top(state, g, to);
@@ -288,6 +343,9 @@ pub(super) fn go_to_page(state: &mut State, page: u32, smooth: bool) {
     };
     if let Some((_, r)) = g.layout.pages.iter().find(|(p, _)| *p == page) {
         scroll_to(state, &g, r.y0 - gap(state), smooth);
+        if let Some(scroll) = state.pdf.as_mut().and_then(|v| v.scroll.as_mut()) {
+            scroll.target_page = Some(page);
+        }
         // The page asked for is current even when the end of the document
         // keeps it out of the middle of the view.
         if !state.pending {
@@ -310,6 +368,34 @@ pub(super) fn step_page(state: &mut State, delta: i32) -> bool {
         return false;
     }
     go_to_page(state, page as u32, true);
+    true
+}
+
+/// Moves the text caret on the current page. Shift extends the selection.
+pub(super) fn text_key(state: &mut State, vk: u16, shift: bool) -> bool {
+    if state.text_selection.is_none() && !shift {
+        return false;
+    }
+    let Some(layer) = state.text_layers.get(&state.page) else {
+        return false;
+    };
+    let len = layer.boxes.len();
+    let current = state
+        .text_selection
+        .filter(|selection| selection.focus.page == state.page)
+        .map_or(0, |selection| selection.focus.index.min(len));
+    let next = match VIRTUAL_KEY(vk) {
+        VK_LEFT => current.saturating_sub(1),
+        VK_RIGHT => (current + 1).min(len),
+        VK_HOME => 0,
+        VK_END => len,
+        _ => return false,
+    };
+    let at = super::text::Pos { page: state.page, index: next };
+    match state.text_selection.as_mut().filter(|_| shift) {
+        Some(selection) => selection.focus = at,
+        None => state.text_selection = Some(super::text::Selection::caret(at)),
+    }
     true
 }
 
@@ -504,10 +590,10 @@ pub(super) fn prepare(state: &mut State, doc: Rect) -> bool {
         return false;
     }
     let t = (glide.start.elapsed().as_secs_f32() / SCROLL_TIME.as_secs_f32()).min(1.0);
-    if t >= 1.0 {
-        v.scroll = None;
-    }
     set_top(state, &g, glide.from + (glide.to - glide.from) * super::app::ease(t));
+    if t >= 1.0 {
+        state.pdf.as_mut().unwrap().scroll = None;
+    }
     t < 1.0
 }
 
@@ -552,6 +638,7 @@ fn draw_tiles(
     display: f32,
     dest: Rect,
     clip: Rect,
+    fallback: f32,
     mut stats: Option<(&mut Stats, bool)>,
 ) {
     let ratio = display / scale;
@@ -565,13 +652,21 @@ fn draw_tiles(
         let key = Key { doc, work: Work::Tile { page, scale: scale.to_bits(), col, row } };
         let at = |n: u32, origin: f32| (origin + n as f32 * ratio).round();
         let r = Rect { x0: at(x, dest.x0), y0: at(y, dest.y0), x1: at(x + w, dest.x0), y1: at(y + h, dest.y0) };
-        let tile = tiles.get(&key);
+        // Only current-resolution tiles keep their cache pin alive.
+        let tile = if stats.is_some() { tiles.get(&key).map(|t| &*t) } else { tiles.peek(&key) };
+        let missing = tile.is_none();
         if let Some(tile) = &tile {
             p.draw_bitmap(&tile.bitmap, r);
         }
+        if missing && fallback > 0.0 && fallback != scale {
+            let missing_clip = Rect { x0: r.x0.max(clip.x0), y0: r.y0.max(clip.y0), x1: r.x1.min(clip.x1), y1: r.y1.min(clip.y1) };
+            p.push_clip(missing_clip);
+            draw_tiles(p, tiles, doc, page, size, fallback, display, dest, missing_clip, 0.0, None);
+            p.pop_clip();
+        }
         if let Some((stats, thumb)) = stats.as_mut() {
             stats.visible += 1;
-            if tile.is_none() {
+            if missing {
                 stats.missing += 1;
                 if !*thumb {
                     stats.blank.push(key);
@@ -581,11 +676,22 @@ fn draw_tiles(
     }
 }
 
+fn media_halo(p: &Painter, rect: Rect, theme: Theme, scale: f32) {
+    if theme.mode != Mode::Contrast {
+        p.stroke_round(rect.inset(-2.0 * scale), 0.0, theme.document_halo, 4.0 * scale);
+    }
+}
+
+fn media_outline(p: &Painter, rect: Rect, theme: Theme, scale: f32) {
+    let width = theme.border_width * scale.floor().max(1.0);
+    p.stroke_round(rect.inset(-width / 2.0), 0.0, theme.image_outline, width);
+}
+
 fn paint_pdf(p: &Painter, state: &mut State, doc: Rect) -> bool {
     let Some(g) = geometry_in(state, doc) else {
         return false;
     };
-    let (border, s) = (state.theme.border, state.scale);
+    let (theme, s) = (state.theme, state.scale);
     let Some(v) = state.pdf.as_ref() else {
         return false;
     };
@@ -595,21 +701,18 @@ fn paint_pdf(p: &Painter, state: &mut State, doc: Rect) -> bool {
     for (page, rect) in &g.layout.pages[view::visible(&g.layout, g.top, g.top + doc.height())] {
         let dest = screen(&g, *rect);
         let size = v.sizes[*page as usize];
+        media_halo(p, dest, theme, s);
         p.fill(dest, WHITE);
         let thumb = state.cache.get(&Key { doc: v.doc, work: Work::Thumb { page: *page } });
         let has_thumb = thumb.is_some();
         if let Some(thumb) = thumb {
             p.draw_bitmap(&thumb.bitmap, dest);
         }
-        if v.fallback_scale > 0.0 && v.fallback_scale != render {
-            draw_tiles(p, &mut state.cache, v.doc, *page, size, v.fallback_scale, g.scale, dest, doc, None);
-        }
         if stats.visible == 0 {
             stats.page_px = view::page_px(size, render);
         }
-        draw_tiles(p, &mut state.cache, v.doc, *page, size, render, g.scale, dest, doc, Some((&mut stats, has_thumb)));
-        let outline = Rect { x0: dest.x0 - s, y0: dest.y0 - s, x1: dest.x1 + s, y1: dest.y1 + s };
-        p.stroke_round(outline, 0.0, border, s);
+        draw_tiles(p, &mut state.cache, v.doc, *page, size, render, g.scale, dest, doc, v.fallback_scale, Some((&mut stats, has_thumb)));
+        media_outline(p, dest, theme, s);
     }
     p.pop_clip();
     let complete = stats.visible > 0 && stats.missing == 0;
@@ -631,10 +734,9 @@ pub(super) fn paint(p: &Painter, bitmap: Option<&ID2D1Bitmap>, state: &mut State
         let rect = view::image_rect(doc, source, scale, state.pan);
         state.image_rect = rect;
         p.push_clip(doc);
+        media_halo(p, rect, theme, state.scale);
         p.draw_bitmap(bitmap, rect);
-        let s = state.scale;
-        let outline = Rect { x0: rect.x0 - s, y0: rect.y0 - s, x1: rect.x1 + s, y1: rect.y1 + s };
-        p.stroke_round(outline, 0.0, theme.border, s);
+        media_outline(p, rect, theme, state.scale);
         p.pop_clip();
         true
     } else {
@@ -642,6 +744,7 @@ pub(super) fn paint(p: &Painter, bitmap: Option<&ID2D1Bitmap>, state: &mut State
     };
     let s = state.scale;
     p.push_clip(doc);
+    paint_text(p, state);
     if state.markup == Some(AnnotationKind::Ink) && state.signature.is_none() {
         for pair in state.ink.windows(2) {
             p.line((pair[0][0], pair[0][1]), (pair[1][0], pair[1][1]), Rgba::hex(0x1b1b1b), 2.0 * s);
@@ -663,9 +766,16 @@ pub(super) fn upload(state: &mut State, painter: &Painter) -> windows::core::Res
     Ok(())
 }
 
+fn frame_bytes(item: &Item) -> usize {
+    match item.key.work {
+        Work::Tile { .. } | Work::Thumb { .. } => crate::model::frame_bytes(item.region[2], item.region[3]).unwrap_or(usize::MAX),
+        _ => 0,
+    }
+}
+
 /// Background work for the view, most urgent first: tiles in view (after
-/// their pages' placeholder thumbnails once the first page is up), then a
-/// half-screen margin above and below, then the sidebar.
+/// their pages' placeholder thumbnails once the first page is up), then as
+/// much of the half-screen margin and sidebar as fits the cache budget.
 pub(super) fn wanted(state: &State, layout: &widgets::Layout) -> Vec<Item> {
     let Some(g) = geometry_in(state, layout.document) else {
         return predecode(state, layout.document);
@@ -678,13 +788,9 @@ pub(super) fn wanted(state: &State, layout: &widgets::Layout) -> Vec<Item> {
     }
     let render = v.render_scale;
     let ratio = g.scale / render;
-    let item = |work: Work, scale: f32, region: [u32; 4]| Item {
-        key: Key { doc: v.doc, work },
-        path: v.path.clone(),
-        edits: Arc::clone(&v.edits),
-        scale,
-        region,
-    };
+    let source = state.saves.get(&v.path).and_then(|save| save.snapshot.as_ref()).unwrap_or(&v.path).clone();
+    let item =
+        |work: Work, scale: f32, region: [u32; 4]| Item { key: Key { doc: v.doc, work }, path: source.clone(), edits: Arc::clone(&v.edits), scale, region };
     let skip = |work: Work| {
         let key = Key { doc: v.doc, work };
         v.failed.contains(&key) || state.cache.peek(&key).is_some_and(|t| t.fresh)
@@ -694,38 +800,37 @@ pub(super) fn wanted(state: &State, layout: &widgets::Layout) -> Vec<Item> {
         item(Work::Thumb { page }, 0.0, [0, 0, w as u32, h as u32])
     };
     let mid = (g.left + g.doc.width() / 2.0, g.top + g.doc.height() / 2.0);
-    let tiles_in = |top: f32, bottom: f32| -> Vec<Item> {
+    let tiles_in = |top: f32, bottom: f32| -> Vec<(usize, Item, bool)> {
         let mut found = Vec::new();
         for (page, r) in &g.layout.pages[view::visible(&g.layout, top, bottom)] {
-            let clip = Rect {
-                x0: (g.left - r.x0) / ratio,
-                y0: (top - r.y0) / ratio,
-                x1: (g.left + g.doc.width() - r.x0) / ratio,
-                y1: (bottom - r.y0) / ratio,
-            };
+            let clip = Rect { x0: (g.left - r.x0) / ratio, y0: (top - r.y0) / ratio, x1: (g.left + g.doc.width() - r.x0) / ratio, y1: (bottom - r.y0) / ratio };
             for (col, row, region) in view::tiles(view::page_px(v.sizes[*page as usize], render), clip) {
                 let work = Work::Tile { page: *page, scale: render.to_bits(), col, row };
-                if !skip(work) {
+                let key = Key { doc: v.doc, work };
+                if !v.failed.contains(&key) {
                     let center = (r.x0 + (region[0] as f32 + region[2] as f32 / 2.0) * ratio, r.y0 + (region[1] as f32 + region[3] as f32 / 2.0) * ratio);
                     let distance = (center.0 - mid.0).hypot(center.1 - mid.1);
-                    found.push((distance, item(work, render, region)));
+                    let item = item(work, render, region);
+                    let ready = state.cache.peek(&key).is_some_and(|tile| tile.fresh);
+                    found.push((distance, frame_bytes(&item), item, ready));
                 }
             }
         }
         found.sort_by(|a, b| a.0.total_cmp(&b.0));
-        found.into_iter().map(|(_, i)| i).collect()
+        found.into_iter().map(|(_, bytes, item, ready)| (bytes, item, ready)).collect()
     };
     let shown = view::visible(&g.layout, g.top, g.top + g.doc.height());
     let pages: Vec<u32> = g.layout.pages[shown].iter().map(|(p, _)| *p).collect();
-    let placeholders: Vec<Item> = pages
-        .iter()
-        .filter(|p| {
-            let key = Key { doc: v.doc, work: Work::Thumb { page: **p } };
-            state.cache.peek(&key).is_none() && !v.failed.contains(&key)
-        })
-        .map(|p| thumb(*p))
-        .collect();
+    let placeholders: Vec<Item> = pages.iter().filter(|p| !skip(Work::Thumb { page: **p })).map(|p| thumb(*p)).collect();
     let visible = tiles_in(g.top, g.top + g.doc.height());
+    let mut admitted: HashSet<Key> = visible.iter().map(|(_, item, _)| item.key).collect();
+    let mut admitted_bytes = visible.iter().map(|(bytes, _, _)| *bytes).sum::<usize>();
+    for page in &pages {
+        let placeholder = thumb(*page);
+        admitted.insert(placeholder.key);
+        admitted_bytes = admitted_bytes.saturating_add(frame_bytes(&placeholder));
+    }
+    let visible: Vec<Item> = visible.into_iter().filter_map(|(_, item, ready)| (!ready).then_some(item)).collect();
     let mut out = Vec::new();
     if state.content_drawn {
         out.extend(placeholders);
@@ -735,21 +840,33 @@ pub(super) fn wanted(state: &State, layout: &widgets::Layout) -> Vec<Item> {
         out.extend(visible);
         out.extend(placeholders);
     }
+    let mut sidebar_thumbs = Vec::new();
+    if layout.sidebar.is_some() && state.sidebar_tab == 0 {
+        for w in &layout.widgets {
+            if let widgets::WidgetId::SidebarItem(index) = w.id {
+                let item = thumb(index as u32);
+                if admitted.insert(item.key) {
+                    admitted_bytes = admitted_bytes.saturating_add(frame_bytes(&item));
+                    sidebar_thumbs.push((item, skip(Work::Thumb { page: index as u32 })));
+                }
+            }
+        }
+    }
     let margin = g.doc.height() / 2.0;
-    let queued: HashSet<Key> = out.iter().map(|i| i.key).collect();
-    out.extend(tiles_in(g.top - margin, g.top + g.doc.height() + margin).into_iter().filter(|i| !queued.contains(&i.key)));
-    out.extend(pages.iter().filter(|p| !skip(Work::Thumb { page: **p }) && !queued.contains(&thumb(**p).key)).map(|p| thumb(*p)));
+    for (bytes, item, ready) in tiles_in(g.top - margin, g.top + g.doc.height() + margin) {
+        if admitted.contains(&item.key) || admitted_bytes.saturating_add(bytes) > TILE_BUDGET {
+            continue;
+        }
+        admitted.insert(item.key);
+        admitted_bytes += bytes;
+        if !ready {
+            out.push(item);
+        }
+    }
     if layout.sidebar.is_some() {
         match state.sidebar_tab {
             0 => {
-                for w in &layout.widgets {
-                    if let widgets::WidgetId::SidebarItem(index) = w.id {
-                        let page = index as u32;
-                        if !skip(Work::Thumb { page }) && !out.iter().any(|i| i.key.work == Work::Thumb { page }) {
-                            out.push(thumb(page));
-                        }
-                    }
-                }
+                out.extend(sidebar_thumbs.into_iter().filter_map(|(item, ready)| (!ready).then_some(item)));
             }
             1 if v.outline.is_none() => out.push(item(Work::Outline, 0.0, [0; 4])),
             2 => out.extend(
@@ -785,10 +902,17 @@ fn predecode(state: &State, doc: Rect) -> Vec<Item> {
 
 /// Sends the background work list when it changed since the last frame.
 pub(super) fn request(state: &mut State, layout: &widgets::Layout) {
+    if let Some(g) = geometry_in(state, layout.document) {
+        let shown = view::visible(&g.layout, g.top, g.top + layout.document.height());
+        let pages: Vec<u32> = g.layout.pages[shown].iter().map(|(page, _)| *page).collect();
+        for page in pages {
+            state.request_text_layer(page);
+        }
+    }
     let items = wanted(state, layout);
     let keys: Vec<Key> = items.iter().map(|i| i.key).collect();
     if keys != state.sent {
-        state.workers.request(items);
+        state.workers.request_with_sources(items, &state.opened_sources());
         state.sent = keys;
     }
 }
@@ -799,11 +923,51 @@ pub(super) unsafe fn on_pointer(hwnd: HWND, state: &mut State, e: &PointerEvent)
     if e.kind == PointerKind::Touch && touch(state, e) {
         return true;
     }
+    if e.phase == Phase::Move && state.drag.is_none() {
+        if let Some((page, _, _)) = text_point(state, e.x, e.y) {
+            state.request_text_layer(page);
+        }
+        return false;
+    }
     let selecting = state.crop || state.markup.is_some() || state.zoom_select;
     match e.phase {
         Phase::Down => {
             if state.pending || state.render_failed || (state.frame.is_none() && state.pdf.is_none()) {
                 return false;
+            }
+            if !selecting && e.kind == PointerKind::Mouse {
+                if let Some((page, point, size)) = text_point(state, e.x, e.y) {
+                    state.request_text_layer(page);
+                    if let Some(layer) = state.text_layers.get(&page) {
+                        if super::text::over_text(layer, point, size) {
+                            if let (Some(index), Some(glyph)) = (
+                                super::text::caret(layer, point, size),
+                                super::text::glyph(layer, point, size),
+                            ) {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                let count = super::text::clicks(state.text_click, now, (e.x, e.y), 500, 4.0 * state.scale);
+                                state.text_click = Some((now, (e.x, e.y), count));
+                                let range = match count {
+                                    2 => super::text::word(layer, glyph),
+                                    3 => super::text::line(layer, glyph),
+                                    _ => index..index,
+                                };
+                                state.text_selection = Some(super::text::Selection {
+                                    anchor: super::text::Pos { page, index: range.start },
+                                    focus: super::text::Pos { page, index: range.end },
+                                });
+                                state.text_drag = count == 1;
+                                state.drag = Some((e.x, e.y));
+                                SetCapture(hwnd);
+                                return true;
+                            }
+                        }
+                    }
+                }
+                state.text_selection = None;
             }
             if (state.crop || state.markup.is_some()) && state.pdf.is_some() {
                 // Markup and crop go to the page under the pointer.
@@ -828,6 +992,17 @@ pub(super) unsafe fn on_pointer(hwnd: HWND, state: &mut State, e: &PointerEvent)
             false
         }
         Phase::Move => {
+            if state.text_drag {
+                if let Some((page, point, size)) = text_point(state, e.x, e.y) {
+                    state.request_text_layer(page);
+                    if let Some(index) = state.text_layers.get(&page).and_then(|layer| super::text::caret(layer, point, size)) {
+                        if let Some(selection) = state.text_selection.as_mut() {
+                            selection.focus = super::text::Pos { page, index };
+                        }
+                    }
+                }
+                return true;
+            }
             let Some(start) = state.drag else {
                 return false;
             };
@@ -850,6 +1025,7 @@ pub(super) unsafe fn on_pointer(hwnd: HWND, state: &mut State, e: &PointerEvent)
         }
         Phase::Cancel => {
             let _ = ReleaseCapture();
+            state.text_drag = false;
             state.drag = None;
             state.selection = None;
             state.ink.clear();
@@ -857,6 +1033,11 @@ pub(super) unsafe fn on_pointer(hwnd: HWND, state: &mut State, e: &PointerEvent)
         }
         Phase::Up => {
             let _ = ReleaseCapture();
+            if state.text_drag {
+                state.text_drag = false;
+                state.drag = None;
+                return true;
+            }
             if state.drag.take().is_none() {
                 return false;
             }
@@ -974,8 +1155,7 @@ unsafe fn finish_markup(hwnd: HWND, state: &mut State) {
     if state.markup.is_none() {
         return;
     }
-    let (Some(kind), Some((x1, y1, x2, y2)), Some(path)) = (state.markup, state.selection.take(), state.path.clone())
-    else {
+    let (Some(kind), Some((x1, y1, x2, y2)), Some(path)) = (state.markup, state.selection.take(), state.path.clone()) else {
         return;
     };
     let rect = state.image_rect;
@@ -983,8 +1163,7 @@ unsafe fn finish_markup(hwnd: HWND, state: &mut State) {
     if width <= 0.0 || height <= 0.0 {
         return;
     }
-    let normalized =
-        |x: f32, y: f32| [((x - rect.x0) / width).clamp(0.0, 1.0), ((y - rect.y0) / height).clamp(0.0, 1.0)];
+    let normalized = |x: f32, y: f32| [((x - rect.x0) / width).clamp(0.0, 1.0), ((y - rect.y0) / height).clamp(0.0, 1.0)];
     let first = normalized(x1, y1);
     let mut last = normalized(x2, y2);
     if matches!(kind, AnnotationKind::Note | AnnotationKind::Text) && (x1 - x2).abs() < 3.0 {
@@ -993,12 +1172,7 @@ unsafe fn finish_markup(hwnd: HWND, state: &mut State) {
     let points = if let Some(signature) = &state.signature {
         signature
             .iter()
-            .map(|p| {
-                [
-                    first[0].min(last[0]) + p[0] * (first[0] - last[0]).abs(),
-                    first[1].min(last[1]) + p[1] * (first[1] - last[1]).abs(),
-                ]
-            })
+            .map(|p| [first[0].min(last[0]) + p[0] * (first[0] - last[0]).abs(), first[1].min(last[1]) + p[1] * (first[1] - last[1]).abs()])
             .collect()
     } else if kind == AnnotationKind::Ink {
         state.ink.iter().map(|p| normalized(p[0], p[1])).collect()
@@ -1008,13 +1182,14 @@ unsafe fn finish_markup(hwnd: HWND, state: &mut State) {
     let pdf = state.is_pdf();
     let page = state.page;
     let text = state.markup_text.clone();
-    let edits = state.sessions.entry(path).or_default();
+    let edits = state.sessions.entry(path.clone()).or_default();
     if pdf {
         edits.pdf.push(PdfEdit::Annotate { page, kind, points, text });
     } else {
         edits.image.push(ImageEdit::Annotate { kind, points, text });
     }
     edits.dirty = true;
+    state.edited_for_save(&path, Instant::now());
     state.ink.clear();
     schedule(hwnd, state, 0);
 }
@@ -1040,7 +1215,7 @@ unsafe fn finish_crop(hwnd: HWND, state: &mut State) {
     }
     let pdf = state.is_pdf();
     let page = state.page;
-    let edits = state.sessions.entry(path).or_default();
+    let edits = state.sessions.entry(path.clone()).or_default();
     if pdf {
         edits.pdf.push(PdfEdit::Crop { page, left, top, right, bottom });
     } else {
@@ -1049,6 +1224,7 @@ unsafe fn finish_crop(hwnd: HWND, state: &mut State) {
         state.zoom = Zoom::Fit;
     }
     edits.dirty = true;
+    state.edited_for_save(&path, Instant::now());
     state.crop = false;
     schedule(hwnd, state, 0);
 }
@@ -1059,6 +1235,64 @@ mod tests {
     use crate::{model::Frame, ui::theme, ui::worker::Workers};
 
     const LETTER: [f32; 2] = [612.0, 792.0];
+
+    #[test]
+    fn keyboard_caret_and_shift_selection_use_cached_text() {
+        let workers = Workers::start(HWND::default()).unwrap();
+        let mut s = State::new(workers, &[PathBuf::from("photo.png")], (800.0, 600.0), 1.0, 1.0, theme::palette(theme::Mode::Light));
+        s.text_layers.insert(0, crate::model::TextLayer { text: "abc".into(), boxes: vec![[0.0; 4]; 3] });
+        assert!(!text_key(&mut s, VK_RIGHT.0, false), "plain navigation stays available without a caret");
+        assert!(text_key(&mut s, VK_RIGHT.0, true));
+        assert_eq!(s.text_selection.unwrap().span(), (super::super::text::Pos { page: 0, index: 1 }, super::super::text::Pos { page: 0, index: 1 }));
+        assert!(text_key(&mut s, VK_RIGHT.0, true));
+        assert_eq!(s.text_selection.unwrap().span(), (super::super::text::Pos { page: 0, index: 1 }, super::super::text::Pos { page: 0, index: 2 }));
+        assert!(text_key(&mut s, VK_END.0, true));
+        assert_eq!(s.text_selection.unwrap().focus.index, 3);
+    }
+
+    #[test]
+    fn explicit_page_survives_glide_and_manual_scroll_releases_it() {
+        let mut s = pdf_state(Zoom::Ratio(0.25));
+        s.animations = true;
+        go_to_page(&mut s, 19, true);
+        let doc = s.layout().document;
+        prepare(&mut s, doc);
+        assert_eq!(s.page, 19, "glide must not select an intermediate page");
+        s.pdf.as_mut().unwrap().scroll.as_mut().unwrap().start = Instant::now() - SCROLL_TIME;
+        prepare(&mut s, doc);
+        assert_eq!(s.page, 19, "last page may not occupy the viewport center");
+        assert!(s.pdf.as_ref().unwrap().scroll.is_none());
+        scroll_by(&mut s, 0.0, -10_000.0, false);
+        assert!(s.page < 19, "manual scrolling resumes viewport-based selection");
+    }
+
+    #[test]
+    fn four_k_prefetch_converges_within_the_cache_budget() {
+        let workers = Workers::start(HWND::default()).unwrap();
+        let path = PathBuf::from("large.pdf");
+        let mut state = State::new(workers, &[path.clone()], (3840.0, 2160.0), 1.0, 1.0, theme::palette(theme::Mode::Light));
+        state.animations = false;
+        state.zoom = Zoom::Ratio(4.0);
+        state.pdf = Some(PdfView::new(path, vec![LETTER; 20], Arc::default(), 0));
+        let document = state.layout().document;
+        prepare(&mut state, document);
+        state.content_drawn = true;
+
+        let first = wanted(&state, &state.layout());
+        let requested = first.iter().map(frame_bytes).sum::<usize>();
+        assert!(requested <= TILE_BUDGET, "{requested} bytes of work exceeds the {TILE_BUDGET}-byte cache");
+        assert!(first.iter().any(|item| matches!(item.key.work, Work::Tile { .. })), "the visible tiles stay first-class work");
+
+        let mut cache = Lru::new(TILE_BUDGET);
+        let mut keys = Vec::new();
+        for item in first.into_iter().filter(|item| frame_bytes(item) > 0) {
+            let bytes = frame_bytes(&item);
+            keys.push(item.key);
+            cache.insert(item.key, (), bytes);
+        }
+        assert!(keys.iter().all(|key| cache.peek(key).is_some()), "the planned working set must coexist without eviction");
+        assert!(cache.used() <= TILE_BUDGET);
+    }
 
     /// A window 1100 by 800 pixels showing a 20-page PDF.
     fn pdf_state(zoom: Zoom) -> State {

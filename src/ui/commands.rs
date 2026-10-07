@@ -19,6 +19,8 @@ pub(super) enum Command {
     Revert,
     CopyText,
     Find,
+    FindNext,
+    FindPrevious,
     Rotate,
     Flip,
     Crop,
@@ -142,6 +144,8 @@ pub(super) fn info(command: Command) -> Info {
         Revert => i("Revert to opened", "&Revert to opened", None, None),
         CopyText => i("Copy text", "&Copy text", None, None),
         Find => i("Search", "&Find...", Some(SEARCH), Some('F')),
+        FindNext => i("Next search result", "Find &next", None, None),
+        FindPrevious => i("Previous search result", "Find pre&vious", None, None),
         Rotate => i("Rotate right", "Rotate righ&t", Some(ROTATE), Some('R')),
         Flip => i("Flip horizontally", "F&lip horizontally", Some(FLIP), Some('L')),
         Crop => i("Crop", "Cr&op", Some(CROP), Some('C')),
@@ -254,6 +258,8 @@ pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
     (ctrl(0x53), SaveCopy),
     (ctrl(0x50), Print),
     (ctrl(0x46), Find),
+    (plain(0x72), FindNext),
+    (shift(0x72), FindPrevious),
     (ctrl(0x43), CopyText),
     (ctrl_shift(0x43), CopyText),
     (ctrl(0x5A), Undo),
@@ -351,8 +357,7 @@ pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
         Share => false,
         _ if !ready => false,
         Flip | Resize | RemoveBackground | BatchFolder | BatchSelected => !x.pdf,
-        Find | ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | ViewContinuous | ViewSingle
-        | ViewTwoPages => x.pdf,
+        ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | ViewContinuous | ViewSingle | ViewTwoPages => x.pdf,
         Previous => x.can_previous,
         Next => x.can_next,
         SaveCopy | Print => !x.saving,
@@ -456,7 +461,7 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
         "&Edit",
         items(
             &[
-                Some(Undo), Some(Revert), None, Some(CopyText), Some(Find), None, Some(Rotate), Some(Flip),
+                Some(Undo), Some(Revert), None, Some(CopyText), Some(Find), Some(FindNext), Some(FindPrevious), None, Some(Rotate), Some(Flip),
                 Some(Crop), Some(Resize), Some(RemoveBackground), None, Some(DeletePage), Some(MovePage),
                 Some(InsertPage),
             ],
@@ -491,7 +496,7 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
 /// Right-click on the document. Only commands that apply to this file show.
 pub(super) fn document_menu(x: &Ctx) -> Vec<MenuItem> {
     let list = [
-        Some(CopyText), Some(Find), None, Some(Highlight), Some(Note), Some(TextBox), Some(PlaceSignature),
+        Some(CopyText), Some(Find), Some(FindNext), Some(FindPrevious), None, Some(Highlight), Some(Note), Some(TextBox), Some(PlaceSignature),
         Some(FillForm), None, Some(Rotate), Some(Crop), Some(Flip), Some(Resize), Some(RemoveBackground), None,
         Some(DeletePage), Some(InsertPage), Some(MovePage), None, Some(ZoomIn), Some(ZoomOut), Some(Fit),
         Some(ZoomToSelection), None,
@@ -542,7 +547,7 @@ pub(super) fn access_key(label: &str) -> Option<char> {
 
 pub(super) const ALL: &[Command] = &[
     Open, SaveCopy, ExtractPage, Combine, Print, BatchFolder, BatchSelected, FileInfo, Share, CloseTab, Exit, Undo,
-    Revert, CopyText, Find, Rotate, Flip, Crop, Resize, RemoveBackground, DeletePage, MovePage, InsertPage,
+    Revert, CopyText, Find, FindNext, FindPrevious, Rotate, Flip, Crop, Resize, RemoveBackground, DeletePage, MovePage, InsertPage,
     Previous, Next, ZoomIn, ZoomOut, Fit, FitWidth, ActualSize, ZoomToSelection, ViewContinuous, ViewSingle,
     ViewTwoPages, Slideshow, ToggleSidebar, ToggleMarkup, NextTab, PreviousTab, Tab(0),
     NextPane, PreviousPane, Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow,

@@ -384,6 +384,8 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
             Phase::Move => {
                 if tracking {
                     to_document = true;
+                } else if on_document {
+                    to_document = true;
                 } else {
                     let hover = over.filter(|(id, _)| *id != WidgetId::Document);
                     let tooltip = hover.is_some_and(|(_, t)| t);
@@ -409,6 +411,17 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
             }
         }
     });
+    if to_document && e.phase == Phase::Down {
+        let edit_path = with_state(|s| {
+            (s.crop || s.markup.is_some()).then(|| s.path.clone()).flatten()
+        })
+        .flatten();
+        if let Some(path) = edit_path {
+            if !actions::prepare_save(hwnd, &path) {
+                return;
+            }
+        }
+    }
     if to_document && with_state(|s| document::on_pointer(hwnd, s, &e)).unwrap_or(false) {
         repaint = true;
     }
@@ -548,11 +561,25 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
             return true;
         }
     }
+    if ctrl && !alt && vk == 0x41 {
+        let handled = with_state(|s| {
+            let pages = text_page_count(s.pdf.as_ref().map(|pdf| pdf.sizes.len() as u32), s.frame.is_some());
+            if !matches!(s.focus, Some(WidgetId::Document) | None) || pages == 0 {
+                return false;
+            }
+            s.text_selection = Some(super::text::all(pages));
+            true
+        });
+        if handled == Some(true) {
+            invalidate(hwnd);
+            return true;
+        }
+    }
     // Scroll keys go to the focused sidebar list or the document.
     if !ctrl && !alt {
         let handled = with_state(|s| match s.focus {
             Some(WidgetId::SidebarItem(index)) => sidebar::key(s, vk, index),
-            Some(WidgetId::Document) | None => document::key(s, vk, shift),
+            Some(WidgetId::Document) | None => document::text_key(s, vk, shift) || document::key(s, vk, shift),
             _ => false,
         });
         if handled == Some(true) {
@@ -572,6 +599,10 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
         return true;
     }
     false
+}
+
+fn text_page_count(pdf_pages: Option<u32>, has_image: bool) -> u32 {
+    pdf_pages.unwrap_or_else(|| u32::from(has_image))
 }
 
 /// Settings broadcasts are rare, so the theme is simply read and applied again.
@@ -614,23 +645,35 @@ unsafe fn close(hwnd: HWND) {
         sheet::finish(None);
         return;
     }
-    let (dirty, saving) =
-        with_state(|s| (s.sessions.values().any(|e| e.dirty), s.exporting)).unwrap_or((false, false));
+    with_state(|s| s.pause_save_dispatch(true));
+    let (dirty, saving) = with_state(|s| s.window_close_state()).unwrap_or((false, false));
     if saving {
         sheet::alert(hwnd, "Saving", "Wait for the save to finish, then close Preview.");
+        with_state(|s| s.pause_save_dispatch(false));
         return;
     }
     if dirty
         && !sheet::confirm(
             hwnd,
             "Close Preview?",
-            "You have edits that are not saved. Your original files are unchanged.",
+            "Some edits are not saved. Closing now discards those edits.",
             "Close without saving",
         )
     {
+        with_state(|s| s.pause_save_dispatch(false));
         return;
     }
+    if with_state(|s| s.window_close_state().1).unwrap_or(true) {
+        sheet::alert(hwnd, "Saving", "A file started saving. Wait for it to finish, then close Preview.");
+        with_state(|s| s.pause_save_dispatch(false));
+        return;
+    }
+    with_state(|s| s.cleanup_snapshots());
     let _ = DestroyWindow(hwnd);
+}
+
+fn session_end_allowed((dirty, saving): (bool, bool)) -> bool {
+    !dirty && !saving
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -744,6 +787,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        WM_SETCURSOR if (lparam.0 as u16) as i32 == HTCLIENT as i32 => {
+            let mut point = POINT::default();
+            let text = GetCursorPos(&mut point).is_ok() && ScreenToClient(hwnd, &mut point).as_bool() && with_state(|s| {
+                document::text_point(s, point.x as f32, point.y as f32).is_some_and(|(page, at, size)| {
+                    s.text_layers.get(&page).is_some_and(|layer| super::text::over_text(layer, at, size))
+                })
+            }) == Some(true);
+            if text {
+                let _ = SetCursor(Some(LoadCursorW(None, IDC_IBEAM).unwrap_or_default()));
+                LRESULT(1)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
         WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
             match read_pointer(hwnd, message, wparam) {
                 Some((event, secondary_up)) => {
@@ -841,6 +898,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             close(hwnd);
             LRESULT(0)
         }
+        WM_QUERYENDSESSION => {
+            let allowed = with_state(|s| session_end_allowed(s.window_close_state())).unwrap_or(true);
+            LRESULT(allowed as isize)
+        }
+        WM_ENDSESSION if wparam.0 != 0 => {
+            with_state(|s| {
+                if session_end_allowed(s.window_close_state()) {
+                    s.cleanup_snapshots();
+                }
+            });
+            LRESULT(0)
+        }
         WM_DESTROY => {
             let _ = KillTimer(Some(hwnd), 1);
             PostQuitMessage(0);
@@ -853,7 +922,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_ocr_has_one_selectable_text_page_even_for_multiframe_images() {
+        assert_eq!(text_page_count(None, true), 1);
+        assert_eq!(text_page_count(Some(12), true), 12);
+        assert_eq!(text_page_count(None, false), 0);
+    }
     use crate::ui::commands::Ctx;
+
+    #[test]
+    fn windows_session_end_is_allowed_only_when_every_revision_is_safe() {
+        assert!(session_end_allowed((false, false)));
+        assert!(!session_end_allowed((true, false)), "dirty edits block logoff or restart");
+        assert!(!session_end_allowed((false, true)), "an in-flight save blocks logoff or restart");
+    }
 
     fn layout(maximized: bool) -> Layout {
         let tabs = vec!["a.pdf".to_string()];

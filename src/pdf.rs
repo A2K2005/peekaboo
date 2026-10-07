@@ -1003,6 +1003,21 @@ impl PdfEngine {
         Ok(())
     }
 
+    /// Gives an immutable opened snapshot the password already accepted for
+    /// its logical file. The worker may read either path, but the secret stays
+    /// inside the PDF engine thread.
+    pub fn alias_password(&mut self, original: &Path, alias: &Path) {
+        let (Ok(original), Ok(alias)) = (original.canonicalize(), alias.canonicalize()) else {
+            return;
+        };
+        if original == alias || self.passwords.contains_key(&alias) {
+            return;
+        }
+        if let Some(secret) = self.passwords.get(&original).map(|password| password.0.clone()) {
+            self.passwords.insert(alias, Password(secret));
+        }
+    }
+
     pub fn render(
         &mut self,
         path: &Path,

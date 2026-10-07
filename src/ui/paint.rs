@@ -2,16 +2,15 @@
 //! empty state, sheets, focus rectangles, keytips, and tooltips. The
 //! document itself is drawn by document.rs.
 use super::{
-    app::{invalidate, with_state, State},
+    app::{State, invalidate, with_state},
     commands::glyph,
     document,
-    render::{fonts, measure, Align, Fonts, Painter, Renderer},
-    theme::Theme,
-    widgets::{self, in_scope, Layout, Rect, Region, Role, SidebarList, Widget, WidgetId},
+    render::{Align, Fonts, Painter, Renderer, fonts, measure},
+    theme::{Mode, Rgba, Theme},
+    widgets::{self, Layout, Rect, Region, Role, SidebarList, Widget, WidgetId, in_scope},
     worker::{Key, Work},
 };
 use windows::{
-    core::Result,
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
         Graphics::Direct2D::ID2D1Bitmap,
@@ -19,6 +18,7 @@ use windows::{
         System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
         UI::{Input::KeyboardAndMouse::GetFocus, WindowsAndMessaging::*},
     },
+    core::Result,
 };
 
 struct Look<'a> {
@@ -48,22 +48,22 @@ fn background(state: &State, w: &Widget) -> Option<Fill> {
     }
 }
 
-fn icon_button(l: &Look, state: &State, w: &Widget, solid_when_checked: bool) {
+fn icon_button(l: &Look, state: &State, w: &Widget) {
     let fill = background(state, w);
     let checked = w.checked == Some(true);
     let mut color = if w.enabled { l.t.text } else { l.t.text_disabled };
     let r = w.rect;
-    if checked && solid_when_checked {
-        l.p.fill_round(r, 4.0 * l.s, l.t.accent);
+    if checked && l.t.mode == Mode::Contrast {
+        l.p.fill_round(r, 6.0 * l.s, l.t.accent);
         color = l.t.on_accent;
     } else if let Some(fill) = fill {
-        l.p.fill_round(r, 4.0 * l.s, if fill == Fill::Hover { l.t.hover } else { l.t.pressed });
+        l.p.fill_round(r, 6.0 * l.s, if fill == Fill::Hover { l.t.hover } else { l.t.pressed });
         color = l.t.hover_text;
     } else if checked {
-        l.p.fill_round(r, 4.0 * l.s, l.t.hover);
+        l.p.fill_round(r, 6.0 * l.s, l.t.hover);
         color = l.t.hover_text;
     }
-    if checked && !solid_when_checked {
+    if checked && l.t.mode != Mode::Contrast {
         let bar = Rect { x0: r.x0 + 12.0 * l.s, y0: r.y1 - 3.0 * l.s, x1: r.x1 - 12.0 * l.s, y1: r.y1 };
         l.p.fill_round(bar, 1.5 * l.s, l.t.accent);
     }
@@ -86,11 +86,11 @@ fn text_button(l: &Look, state: &State, w: &Widget) {
         color = l.t.text_disabled;
     }
     if !w.primary {
-        l.p.fill_round(r, 4.0 * l.s, l.t.field);
+        l.p.fill_round(r, 6.0 * l.s, l.t.field);
     }
-    l.p.fill_round(r, 4.0 * l.s, back);
+    l.p.fill_round(r, 6.0 * l.s, back);
     if !w.primary || l.t.mode == super::theme::Mode::Contrast {
-        l.p.stroke_round(r, 4.0 * l.s, l.t.border, l.t.border_width * l.s.floor().max(1.0));
+        l.p.stroke_round(r, 6.0 * l.s, l.t.control_border, l.t.border_width * l.s.floor().max(1.0));
     }
     l.p.text(&w.label, r.inset(4.0 * l.s), &l.f.body, color, Align::Center);
 }
@@ -111,7 +111,13 @@ fn title_bar(l: &Look, state: &State, layout: &Layout) {
                     let inner = Rect { x0: r.x0 + 2.0 * s, y0: r.y0 + 2.0 * s, x1: r.x1 - 2.0 * s, y1: r.y1 - 4.0 * s };
                     l.p.fill_round(inner, 4.0 * s, if fill == Fill::Hover { l.t.hover } else { l.t.pressed });
                 }
-                let color = if selected { l.t.selected_text } else if state.hover == Some(w.id) { l.t.hover_text } else { l.t.text_secondary };
+                let color = if selected {
+                    l.t.selected_text
+                } else if state.hover == Some(w.id) {
+                    l.t.hover_text
+                } else {
+                    l.t.text_secondary
+                };
                 let text = Rect { x0: r.x0 + 12.0 * s, y0: r.y0, x1: r.x1 - 36.0 * s, y1: r.y1 };
                 l.p.text(&w.label, text, &l.f.body, color, Align::Leading);
             }
@@ -124,7 +130,7 @@ fn title_bar(l: &Look, state: &State, layout: &Layout) {
                 }
                 l.p.glyph(glyph::CANCEL, w.rect, &l.f.caption_icon, color);
             }
-            WidgetId::NewTab => icon_button(l, state, w, false),
+            WidgetId::NewTab => icon_button(l, state, w),
             WidgetId::Minimize | WidgetId::Maximize | WidgetId::Close => {
                 let g = match w.id {
                     WidgetId::Minimize => glyph::MINIMIZE,
@@ -140,11 +146,8 @@ fn title_bar(l: &Look, state: &State, layout: &Layout) {
                         _ => l.t.pressed,
                     };
                     l.p.fill(w.rect, back);
-                    color = if w.id == WidgetId::Close && l.t.mode != super::theme::Mode::Contrast {
-                        super::theme::Rgba::hex(0xffffff)
-                    } else {
-                        l.t.hover_text
-                    };
+                    color =
+                        if w.id == WidgetId::Close && l.t.mode != super::theme::Mode::Contrast { super::theme::Rgba::hex(0xffffff) } else { l.t.hover_text };
                 }
                 l.p.glyph(g, w.rect, &l.f.caption_icon, color);
             }
@@ -163,25 +166,22 @@ fn title_bar(l: &Look, state: &State, layout: &Layout) {
 fn bars(l: &Look, state: &State, layout: &Layout) {
     let s = l.s;
     l.p.fill(layout.toolbar, l.t.bar);
-    if let Some(path) = &state.path {
-        let name = super::app::file_name(path);
-        l.p.text(&name, layout.title_text, &l.f.strong, l.t.text, Align::Leading);
-    }
     for w in layout.widgets.iter().filter(|w| w.region == Region::Toolbar) {
-        icon_button(l, state, w, false);
+        icon_button(l, state, w);
     }
     if let Some(bar) = layout.markup_bar {
-        l.p.fill(bar, l.t.surface);
-        l.p.fill(Rect { y0: bar.y1 - s, ..bar }, l.t.border);
+        l.p.fill(bar, l.t.bar);
+        l.p.fill(Rect { y0: bar.y1 - s, ..bar }, l.t.divider);
         for w in layout.widgets.iter().filter(|w| w.region == Region::MarkupBar) {
-            icon_button(l, state, w, true);
+            icon_button(l, state, w);
         }
     } else {
-        l.p.fill(Rect { y0: layout.toolbar.y1 - s, ..layout.toolbar }, l.t.border);
+        l.p.fill(Rect { y0: layout.toolbar.y1 - s, ..layout.toolbar }, l.t.divider);
     }
     if let Some(side) = layout.sidebar {
-        l.p.fill(side, l.t.surface);
-        l.p.fill(Rect { x0: side.x1 - s, ..side }, l.t.border);
+        l.p.fill(side, l.t.content_layer);
+        l.p.fill(Rect { y1: layout.sidebar_panel.y0, ..side }, l.t.bar);
+        l.p.fill(Rect { x0: side.x1 - s, ..side }, l.t.divider);
         for w in layout.widgets.iter().filter(|w| w.role == Role::SidebarTab) {
             let selected = w.checked == Some(true);
             if let Some(fill) = background(state, w) {
@@ -198,9 +198,9 @@ fn bars(l: &Look, state: &State, layout: &Layout) {
     }
     let status = layout.status;
     l.p.fill(status, l.t.bar);
-    l.p.fill(Rect { y1: status.y0 + s, ..status }, l.t.border);
+    l.p.fill(Rect { y1: status.y0 + s, ..status }, l.t.divider);
     let text = Rect { x0: status.x0 + 12.0 * s, y0: status.y0, x1: status.x1 - 12.0 * s, y1: status.y1 };
-    l.p.text(&state.status, text, &l.f.caption, l.t.text_secondary, Align::Leading);
+    l.p.text(&state.visible_status(), text, &l.f.caption, l.t.text_secondary, Align::Leading);
 }
 
 /// The sidebar list: thumbnails with page numbers, outline entries indented
@@ -265,6 +265,7 @@ fn empty_state(l: &Look, state: &State, layout: &Layout) {
     for w in layout.widgets.iter().filter(|w| w.region == Region::Document) {
         text_button(l, state, w);
     }
+    l.p.text("Or drop a PDF or image here", empty.drop_hint, &l.f.body, l.t.text_secondary, Align::Center);
     l.p.text("Recent files", empty.recent_heading, &l.f.strong, l.t.text, Align::Center);
     l.p.text("Files you open will show here.", empty.recent, &l.f.body, l.t.text_secondary, Align::Center);
 }
@@ -275,15 +276,20 @@ fn sheet(l: &Look, state: &State, layout: &Layout) {
     };
     let s = l.s;
     l.p.fill(Rect { y0: layout.title_bar.y1, ..Rect::new(0.0, 0.0, state.size.0, state.size.1) }, l.t.scrim);
-    l.p.fill_round(card.card, 8.0 * s, l.t.surface);
-    l.p.stroke_round(card.card, 8.0 * s, l.t.border, l.t.border_width * s.floor().max(1.0));
+    if l.t.mode != Mode::Contrast {
+        for (spread, alpha) in [(12.0, 0.04), (6.0, 0.08), (2.0, 0.16)] {
+            l.p.fill_round(card.card.inset(-spread * s), (10.0 + spread) * s, Rgba(0.0, 0.0, 0.0, alpha));
+        }
+    }
+    l.p.fill_round(card.card, 10.0 * s, l.t.surface);
+    l.p.stroke_round(card.card, 10.0 * s, l.t.control_border, l.t.border_width * s.floor().max(1.0));
     l.p.text(&sheet.title, card.title, &l.f.title, l.t.text, Align::Leading);
     l.p.text(&sheet.message, card.message, &l.f.wrap, l.t.text, Align::Leading);
     let focused = unsafe { GetFocus() };
     for ((field, label), rect) in sheet.fields.iter().zip(&card.labels).zip(&card.fields) {
         l.p.text(&field.label, *label, &l.f.body, l.t.text, Align::Leading);
-        l.p.fill_round(*rect, 4.0 * s, l.t.field);
-        l.p.stroke_round(*rect, 4.0 * s, l.t.border, l.t.border_width * s.floor().max(1.0));
+        l.p.fill_round(*rect, 6.0 * s, l.t.field);
+        l.p.stroke_round(*rect, 6.0 * s, l.t.control_border, l.t.border_width * s.floor().max(1.0));
         // Fluent text boxes mark focus with an accent line at the bottom.
         let line = if field.edit == focused { 2.0 * s } else { 0.0 };
         if line > 0.0 {
@@ -342,8 +348,8 @@ fn tooltip(l: &Look, state: &State, layout: &Layout) {
     let below = w.rect.y1 + 4.0 * s;
     let y = if below + bh > state.size.1 { w.rect.y0 - bh - 4.0 * s } else { below };
     let r = Rect::new(x, y, bw, bh);
-    l.p.fill_round(r, 4.0 * s, l.t.surface);
-    l.p.stroke_round(r, 4.0 * s, l.t.border, l.t.border_width * s.floor().max(1.0));
+    l.p.fill_round(r, 6.0 * s, l.t.surface);
+    l.p.stroke_round(r, 6.0 * s, l.t.control_border, l.t.border_width * s.floor().max(1.0));
     l.p.text(&w.tooltip, r, &l.f.caption, l.t.text, Align::Center);
 }
 
@@ -448,9 +454,7 @@ unsafe fn benchmark_marker(hwnd: HWND, state: &mut State) {
     let mut counter = 0;
     let mut frequency = 0;
     if DwmFlush().is_ok() && QueryPerformanceCounter(&mut counter).is_ok() && QueryPerformanceFrequency(&mut frequency).is_ok() {
-        let json = format!(
-            "{{\"first_content_qpc\":{counter},\"qpc_frequency\":{frequency},\"width\":{width},\"height\":{height},\"page_count\":{pages}}}"
-        );
+        let json = format!("{{\"first_content_qpc\":{counter},\"qpc_frequency\":{frequency},\"width\":{width},\"height\":{height},\"page_count\":{pages}}}");
         if std::fs::write(path, json).is_ok() {
             state.marked = true;
             if std::env::var_os("PFW_BENCH_AUTOCLOSE").is_some_and(|v| v == "1") {
@@ -467,7 +471,7 @@ mod tests {
         model::Frame,
         ui::{
             document::{PdfView, Tile},
-            theme::{palette, Mode, Rgba},
+            theme::{Mode, Rgba, palette},
             view::Zoom,
             widgets::Scope,
             worker::Workers,
@@ -475,11 +479,15 @@ mod tests {
     };
     use std::{path::PathBuf, sync::Arc};
     use windows::{
-        core::Interface,
         Win32::{
-            Graphics::{Direct2D::{Common::*, *}, Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, Imaging::*},
-            System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED},
+            Graphics::{
+                Direct2D::{Common::*, *},
+                Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                Imaging::*,
+            },
+            System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx},
         },
+        core::Interface,
     };
 
     /// A white page with grey text lines.
@@ -567,7 +575,7 @@ mod tests {
 
     /// Draws one scene into a WIC bitmap with the window's own drawing code
     /// and returns its premultiplied BGRA pixels. No window is created.
-    unsafe fn render(mode: Mode, scene: &str, size: (u32, u32), scale: f32, text_scale: f32) -> Frame {
+    unsafe fn render(mode: Mode, scene: &str, size: (u32, u32), scale: f32, text_scale: f32) -> (Frame, Layout) {
         let (bitmap, painter) = target(size);
         let paths: Vec<PathBuf> = match scene {
             "empty" => Vec::new(),
@@ -599,12 +607,12 @@ mod tests {
                         crate::ui::sheet::Field { label: "Width in pixels".into(), edit: HWND::default() },
                         crate::ui::sheet::Field { label: "Height in pixels".into(), edit: HWND::default() },
                     ],
-                    buttons: vec!["OK".into(), "Cancel".into()],
+                    buttons: vec!["Resize".into(), "Cancel".into()],
                     cancel: 1,
                     result: None,
                 });
-                state.focus = Some(WidgetId::SheetButton(1));
-                state.focus_visible = true;
+                state.focus = Some(WidgetId::SheetField(0));
+                state.focus_visible = false;
             }
             _ => {}
         }
@@ -623,7 +631,7 @@ mod tests {
         let drew = draw(&painter, frame_bitmap.as_ref(), &fonts, &mut state, &layout);
         painter.target.EndDraw(None, None).unwrap();
         assert_eq!(drew, !paths.is_empty(), "{scene}");
-        pixels(&bitmap, size)
+        (pixels(&bitmap, size), layout)
     }
 
     /// Tiles draw where they arrived; a page without tiles shows its
@@ -659,10 +667,14 @@ mod tests {
             let (x, y, k) = rect(0);
             let text = pixel(&shot, (x + 100.0 * k) as u32, (y + 83.0 * k) as u32);
             assert!(close(text, Rgba(96.0 / 255.0, 96.0 / 255.0, 96.0 / 255.0, 1.0)), "page 1 text line from its tile: {text:?}");
+            let halo = pixel(&shot, (x + 30.0) as u32, (y - 2.0) as u32);
+            let far_canvas = pixel(&shot, (x + 30.0) as u32, (y - 6.0) as u32);
+            assert!(!close(halo, palette(Mode::Light).canvas), "a page has visible depth outside its edge");
+            assert!(close(far_canvas, palette(Mode::Light).canvas), "the halo remains restrained");
             let (x, y, _) = rect(1);
             let thumb = pixel(&shot, (x + 30.0) as u32, (y + 10.0).min(size.1 as f32 - 40.0) as u32);
             assert!(close(thumb, Rgba(150.0 / 255.0, 200.0 / 255.0, 1.0, 1.0)), "page 2 placeholder: {thumb:?}");
-            let gap = pixel(&shot, (x + 30.0) as u32, (y - 4.0) as u32);
+            let gap = pixel(&shot, (x + 30.0) as u32, (y - 6.0) as u32);
             assert!(close(gap, palette(Mode::Light).canvas), "the gap between pages");
             // Without a thumbnail, the missing tiles count as blank.
             state.cache.clear();
@@ -710,6 +722,13 @@ mod tests {
             let items = document::wanted(&state, &layout);
             let tiles: Vec<u32> = items.iter().filter_map(|i| if let Work::Tile { page, .. } = i.key.work { Some(page) } else { None }).collect();
             assert!(tiles.iter().all(|p| *p <= 2), "only pages in view and the margin: {tiles:?}");
+            open_pdf(&painter, &mut state, &[], &[0, 1]);
+            let sizes = state.pdf.as_ref().unwrap().sizes.clone();
+            state.pdf.as_mut().unwrap().update(sizes, Arc::new(vec![crate::model::PdfEdit::RotateRight { page: 0 }]), &mut state.cache);
+            assert!(
+                document::wanted(&state, &state.layout()).iter().any(|item| item.key.work == Work::Thumb { page: 0 }),
+                "an edited visible page replaces its stale thumbnail"
+            );
             state.sidebar_open = true;
             let with_sidebar = kinds(&state);
             assert!(with_sidebar.len() > later.len(), "sidebar thumbnails come last");
@@ -725,6 +744,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn four_k_view_and_sidebar_work_converges_in_the_bitmap_cache() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let (_, painter) = target((10, 10));
+            let workers = Workers::start(HWND::default()).unwrap();
+            let path = PathBuf::from("large.pdf");
+            let mut state = State::new(workers, &[path.clone()], (3840.0, 2160.0), 1.0, 1.0, palette(Mode::Light));
+            state.animations = false;
+            state.zoom = Zoom::Ratio(4.0);
+            state.sidebar_open = true;
+            state.content_drawn = true;
+            state.pdf = Some(PdfView::new(path, vec![[612.0, 792.0]; 20], Arc::default(), 0));
+            let document = state.layout().document;
+            document::prepare(&mut state, document);
+
+            let source = page();
+            let current = document::wanted(&state, &state.layout());
+            let first_tile = current.iter().find(|item| matches!(item.key.work, Work::Tile { .. })).unwrap();
+            let mut old_key = first_tile.key;
+            if let Work::Tile { page, col, row, .. } = old_key.work {
+                old_key.work = Work::Tile { page, scale: 0.5f32.to_bits(), col, row };
+            }
+            let old_frame = tile(&source, first_tile.scale, first_tile.region);
+            state.cache.insert(old_key, Tile { bitmap: painter.upload(&old_frame).unwrap(), fresh: true }, old_frame.pixels.len());
+
+            let mut active: Vec<Key> = Vec::new();
+            let mut drained = false;
+            for round in 0..3 {
+                state.cache.new_frame();
+                for key in &active {
+                    let drawn = match key.work {
+                        Work::Tile { page, .. } => page == state.page,
+                        Work::Thumb { .. } => true,
+                        _ => false,
+                    };
+                    if drawn {
+                        state.cache.get(key);
+                    }
+                }
+                let items = document::wanted(&state, &state.layout());
+                let frames: Vec<_> = items.into_iter().filter(|item| matches!(item.key.work, Work::Tile { .. } | Work::Thumb { .. })).collect();
+                if frames.is_empty() {
+                    assert!(round > 0);
+                    drained = true;
+                    continue;
+                }
+                assert!(!drained, "a later frame must not re-request evicted margin work");
+                if round == 0 {
+                    active = frames.iter().map(|item| item.key).collect();
+                    assert!(frames.iter().any(|item| matches!(item.key.work, Work::Thumb { page } if page > 1)), "visible sidebar thumbnails are reserved");
+                }
+                for item in frames {
+                    let frame = match item.key.work {
+                        Work::Tile { .. } => tile(&source, item.scale, item.region),
+                        Work::Thumb { .. } => {
+                            let (w, h) = (item.region[2], item.region[3]);
+                            Frame { width: w, height: h, pixels: THUMB.repeat((w * h) as usize), page_count: 1, source_width: w, source_height: h }
+                        }
+                        _ => unreachable!(),
+                    };
+                    state.cache.insert(item.key, Tile { bitmap: painter.upload(&frame).unwrap(), fresh: true }, frame.pixels.len());
+                }
+            }
+            assert!(drained, "the bitmap work queue must converge");
+            assert!(
+                document::wanted(&state, &state.layout()).iter().all(|item| !matches!(item.key.work, Work::Tile { .. } | Work::Thumb { .. })),
+                "retained view work must drain the queue"
+            );
+            assert!(active.iter().all(|key| state.cache.peek(key).is_some()), "visible and sidebar entries remain resident");
+            assert!(state.cache.used() <= super::super::cache::TILE_BUDGET);
+        }
+    }
+
     fn pixel(frame: &Frame, x: u32, y: u32) -> Rgba {
         let i = ((y * frame.width + x) * 4) as usize;
         let p = &frame.pixels[i..i + 4];
@@ -733,6 +826,15 @@ mod tests {
 
     fn close(a: Rgba, b: Rgba) -> bool {
         (a.0 - b.0).abs() < 0.02 && (a.1 - b.1).abs() < 0.02 && (a.2 - b.2).abs() < 0.02
+    }
+
+    fn fixture_ink(frame: &Frame) -> usize {
+        let (x0, x1) = (frame.width / 4, frame.width * 3 / 4);
+        let (y0, y1) = (frame.height / 4, frame.height * 3 / 4);
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| ((y * frame.width + x) * 4) as usize))
+            .filter(|i| frame.pixels[*i..*i + 3].iter().all(|channel| (88..=104).contains(channel)))
+            .count()
     }
 
     /// Times the first chrome draw in a fresh process (font loading, text
@@ -768,12 +870,41 @@ mod tests {
                 let theme = palette(mode);
                 for scene in ["document", "image", "empty", "sheet", "keytips"] {
                     let size = (1100, 760);
-                    let shot = render(mode, scene, size, 1.0, 1.0);
+                    let (shot, layout) = render(mode, scene, size, 1.0, 1.0);
                     // Title bar drag space and the bottom-right canvas corner.
                     assert!(close(pixel(&shot, 700, 10), theme.chrome), "{name} {scene} title bar");
                     assert!(close(pixel(&shot, 700, 45), theme.bar) || scene == "sheet", "{name} {scene} toolbar");
                     if scene != "sheet" {
                         assert!(close(pixel(&shot, size.0 - 4, size.1 - 40), theme.canvas), "{name} {scene} canvas");
+                    }
+                    if scene == "image" {
+                        assert!(!close(pixel(&shot, size.0 / 2, size.1 / 2), theme.canvas), "{name} image content");
+                    }
+                    if matches!(scene, "document" | "image") {
+                        assert!(fixture_ink(&shot) > 100, "{name} {scene} must contain the synthetic gray document ink");
+                    }
+                    if scene == "document" {
+                        let side = layout.sidebar.expect("PDF fixture has a sidebar");
+                        let header = pixel(&shot, (side.x0 + 4.0) as u32, ((side.y0 + layout.sidebar_panel.y0) / 2.0) as u32);
+                        let body = pixel(&shot, (side.x0 + 4.0) as u32, (layout.sidebar_panel.y0 + 8.0) as u32);
+                        assert!(close(header, theme.bar), "{name} sidebar header uses the commanding layer");
+                        assert!(close(body, theme.content_layer), "{name} sidebar body uses the content layer");
+
+                        let selected = layout.widgets.iter().find(|w| w.id == WidgetId::Command(crate::ui::commands::Command::Highlight)).unwrap();
+                        let indicator = pixel(&shot, ((selected.rect.x0 + selected.rect.x1) / 2.0) as u32, (selected.rect.y1 - 1.0) as u32);
+                        assert!(close(indicator, theme.accent), "{name} checked markup uses an accent indicator");
+                        if mode != Mode::Contrast {
+                            let center =
+                                pixel(&shot, ((selected.rect.x0 + selected.rect.x1) / 2.0) as u32, ((selected.rect.y0 + selected.rect.y1) / 2.0) as u32);
+                            assert!(!close(center, theme.accent), "{name} checked markup is not a solid accent tile");
+                        }
+                    }
+                    if scene == "sheet" && mode != Mode::Contrast {
+                        let card = layout.sheet.as_ref().unwrap().card;
+                        let near = pixel(&shot, (card.x0 - 1.0) as u32, ((card.y0 + card.y1) / 2.0) as u32);
+                        let far = pixel(&shot, (card.x0 - 14.0) as u32, ((card.y0 + card.y1) / 2.0) as u32);
+                        let luma = |c: Rgba| 0.2126 * c.0 + 0.7152 * c.1 + 0.0722 * c.2;
+                        assert!(luma(near) < luma(far), "{name} sheet has an opaque-card halo");
                     }
                     let path = out.join(format!("{name}-{scene}.png"));
                     let _ = std::fs::remove_file(&path);
@@ -783,8 +914,13 @@ mod tests {
             // 150% display scale and 225% text size, the largest Windows allows.
             for (scale, text_scale, file) in [(1.5, 1.0, "light-document-150dpi.png"), (1.0, 2.25, "light-document-text225.png")] {
                 let size = ((1100.0 * scale) as u32, (760.0 * scale) as u32);
-                let shot = render(Mode::Light, "document", size, scale, text_scale);
+                let (shot, layout) = render(Mode::Light, "document", size, scale, text_scale);
                 assert!(close(pixel(&shot, size.0 - 4, size.1 - 60), palette(Mode::Light).canvas), "{file}");
+                if text_scale == 2.25 {
+                    let rotate = layout.widgets.iter().find(|w| w.id == WidgetId::Command(crate::ui::commands::Command::Rotate)).unwrap();
+                    assert_eq!(rotate.rect.width(), 40.0, "225% text preserves 40 DIP icon targets");
+                    assert!(layout.toolbar.height() >= 20.0 * text_scale + 12.0);
+                }
                 let path = out.join(file);
                 let _ = std::fs::remove_file(&path);
                 crate::imaging::export_frame(&shot, &path).unwrap();

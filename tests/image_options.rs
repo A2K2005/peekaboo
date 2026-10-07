@@ -77,6 +77,8 @@ fn export_with_options_controls_format_and_quality() {
         &options(ImageFormat::WebP, 0.75, true),
     )
     .unwrap();
+    assert_eq!(lossy_bytes, std::fs::metadata(&lossy).unwrap().len());
+    assert_eq!(lossless_bytes, std::fs::metadata(&lossless).unwrap().len());
     // RIFF header, then the first chunk: "VP8 " is lossy, "VP8L" is lossless.
     assert_eq!(&std::fs::read(&lossy).unwrap()[12..16], b"VP8 ");
     assert_eq!(&std::fs::read(&lossless).unwrap()[12..16], b"VP8L");
@@ -345,5 +347,16 @@ fn display_decode_uses_native_scale_without_changing_the_picture() {
         let fast = imaging::decode(&path, 320, 240).unwrap();
         let slow = imaging::decode_edited(&path, 320, 240, &reference).unwrap();
         assert!(mean_difference(&fast, &slow) < 1.5, "{extension} changed");
+    }
+}
+
+#[test]
+fn webp_estimate_rejects_dimensions_that_export_cannot_encode() {
+    com();
+    let photo = fixture("image-small.png");
+    for (width, height, message) in [(16384, 400, "16383"), (10000, 10000, "64 megapixels")] {
+        let error = imaging::estimate_size(&photo, &[ImageEdit::Resize { width, height }],
+            &options(ImageFormat::WebP, 0.8, false)).unwrap_err();
+        assert!(error.contains(message), "{error}");
     }
 }

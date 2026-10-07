@@ -10,7 +10,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Ole::{ReleaseStgMedium, CF_HDROP};
 use windows::Win32::System::Registry::{
-    RegDeleteTreeW, RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ,
+    RegDeleteTreeW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
@@ -42,6 +42,22 @@ fn read(key: &str, name: &str) -> Option<String> {
     status
         .is_ok()
         .then(|| String::from_utf16_lossy(&buffer[..size as usize / 2 - 1]))
+}
+
+fn write(key: &str, name: &str, value: &str) {
+    let data: Vec<u16> = value.encode_utf16().chain([0]).collect();
+    unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(key),
+            &HSTRING::from(name),
+            REG_SZ.0,
+            Some(data.as_ptr().cast()),
+            (data.len() * 2) as u32,
+        )
+    }
+    .ok()
+    .unwrap();
 }
 
 /// Every value under a key as sorted "key|name|data" lines, with `root` replaced by "ROOT".
@@ -180,17 +196,146 @@ fn script_writes_the_same_keys_as_rust() {
         assert!(status.success());
     };
     let (rust, script_root) = (format!(r"{TEST_ROOT}\rust"), format!(r"{TEST_ROOT}\script"));
+    for root in [&rust, &script_root] {
+        let classes = format!(r"{root}\Classes");
+        let source = format!(r"{root}\MachineClasses");
+        write(&format!(r"{classes}\.pdf"), "", "Fallback.Pdf");
+        write(&format!(r"{classes}\.pdf"), "PerceivedType", "document");
+        write(
+            &format!(r"{root}\UserChoice\.pdf"),
+            "ProgId",
+            "Existing.Pdf",
+        );
+        write(
+            &format!(
+                r"{source}\Existing.Pdf\ShellEx\{}",
+                "{8895b1c6-b41f-4c1c-a562-0d564250836f}"
+            ),
+            "",
+            "{22222222-2222-2222-2222-222222222222}",
+        );
+    }
+    let baseline = dump(&script_root);
     integration::register_at(&rust, &exe).unwrap();
     run(&script_root, &[]);
     let written = dump(&rust);
     assert!(!written.is_empty());
     assert_eq!(dump(&script_root), written);
 
+    integration::unregister_at(&rust, &exe).unwrap();
     run(&script_root, &["-Unregister"]);
-    assert_eq!(dump(&script_root), Vec::<String>::new());
+    let rust_unregistered = dump(&rust);
+    assert_eq!(dump(&script_root), rust_unregistered);
+    assert!(
+        baseline.iter().all(|entry| rust_unregistered.contains(entry)),
+        "unregister leaves every pre-existing value"
+    );
     drop(key);
     let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(TEST_ROOT)) };
     assert_eq!(status, ERROR_FILE_NOT_FOUND, "the test key is gone");
+}
+
+#[test]
+fn registration_preserves_shell_handlers_through_uninstall() {
+    let _key = TestKey;
+    let base = format!(r"{TEST_ROOT}\preserve");
+    let classes = format!(r"{base}\Classes");
+    let extension = format!(r"{classes}\.pdf");
+    let existing = "Existing.Pdf";
+    let fallback = "Fallback.Pdf";
+    let thumbnail_key = format!(
+        r"{extension}\ShellEx\{}",
+        "{e357fccd-a995-4576-b01f-234630154e96}"
+    );
+    let preview_key = format!(
+        r"{extension}\ShellEx\{}",
+        "{8895b1c6-b41f-4c1c-a562-0d564250836f}"
+    );
+    let old_thumbnail = "{11111111-1111-1111-1111-111111111111}";
+    let old_preview = "{22222222-2222-2222-2222-222222222222}";
+    let changed_preview = "{33333333-3333-3333-3333-333333333333}";
+
+    write(&extension, "", fallback);
+    write(&extension, "PerceivedType", "document");
+    write(&format!(r"{base}\UserChoice\.pdf"), "ProgId", existing);
+    write(&thumbnail_key, "", old_thumbnail);
+    write(
+        &format!(
+            r"{base}\MachineClasses\{existing}\ShellEx\{}",
+            "{8895b1c6-b41f-4c1c-a562-0d564250836f}"
+        ),
+        "",
+        old_preview,
+    );
+    write(
+        &format!(r"{base}\MachineClasses\.png"),
+        "PerceivedType",
+        "image",
+    );
+    assert_eq!(read(&extension, "").as_deref(), Some(fallback));
+    assert_eq!(
+        read(
+            &format!(
+                r"{base}\MachineClasses\{existing}\ShellEx\{}",
+                "{8895b1c6-b41f-4c1c-a562-0d564250836f}"
+            ),
+            ""
+        )
+        .as_deref(),
+        Some(old_preview)
+    );
+
+    let exe = Path::new(r"C:\Apps\Preview\preview-for-windows.exe");
+    integration::register_at(&base, exe).unwrap();
+    assert_eq!(
+        read(&extension, "PerceivedType").as_deref(),
+        Some("document")
+    );
+    assert_eq!(read(&thumbnail_key, "").as_deref(), Some(old_thumbnail));
+    assert_eq!(read(&preview_key, "").as_deref(), Some(old_preview));
+    let png = format!(r"{classes}\.png");
+    assert_eq!(read(&png, "PerceivedType").as_deref(), Some("image"));
+    let marker = format!(r"{base}\PreviewForWindows\AssociationPreservation\pdf");
+    assert_eq!(
+        read(&marker, "PerceivedType"),
+        None,
+        "existing value is not owned"
+    );
+    assert_eq!(
+        read(&marker, "ThumbnailHandler"),
+        None,
+        "existing handler is not owned"
+    );
+    assert_eq!(
+        read(&marker, "PreviewHandler").as_deref(),
+        Some(old_preview)
+    );
+
+    // Another installer changed the copied value. Unregister must not remove it.
+    write(&preview_key, "", changed_preview);
+    integration::unregister_at(&base, exe).unwrap();
+    assert_eq!(read(&extension, "").as_deref(), Some(fallback));
+    assert_eq!(
+        read(&extension, "PerceivedType").as_deref(),
+        Some("document")
+    );
+    assert_eq!(read(&thumbnail_key, "").as_deref(), Some(old_thumbnail));
+    assert_eq!(read(&preview_key, "").as_deref(), Some(changed_preview));
+    assert_eq!(read(&marker, "PreviewHandler"), None);
+    assert_eq!(
+        read(&png, "PerceivedType").as_deref(),
+        Some("image"),
+        "copied Explorer metadata remains so the per-user key cannot mask it"
+    );
+
+    integration::register_at(&base, exe).unwrap();
+    assert_eq!(
+        read(&png, "PerceivedType").as_deref(),
+        Some("image"),
+        "registration after uninstall reads the inherited metadata again"
+    );
+    integration::unregister_at(&base, exe).unwrap();
+    assert_eq!(read(&png, "PerceivedType").as_deref(), Some("image"));
 }
 
 #[test]

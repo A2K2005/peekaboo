@@ -20,8 +20,8 @@ use windows::Win32::System::Com::IDataObject;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::Ole::{IDropSource, DROPEFFECT, DROPEFFECT_COPY};
 use windows::Win32::System::Registry::{
-    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER,
-    HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_SZ,
+    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW, HKEY,
+    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_LBUTTON, VK_RBUTTON};
@@ -268,6 +268,9 @@ pub fn hand_off(class: &str, command: &Command) -> Option<InstanceGuard> {
 // ---------- File associations, per user ----------
 
 const APP_KEY: &str = "PreviewForWindows";
+const THUMBNAIL_HANDLER: &str = "{e357fccd-a995-4576-b01f-234630154e96}";
+const PREVIEW_HANDLER: &str = "{8895b1c6-b41f-4c1c-a562-0d564250836f}";
+const PRESERVED_KEY: &str = "AssociationPreservation";
 /// Extension, ProgID, and type name. Default Programs asks for app-specific ProgIDs.
 pub const FILE_TYPES: [(&str, &str, &str); 11] = [
     (".pdf", "PreviewForWindows.Pdf", "PDF document"),
@@ -322,6 +325,7 @@ pub fn register_at(base: &str, exe: &Path) -> Result<(), String> {
     let open = format!("\"{exe}\" \"%1\"");
     let icon = format!("\"{exe}\",0");
     for (extension, progid, type_name) in FILE_TYPES {
+        preserve_shell_metadata(base, &classes, extension)?;
         let key = format!("{classes}\\{progid}");
         set(&key, "", type_name)?;
         set(&format!("{key}\\DefaultIcon"), "", &icon)?;
@@ -397,11 +401,124 @@ pub fn unregister_at(base: &str, exe: &Path) -> Result<(), String> {
     }
     keep_first_error(delete_tree(&format!("{classes}\\Applications\\{exe_name}")));
     keep_first_error(delete_tree(&format!("{base}\\{APP_KEY}\\Capabilities")));
+    keep_first_error(delete_tree(&format!("{base}\\{APP_KEY}\\{PRESERVED_KEY}")));
     keep_first_error(delete_value(
         &format!("{base}\\RegisteredApplications"),
         APP_NAME,
     ));
     result
+}
+
+/// A per-user extension key hides machine-wide shell metadata. Copy only
+/// missing values from the effective association, then record each copy.
+/// Uninstall leaves these copied Explorer values in place because deleting a
+/// shared extension key cannot be made conditional on another installer not
+/// writing it at the same time.
+fn preserve_shell_metadata(base: &str, classes: &str, extension: &str) -> Result<(), String> {
+    let extension_key = format!("{classes}\\{extension}");
+    let marker_key = preservation_key(base, extension);
+    // Read the merged association before creating the per-user extension key.
+    let perceived_source = source_value(base, extension, "PerceivedType")?;
+    let previous_progid = previous_progid(base, extension)?;
+    let mut handlers = Vec::new();
+    for (handler, marker) in [
+        (THUMBNAIL_HANDLER, "ThumbnailHandler"),
+        (PREVIEW_HANDLER, "PreviewHandler"),
+    ] {
+        let direct = source_value(base, &format!("{extension}\\ShellEx\\{handler}"), "")?;
+        let inherited = match previous_progid.as_deref() {
+            Some(progid) if !progid.is_empty() => {
+                source_value(base, &format!("{progid}\\ShellEx\\{handler}"), "")?
+            }
+            _ => None,
+        };
+        handlers.push((handler, marker, direct.or(inherited)));
+    }
+
+    if get(HKEY_CURRENT_USER, &extension_key, "PerceivedType")?.is_none() {
+        if let Some(value) = perceived_source.filter(|value| valid_perceived_type(value)) {
+            set(&extension_key, "PerceivedType", &value)?;
+            set(&marker_key, "PerceivedType", &value)?;
+        }
+    }
+
+    for (handler, marker, source) in handlers {
+        let target = format!("{extension_key}\\ShellEx\\{handler}");
+        if get(HKEY_CURRENT_USER, &target, "")?.is_some() {
+            continue;
+        }
+        if let Some(value) = source.filter(|value| valid_handler_clsid(value)) {
+            set(&target, "", &value)?;
+            set(&marker_key, marker, &value)?;
+        }
+    }
+    Ok(())
+}
+
+fn preservation_key(base: &str, extension: &str) -> String {
+    format!(
+        "{base}\\{APP_KEY}\\{PRESERVED_KEY}\\{}",
+        extension.trim_start_matches('.')
+    )
+}
+
+/// Tests use a scratch MachineClasses key as the effective source. Real
+/// registration reads HKCR before the per-user extension key is created.
+fn source_value(base: &str, relative_key: &str, name: &str) -> Result<Option<String>, String> {
+    if base.eq_ignore_ascii_case("Software") {
+        get(HKEY_CLASSES_ROOT, relative_key, name)
+    } else {
+        get(
+            HKEY_CURRENT_USER,
+            &format!("{base}\\MachineClasses\\{relative_key}"),
+            name,
+        )
+    }
+}
+
+fn previous_progid(base: &str, extension: &str) -> Result<Option<String>, String> {
+    let user_choice = if base.eq_ignore_ascii_case("Software") {
+        get(
+            HKEY_CURRENT_USER,
+            &format!(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{extension}\\UserChoice"
+            ),
+            "ProgId",
+        )?
+    } else {
+        get(
+            HKEY_CURRENT_USER,
+            &format!("{base}\\UserChoice\\{extension}"),
+            "ProgId",
+        )?
+    };
+    match user_choice.filter(|value| !value.is_empty()) {
+        Some(value) => Ok(Some(value)),
+        None => source_value(base, extension, ""),
+    }
+}
+
+fn valid_handler_clsid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 38
+        && bytes[0] == b'{'
+        && bytes[37] == b'}'
+        && bytes[9] == b'-'
+        && bytes[14] == b'-'
+        && bytes[19] == b'-'
+        && bytes[24] == b'-'
+        && bytes[1..37]
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
+}
+
+fn valid_perceived_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 fn exe_parts(exe: &Path) -> Result<(&str, &str), String> {
@@ -427,6 +544,47 @@ fn set(key: &str, name: &str, value: &str) -> Result<(), String> {
     }
     .ok()
     .map_err(|e| format!("Could not write the registry key {key}: {e}"))
+}
+
+fn get(root: HKEY, key: &str, name: &str) -> Result<Option<String>, String> {
+    let mut size = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            root,
+            &HSTRING::from(key),
+            &HSTRING::from(name),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    status
+        .ok()
+        .map_err(|e| format!("Could not read the registry key {key}: {e}"))?;
+    let mut data = vec![0u16; (size as usize).div_ceil(2)];
+    unsafe {
+        RegGetValueW(
+            root,
+            &HSTRING::from(key),
+            &HSTRING::from(name),
+            RRF_RT_REG_SZ,
+            None,
+            Some(data.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    }
+    .ok()
+    .map_err(|e| format!("Could not read the registry key {key}: {e}"))?;
+    data.truncate(
+        data.iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(data.len()),
+    );
+    Ok(Some(String::from_utf16_lossy(&data)))
 }
 
 fn delete_tree(key: &str) -> Result<(), String> {

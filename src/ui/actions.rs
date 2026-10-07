@@ -1,11 +1,11 @@
 //! Runs commands. Ported from the pre-split shell's command handler, with
 //! sheets in place of dialog windows and message boxes.
 use super::{
-    app::{add_tabs, close_tab, invalidate, navigate, open, schedule, select_tab, with_state},
+    app::{add_tabs, close_tab, invalidate, navigate, open, schedule, select_tab, with_state, SaveStatus},
     commands::{self, Command, MenuItem, Pick},
     document,
     files::{choose, choose_many, destination, folder, load_signature, save_signature},
-    menu, sheet,
+    disk::{self, Choice}, menu, sheet,
     view::{ViewMode, Zoom},
     widgets::{self, WidgetId},
     worker::{Job, Request, SaveKind},
@@ -50,6 +50,20 @@ fn relayout(state: &mut super::app::State) {
     if state.frame.is_some() || state.pdf.is_some() {
         state.due = Some(Instant::now() + Duration::from_millis(120));
     }
+}
+
+fn toggle_sidebar(state: &mut super::app::State) {
+    if state.path.is_some() && !state.is_pdf() {
+        return;
+    }
+    state.sidebar_open = !state.sidebar_open;
+    if !state.sidebar_open && matches!(state.focus, Some(WidgetId::SidebarTab(_) | WidgetId::SidebarItem(_))) {
+        let layout = state.layout();
+        state.focus = [WidgetId::Document, WidgetId::Command(Command::Open), WidgetId::Command(Command::ToggleSidebar)]
+            .into_iter()
+            .find(|id| layout.widgets.iter().any(|w| w.id == *id && w.enabled && w.focusable));
+    }
+    relayout(state);
 }
 
 pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
@@ -104,8 +118,7 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
         ToggleSidebar | ToggleMarkup => {
             with_state(|s| {
                 if command == ToggleSidebar {
-                    s.sidebar_open = !s.sidebar_open;
-                    relayout(s);
+                    toggle_sidebar(s);
                 } else {
                     // The document renders again when the slide ends (tick).
                     s.set_markup(!s.markup_open);
@@ -169,14 +182,16 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
                 width: 1,
                 height: 1,
                 sessions: s.sessions.clone(),
+                sources: s.opened_sources(),
             },
             width,
             height,
             count,
+            s.text_selection,
         ))
     })
     .flatten();
-    let Some((request, width, height, count)) = snapshot else {
+    let Some((request, width, height, count, text_selection)) = snapshot else {
         return;
     };
     let pdf = super::worker::is_pdf(&request.path);
@@ -245,10 +260,31 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             };
             start_export(hwnd, Job::Save(request, output, kind), "Saving a new copy...");
         }
+        FindNext | FindPrevious => {
+            with_state(|s| {
+                if s.find_hits.is_empty() {
+                    s.status = "Press Ctrl+F to search.".into();
+                    return;
+                }
+                s.find_index = if command == FindNext {
+                    (s.find_index + 1) % s.find_hits.len()
+                } else {
+                    (s.find_index + s.find_hits.len() - 1) % s.find_hits.len()
+                };
+                let page = s.find_hits[s.find_index].page;
+                if s.pdf.is_some() {
+                    document::go_to_page(s, page, true);
+                } else {
+                    s.page = page;
+                }
+                s.status = format!("Match {} of {}", s.find_index + 1, s.find_hits.len());
+            });
+            invalidate(hwnd);
+        }
         CopyText | Find | FillForm => {
             let job = match command {
                 FillForm => Job::Fields(request),
-                CopyText => Job::Text(request),
+                CopyText => Job::Text(request, text_selection.filter(|selection| !selection.is_empty())),
                 _ => {
                     let Some(values) = sheet::input(hwnd, "Find", &[("Text to find", String::new())]) else {
                         return;
@@ -282,10 +318,12 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             }
         }
         Resize => {
-            let Some(values) = sheet::input(
+            let fields = resize_fields(width);
+            let Some(values) = sheet::input_action(
                 hwnd,
                 "Resize image",
-                &[("Width in pixels", width.to_string()), ("Height in pixels (leave empty to keep the shape)", String::new())],
+                &fields,
+                "Resize",
             ) else {
                 return;
             };
@@ -418,16 +456,169 @@ unsafe fn edit_same_page(hwnd: HWND, request: &Request, change: impl FnOnce(&mut
     edit(hwnd, change);
 }
 
+fn choice_from_button(button: usize) -> Option<(Choice, bool)> {
+    match button {
+        0 => Some((Choice::Overwrite, false)),
+        1 => Some((Choice::Copy, false)),
+        _ => None,
+    }
+}
+
+pub(super) unsafe fn prepare_save(hwnd: HWND, path: &std::path::Path) -> bool {
+    let Some((session_id, opened, configured)) = with_state(|s| {
+        s.saves.get(path).map(|save| (save.id, save.opened, save.target.is_some()))
+    })
+    .flatten()
+    else {
+        sheet::alert(hwnd, "Cannot edit this file", "Preview has not finished opening this file. Try again in a moment.");
+        return false;
+    };
+    if configured {
+        return true;
+    }
+
+    let preference_dir = disk::app_dir();
+    let mut remembered = preference_dir.as_deref().and_then(disk::remembered);
+    if remembered == Some(Choice::Overwrite) && disk::can_overwrite(path).is_err() {
+        if let Some(dir) = &preference_dir {
+            let _ = disk::remember(dir, None);
+        }
+        remembered = None;
+    }
+    let (choice, remember) = match remembered {
+        Some(choice) => (choice, false),
+        None => {
+            let message = format!("Choose how Preview should save edits to {}.", super::app::file_name(path));
+            let Some((button, _)) = sheet::ask(
+                hwnd,
+                "Save edits",
+                &message,
+                &[],
+                false,
+                &["Overwrite", "Save copy"],
+                usize::MAX,
+                Some(1),
+            ) else {
+                return false;
+            };
+            let Some(choice) = choice_from_button(button) else {
+                return false;
+            };
+            let remember = sheet::ask(
+                hwnd,
+                "Remember this choice?",
+                "Preview can use this choice automatically the next time you edit a file.",
+                &[],
+                false,
+                &["Remember", "This file only"],
+                usize::MAX,
+                Some(1),
+            )
+            .is_some_and(|(button, _)| button == 0);
+            (choice.0, remember)
+        }
+    };
+
+    let (target, expected) = match choice {
+        Choice::Overwrite => {
+            if let Err(error) = disk::can_overwrite(path) {
+                sheet::alert(hwnd, "Cannot overwrite this file", &format!("{error} Choose Save a copy instead."));
+                return false;
+            }
+            (path.to_path_buf(), Some(opened))
+        }
+        Choice::Copy => {
+            let Some(target) = disk::copy_name(path, None) else {
+                sheet::alert(hwnd, "Cannot save a copy", "Choose a file inside a writable folder.");
+                return false;
+            };
+            (target, None)
+        }
+    };
+    let configured = with_state(|s| {
+        let Some(save) = s.saves.get_mut(path).filter(|save| save.id == session_id) else {
+            return false;
+        };
+        save.configure(target, expected);
+        true
+    }) == Some(true);
+    if configured && remember {
+        if let Some(dir) = preference_dir {
+            if let Err(error) = disk::remember(&dir, Some(choice)) {
+                sheet::alert(hwnd, "Choice not remembered", &format!("Preview will use this choice once. {error}"));
+            }
+        }
+    }
+    configured
+}
+
+pub(super) unsafe fn resolve_save_conflict(hwnd: HWND, path: std::path::PathBuf) {
+    let conflict = with_state(|s| {
+        s.saves
+            .get(&path)
+            .filter(|save| matches!(save.status, SaveStatus::Conflict))
+            .and_then(|save| save.target.clone().map(|target| (save.id, target)))
+    })
+    .flatten();
+    let Some((session_id, current_target)) = conflict else {
+        return;
+    };
+    let message = format!(
+        "{} changed outside Preview while edits were being saved. Overwrite that version, save your edits to a new copy, or keep autosave paused.",
+        super::app::file_name(&current_target)
+    );
+    let Some((button, _)) = sheet::ask(
+        hwnd,
+        "File changed",
+        &message,
+        &[],
+        false,
+        &["Overwrite changed file", "Save a copy", "Keep paused"],
+        2,
+        Some(2),
+    ) else {
+        return;
+    };
+    let resolution = match button {
+        0 => Some((current_target, None, true)),
+        1 => disk::copy_name(&path, None).map(|target| (target, None, false)),
+        _ => None,
+    };
+    let Some((target, expected, force)) = resolution else {
+        return;
+    };
+    with_state(|s| {
+        if let Some(save) = s.saves.get_mut(&path).filter(|save| save.id == session_id) {
+            save.resolve_conflict(target, expected, force);
+        }
+    });
+    invalidate(hwnd);
+}
+
 /// Applies one recipe change to the open file and renders again.
 unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
+    let Some(path) = with_state(|s| s.path.clone()).flatten() else {
+        return;
+    };
+    if !prepare_save(hwnd, &path) {
+        return;
+    }
     with_state(|s| {
-        let Some(path) = s.path.clone() else {
+        if s.path.as_ref() != Some(&path) {
             return;
-        };
+        }
         let mut edits = s.sessions.remove(&path).unwrap_or_default();
+        let before = (edits.image.clone(), edits.pdf.clone());
         change(s, &mut edits);
-        edits.dirty = !edits.image.is_empty() || !edits.pdf.is_empty();
+        let changed = before.0 != edits.image || before.1 != edits.pdf;
+        if changed {
+            edits.dirty = true;
+            s.edited_for_save(&path, Instant::now());
+        }
         s.sessions.insert(path, edits);
+        if !changed {
+            return;
+        }
         if s.pdf.is_none() {
             // An edited image may change shape, so it shows whole again.
             s.zoom = Zoom::Fit;
@@ -435,6 +626,10 @@ unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut supe
         }
         schedule(hwnd, s, 0);
     });
+}
+
+fn resize_fields(width: u32) -> [(&'static str, String); 2] {
+    [("Width in pixels", width.to_string()), ("Height in pixels (leave empty to keep the shape)", String::new())]
 }
 
 /// Width and height from the resize sheet. An empty height keeps the shape.
@@ -706,17 +901,11 @@ pub(super) unsafe fn fill_field(hwnd: HWND, generation: u64, fields: Vec<crate::
         sheet::alert(hwnd, "Fill a form field", "Enter true or false for this checkbox.");
         return;
     }
-    with_state(|s| {
-        if s.generation != generation {
-            return;
-        }
-        if let Some(path) = s.path.clone() {
-            let edits = s.sessions.entry(path).or_default();
+    if with_state(|s| s.generation == generation) == Some(true) {
+        edit(hwnd, |_, edits| {
             edits.pdf.push(PdfEdit::FillField { page: field.page, annotation_index: field.annotation_index, value });
-            edits.dirty = true;
-            schedule(hwnd, s, 0);
-        }
-    });
+        });
+    }
 }
 
 /// Right-click or the context menu key. `at` is in client pixels; None
@@ -750,6 +939,43 @@ pub(super) unsafe fn context_menu(hwnd: HWND, at: Option<(f32, f32)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_edit_buttons_encode_choice_and_memory_explicitly() {
+        assert_eq!(choice_from_button(0), Some((Choice::Overwrite, false)));
+        assert_eq!(choice_from_button(1), Some((Choice::Copy, false)));
+        assert_eq!(choice_from_button(2), None);
+    }
+
+    #[test]
+    fn closing_sidebar_rehomes_focus_without_stealing_other_focus() {
+        use super::super::{app::State, theme, worker::Workers};
+        let workers = Workers::start(HWND::default()).unwrap();
+        let mut s = State::new(workers, &[], (800.0, 600.0), 1.0, 1.0, theme::palette(theme::Mode::Light));
+        for has_document in [false, true] {
+            s.path = has_document.then(|| std::path::PathBuf::from("report.pdf"));
+            for id in [WidgetId::SidebarTab(1), WidgetId::SidebarItem(20)] {
+                s.sidebar_open = true;
+                s.focus = Some(id);
+                s.focus_visible = true;
+                toggle_sidebar(&mut s);
+                let expected = if has_document { WidgetId::Document } else { WidgetId::Command(Command::Open) };
+                assert_eq!(s.focus, Some(expected));
+                assert!(s.layout().widgets.iter().any(|w| Some(w.id) == s.focus && w.enabled && w.focusable));
+                assert!(s.focus_visible);
+                assert!(!s.sidebar_open);
+            }
+        }
+        s.sidebar_open = true;
+        s.focus = Some(WidgetId::Command(Command::ToggleSidebar));
+        toggle_sidebar(&mut s);
+        assert_eq!(s.focus, Some(WidgetId::Command(Command::ToggleSidebar)));
+        assert!(s.layout().widgets.iter().any(|w| Some(w.id) == s.focus && w.enabled && w.focusable));
+        s.path = Some(std::path::PathBuf::from("photo.png"));
+        s.sidebar_open = true;
+        toggle_sidebar(&mut s);
+        assert!(s.sidebar_open && s.layout().sidebar.is_none(), "an image cannot change the saved PDF sidebar preference");
+    }
 
     #[test]
     fn info_pane_formats_sizes_and_dates() {
@@ -806,7 +1032,16 @@ mod tests {
         s.path = Some(path.clone());
         s.page = 3;
         s.generation = 9;
-        let request = Request { generation: 9, path, page: 3, delta: 0, width: 1, height: 1, sessions: HashMap::new() };
+        let request = Request {
+            generation: 9,
+            path,
+            page: 3,
+            delta: 0,
+            width: 1,
+            height: 1,
+            sessions: HashMap::new(),
+            sources: HashMap::new(),
+        };
         assert!(same_target(&s, &request));
         s.page = 7;
         assert!(!same_target(&s, &request), "a Find result moved to page 8");
@@ -821,6 +1056,7 @@ mod tests {
     #[test]
     fn resize_keeps_shape_when_height_is_empty_and_rejects_bad_sizes() {
         let v = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+        assert_eq!(resize_fields(400), [("Width in pixels", "400".into()), ("Height in pixels (leave empty to keep the shape)", String::new())]);
         assert_eq!(resize_edit(400, 300, &v("200", "")), Some(ImageEdit::Resize { width: 200, height: 150 }));
         assert_eq!(resize_edit(400, 300, &v(" 200 ", "50")), Some(ImageEdit::Resize { width: 200, height: 50 }));
         assert_eq!(resize_edit(400, 300, &v("0", "")), None);

@@ -14,13 +14,15 @@ Status: implemented development architecture, 2026-10-06. The owner delegated th
 
 ## Save and undo
 
-The UI keeps ordered edit recipes per source file. Undo removes the last edit. Revert clears the recipe. Exports reconstruct the source and apply the recipe, write a sibling temporary file, flush, validate, and publish a new filename without replacement. Existing files are not overwritten. PDF copies are full rewrites. Incremental in-place autosave and a crash-recovery journal are not implemented and are not implied by the Save Copy workflow.
+The UI keeps ordered edit recipes and a revision-aware save session per logical source file. Before the first edit, the user chooses overwrite or Save a copy and can remember that policy. The worker creates one immutable snapshot of the exact opened bytes. Rendering, text, forms, printing, export, batch work, and autosave replay recipes from that snapshot so an overwrite cannot apply an edit twice. Undo removes the last edit. Revert clears the recipe and publishes the opened snapshot through the same safe-save path.
+
+Autosave waits 500 ms after an edit. PDF saves use PDFium incremental output; image saves preserve identical source bytes when the format and recipe allow it, otherwise they export the edited frame. Every write is staged in the destination folder, flushed, rechecks the expected destination stamp, and then uses an atomic Windows replacement or a no-replace publish. Session and revision IDs reject stale completions. External changes pause autosave for an explicit overwrite, Save a copy, or keep-paused choice. Snapshot reader leases prevent tab, window, or Windows-session cleanup while work still reads a snapshot. Normal close removes snapshots; cleanup or recovery for snapshots left by a crash is not implemented.
 
 Protected PDF outputs are refused until preservation of their encryption is proven. Copy and print permissions are checked. Forms cannot be silently lost by merge/extraction. Existing cryptographic signature validity is not promised for rewritten copies. Native ink signatures are visual annotations, not cryptographic signatures.
 
 ## Responsiveness and memory
 
-UI rendering stays on the UI thread; file decode, PDF work, OCR, and segmentation do not. The worker currently serializes these operations, so a long AI operation delays later document work while the window remains interactive. A single display frame is capped at 64 MiB. Native decoder/model allocations are additional. This is not yet a bounded tile cache or neighbor-image prefetch design. Continuous multi-page scrolling, thumbnail virtualization, and cross-process parser isolation remain work.
+UI rendering stays on the UI thread. One document worker serializes PDFium and snapshot-dependent WIC work; a task worker runs independent OCR, background removal, and batch jobs. A 48 MiB optional bitmap-cache budget bounds prefetched tiles while visible demand can temporarily exceed it. Visible PDF tiles and sidebar thumbnails take priority, old-scale fallback tiles do not pin the cache, and adjacent images predecode next before previous. Native decoder and model allocations remain additional. Process memory, 60 fps scrolling, and cold launch still need reference-device measurements. Cross-process parser isolation remains future hardening.
 
 ## Errors and tests
 

@@ -21,6 +21,13 @@ The script never deletes an earlier output. If `dist\Preview` exists, it adds a 
 | `dist\Preview-x64.msix` | Packed and schema-checked package; test-signed only with `-Sign` |
 | `dist\Preview-msix-check\` | The MSIX unpacked again for the file-list check |
 
+Packaging currently stops at the `libwebp-sys 0.14.4` license audit. The
+published crate declares MIT but does not include the binding's license text or
+copyright notice. The failed staging directory retains the exact published
+Cargo and VCS provenance plus libwebp's `COPYING` and `PATENTS` files for
+review. Those files do not replace the missing binding notice. Obtain the
+upstream notice or replace the binding before producing a release package.
+
 What the script does:
 
 1. Checks the PDFium DLL hash against `runtime\x64\provenance.json`.

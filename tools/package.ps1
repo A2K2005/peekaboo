@@ -43,13 +43,44 @@ $cargoPath = if ($cargo) { $cargo.Source } else { Join-Path $env:USERPROFILE '.c
 $metadataText = & $cargoPath metadata --offline --locked --manifest-path (Join-Path $root 'Cargo.toml') --format-version 1
 if ($LASTEXITCODE -ne 0) { throw 'Could not read locked dependency metadata.' }
 $metadata = ($metadataText -join "`n") | ConvertFrom-Json
-foreach ($package in $metadata.packages) {
+# Audit the known native binding gap first so its exact vendored notices and
+# actionable failure are not hidden by an unrelated crate audit failure.
+$packages = $metadata.packages | Sort-Object @{ Expression = { if ($_.name -eq 'libwebp-sys') { 0 } else { 1 } } }, name
+foreach ($package in $packages) {
     if ($package.name -eq 'preview-for-windows') { continue }
     if (-not $package.license -or $package.license -match '(?<!L)GPL|AGPL') { throw "Review license for $($package.name): $($package.license)" }
     $licenseDirectory = Join-Path $notices "$($package.name)-$($package.version)"
     [IO.Directory]::CreateDirectory($licenseDirectory) | Out-Null
     $packageDirectory = Split-Path $package.manifest_path -Parent
     $licenseFiles = Get-ChildItem -LiteralPath $packageDirectory -File | Where-Object { $_.Name -match '^(LICENSE|LICENCE|COPYING|COPYRIGHT|NOTICE|license)' }
+    if ($package.name -eq 'libwebp-sys') {
+        # The published binding declares MIT in Cargo.toml but 0.14.4 contains no
+        # binding license text or copyright notice. Preserve its exact declaration
+        # and source revision plus every notice shipped for the vendored libwebp.
+        foreach ($item in @(
+            @('Cargo.toml.orig', 'binding-Cargo.toml.orig'),
+            @('.cargo_vcs_info.json', 'binding-vcs-info.json'),
+            @('vendor\COPYING', 'libwebp-COPYING'),
+            @('vendor\PATENTS', 'libwebp-PATENTS')
+        )) {
+            $source = Join-Path $packageDirectory $item[0]
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                throw "libwebp-sys $($package.version) is missing published provenance or vendor notice $($item[0])."
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $licenseDirectory $item[1])
+        }
+        @(
+            "Package: $($package.name) $($package.version)"
+            "Source: $($package.repository)"
+            "Published Cargo license declaration: $($package.license)"
+            'The published crate does not contain a license text or copyright notice for the Rust binding source.'
+            'The copied Cargo manifest and VCS metadata are provenance records, not substitutes for the missing binding notice.'
+            'The libwebp COPYING and PATENTS files apply to the vendored libwebp source.'
+        ) | Set-Content -LiteralPath (Join-Path $licenseDirectory 'BINDING-LICENSE-STATUS.txt') -Encoding utf8
+        if (-not $licenseFiles) {
+            throw "Cannot package libwebp-sys $($package.version): its published Cargo manifest declares $($package.license), but the crate contains no binding LICENSE, LICENCE, COPYING, COPYRIGHT, or NOTICE file. Exact Cargo/VCS provenance and vendored libwebp COPYING/PATENTS were retained in $licenseDirectory, but they do not supply the binding's missing copyright and permission notice. Replace the binding or obtain the exact upstream notice before release."
+        }
+    }
     if (-not $licenseFiles) { throw "No license texts found for $($package.name)." }
     foreach ($file in $licenseFiles) { Copy-Item -LiteralPath $file.FullName -Destination $licenseDirectory }
 }

@@ -569,6 +569,9 @@ pub fn estimate_size(
         let factory = factory()?;
         let (source, _) = edited_source(&factory, path, edits, None)?;
         let (width, height) = size(&source)?;
+        if options.format == ImageFormat::WebP {
+            webp_length(width, height)?;
+        }
         let budget = match options.format {
             ImageFormat::Jpeg | ImageFormat::Bmp => 40_000_000,
             _ => 4_000_000,
@@ -1015,23 +1018,27 @@ unsafe fn encode_wic(
     encoder.Commit().map_err(err)
 }
 /// WIC has no WebP encoder. libwebp encodes lossy WebP; image-webp encodes lossless.
-unsafe fn webp_bytes(
-    factory: &IWICImagingFactory,
-    source: &IWICBitmapSource,
-    options: &ExportOptions,
-) -> Result<Vec<u8>, String> {
-    let (width, height) = size(source)?;
+fn webp_length(width: u32, height: u32) -> Result<usize, String> {
     if width > 16383 || height > 16383 {
         return Err(
             "WebP allows at most 16383 pixels on each side. Resize the image, then try again."
                 .into(),
         );
     }
-    let length = (width as usize)
+    (width as usize)
         .checked_mul(height as usize)
         .and_then(|n| n.checked_mul(4))
         .filter(|n| *n <= 256 * 1024 * 1024)
-        .ok_or("Resize images above 64 megapixels before exporting WebP.")?;
+        .ok_or_else(|| "Resize images above 64 megapixels before exporting WebP.".into())
+}
+
+unsafe fn webp_bytes(
+    factory: &IWICImagingFactory,
+    source: &IWICBitmapSource,
+    options: &ExportOptions,
+) -> Result<Vec<u8>, String> {
+    let (width, height) = size(source)?;
+    let length = webp_length(width, height)?;
     let converter = factory.CreateFormatConverter().map_err(err)?;
     converter
         .Initialize(
@@ -1402,11 +1409,17 @@ fn batch_plan(
         .unwrap_or_else(|| "image".into());
     let mut output = output_dir.join(format!("{stem}.{extension}"));
     let mut n = 2;
-    while output.exists() || taken.contains(&output) {
+    while output.exists()
+        || taken.contains(&PathBuf::from(
+            output.as_os_str().to_string_lossy().to_lowercase(),
+        ))
+    {
         output = output_dir.join(format!("{stem} ({n}).{extension}"));
         n += 1;
     }
-    taken.insert(output.clone());
+    taken.insert(PathBuf::from(
+        output.as_os_str().to_string_lossy().to_lowercase(),
+    ));
     (output, options)
 }
 unsafe fn batch_one(
@@ -1471,6 +1484,28 @@ unsafe fn read_orientation(frame: &IWICBitmapFrameDecode) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn webp_limits_apply_before_sampling() {
+        assert!(webp_length(16384, 1).is_err());
+        assert!(webp_length(1, 16384).is_err());
+        assert!(webp_length(10000, 10000).is_err());
+        assert_eq!(webp_length(16383, 1).unwrap(), 16383 * 4);
+        assert_eq!(webp_length(8192, 8192).unwrap(), 256 * 1024 * 1024);
+    }
+    #[test]
+    fn batch_names_ignore_case() {
+        let mut taken = std::collections::HashSet::new();
+        let job = BatchJob {
+            quarter_turns: 0,
+            resize: None,
+            options: None,
+        };
+        let dir = Path::new("artifacts/not-created-case-test");
+        let first = batch_plan(Path::new("Photo.PNG"), dir, &job, &mut taken).0;
+        let second = batch_plan(Path::new("photo.png"), dir, &job, &mut taken).0;
+        assert_eq!(first.file_name().unwrap(), "Photo.PNG");
+        assert_eq!(second.file_name().unwrap(), "photo (2).png");
+    }
     #[test]
     fn crop_bounds() {
         let r = crop_rect(100, 200, 0.1, 0.2, 0.8, 0.9).unwrap();

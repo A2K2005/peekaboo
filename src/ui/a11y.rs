@@ -43,6 +43,10 @@ fn page_node(page: u32) -> NodeId {
     NodeId(1_000_000 + page as u64)
 }
 
+fn text_node(page: u32, line: usize) -> NodeId {
+    NodeId(3_000_000 + page as u64 * 10_000 + line as u64)
+}
+
 pub(super) fn node_id(id: WidgetId) -> NodeId {
     NodeId(match id {
         WidgetId::Tab(i) => 10_000 + i as u64,
@@ -178,16 +182,45 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
             for (page, r) in &g.layout.pages[shown] {
                 let x0 = layout.document.x0 + r.x0 - g.left;
                 let y0 = layout.document.y0 + r.y0 - g.top;
-                let bounds = super::widgets::Rect::new(x0, y0, r.width(), r.height());
-                nodes.push((page_node(*page), text(Role::Group, &format!("Page {} of {count}", page + 1), bounds)));
+                let page_bounds = super::widgets::Rect::new(x0, y0, r.width(), r.height());
+                let mut text_children = Vec::new();
+                if let Some(layer) = s.text_layers.get(page) {
+                    for (line_index, range) in super::text::lines(layer).into_iter().enumerate() {
+                        let label: String = layer.text.chars().skip(range.start).take(range.len()).collect();
+                        let rects = super::text::rects(layer, range);
+                        let line_bounds = rects.iter().fold(None, |out: Option<[f32; 4]>, rect| {
+                            Some(out.map_or(*rect, |a| [a[0].min(rect[0]), a[1].min(rect[1]), a[2].max(rect[2]), a[3].max(rect[3])]))
+                        });
+                        if let Some(rect) = line_bounds {
+                            let id = text_node(*page, line_index);
+                            let bounds = super::widgets::Rect {
+                                x0: page_bounds.x0 + rect[0] * page_bounds.width(),
+                                y0: page_bounds.y0 + rect[1] * page_bounds.height(),
+                                x1: page_bounds.x0 + rect[2] * page_bounds.width(),
+                                y1: page_bounds.y0 + rect[3] * page_bounds.height(),
+                            };
+                            nodes.push((id, text(Role::Label, label.trim_end(), bounds)));
+                            text_children.push(id);
+                        }
+                    }
+                }
+                let mut page_group = text(Role::Group, &format!("Page {} of {count}", page + 1), page_bounds);
+                page_group.set_children(text_children);
+                nodes.push((page_node(*page), page_group));
                 pages.push(page_node(*page));
             }
             if let Some((_, document)) = nodes.iter_mut().find(|(id, _)| *id == node_id(WidgetId::Document)) {
                 document.set_children(pages);
             }
+        } else if let Some(layer) = s.text_layers.get(&0) {
+            let id = text_node(0, 0);
+            nodes.push((id, text(Role::Label, &layer.text, s.image_rect)));
+            if let Some((_, document)) = nodes.iter_mut().find(|(node, _)| *node == node_id(WidgetId::Document)) {
+                document.set_children(vec![id]);
+            }
         }
     }
-    let mut status = text(Role::Status, &s.status, layout.status);
+    let mut status = text(Role::Status, &s.visible_status(), layout.status);
     status.set_live(Live::Polite);
     nodes.push((STATUS, status));
     root_children.push(STATUS);
@@ -323,6 +356,10 @@ mod tests {
             if !paths.is_empty() {
                 let sizes = vec![[612.0, 792.0]; 20];
                 s.pdf = Some(crate::ui::document::PdfView::new(paths[0].clone(), sizes, Default::default(), 0));
+                s.text_layers.insert(0, crate::model::TextLayer {
+                    text: "Accessible page text".into(),
+                    boxes: (0..20).map(|i| [0.1 + i as f32 * 0.01, 0.1, 0.11 + i as f32 * 0.01, 0.12]).collect(),
+                });
                 s.sidebar_open = true;
                 s.animations = false;
                 s.set_markup(true);
@@ -363,6 +400,7 @@ mod tests {
                 "document" => {
                     assert!(text.contains("Document \"Quarterly report.pdf, page 1 of 20\""));
                     assert!(text.contains("Group \"Page 1 of 20\""), "pages in view are in the tree");
+                    assert!(text.contains("Label \"Accessible page text\""), "loaded page text is in the tree");
                     assert!(text.contains("List \"Thumbnails\"") && text.contains("ListItem \"Thumbnail, page 1\""));
                     assert!(!text.contains("Thumbnail, page 20"), "rows out of view are not");
                 }

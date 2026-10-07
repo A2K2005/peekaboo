@@ -2,9 +2,6 @@
 //! and 9). PDF pages (PDFium) and images (Windows OCR) give the same layer,
 //! so one set of pure functions serves both. Positions are char indices in
 //! a layer's text; `TextLayer` keeps one box per char.
-//!
-//! Status (W2-2): this module is the tested core. The shell wiring (pointer
-//! and I-beam, find bar, OCR on hover, accessibility text runs) is not done.
 use crate::model::{NormRect, SearchHit, TextLayer};
 use std::{borrow::Borrow, ops::Range};
 
@@ -87,6 +84,12 @@ fn nearest(layer: &TextLayer, point: [f32; 2], size: [f32; 2]) -> Option<usize> 
         .map(|(i, b)| (i, gap(x, b[0] * size[0], b[2] * size[0]) + VERTICAL * gap(y, b[1] * size[1], b[3] * size[1])))
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
+}
+
+/// The glyph under or nearest to a click. Word and line expansion use the
+/// glyph itself, while caret placement may return the insertion point after it.
+pub(super) fn glyph(layer: &TextLayer, point: [f32; 2], size: [f32; 2]) -> Option<usize> {
+    nearest(layer, point, size)
 }
 
 /// The caret for a press at `point`: before or after the nearest char.
@@ -281,6 +284,9 @@ mod tests {
         assert_eq!(line(&l, 21), 19..30);
         assert_eq!(word(&l, 99), 30..30);
         assert_eq!(lines(&l), vec![0..19, 19..30], "each line keeps its break");
+        assert_eq!(glyph(&l, [0.459, 0.11], LETTER), Some(17), "right half of the final glyph still identifies that glyph");
+        assert_eq!(word(&l, glyph(&l, [0.459, 0.11], LETTER).unwrap()), 13..18, "again");
+        assert_eq!(line(&l, glyph(&l, [0.459, 0.11], LETTER).unwrap()), 0..18);
     }
 
     #[test]
@@ -298,6 +304,13 @@ mod tests {
         assert_eq!(selected_text(&Selection::caret(Pos { page: 0, index: 4 }), get).unwrap(), "");
         assert!(selected_text(&all(3), get).is_err(), "a page that cannot be read fails the copy");
         assert_eq!(clipboard_text("a\nb\r\nc"), "a\r\nb\r\nc");
+    }
+
+    #[test]
+    fn full_page_fallback_copy_preserves_text_layer_column_order() {
+        let expected = "Heading\nLeft 1\nLeft 2\nRight 1\nRight 2\nFooter";
+        let layer = TextLayer { text: expected.into(), boxes: vec![[0.0; 4]; expected.chars().count()] };
+        assert_eq!(selected_text(&all(1), |_| Ok(&layer)).unwrap(), expected);
     }
 
     #[test]

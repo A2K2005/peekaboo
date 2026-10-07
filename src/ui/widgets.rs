@@ -1,7 +1,7 @@
 //! Retained widget list: layout, hit testing, Tab order, F6 panes, and
 //! access keys. Pure code, so all of it runs in unit tests.
 use super::{
-    commands::{self, enabled, info, Command, Ctx},
+    commands::{self, Command, Ctx, enabled, info},
     worker::Note,
 };
 use crate::model::OutlineItem;
@@ -250,6 +250,7 @@ pub(super) struct Layout {
 #[derive(Debug, Default)]
 pub(super) struct Empty {
     pub(super) heading: Rect,
+    pub(super) drop_hint: Rect,
     pub(super) recent_heading: Rect,
     pub(super) recent: Rect,
 }
@@ -276,7 +277,7 @@ pub(super) fn title_height(text_scale: f32) -> f32 {
     40f32.max(20.0 * text_scale + 16.0)
 }
 fn row_height(text_scale: f32) -> f32 {
-    48f32.max(20.0 * text_scale + 16.0)
+    44f32.max(20.0 * text_scale + 12.0)
 }
 pub(super) fn control_height(text_scale: f32) -> f32 {
     32f32.max(20.0 * text_scale + 12.0)
@@ -379,8 +380,7 @@ pub(super) fn layout(input: &Input) -> Layout {
         w.push(tab);
         let close = 28.0 * s;
         let close_rect = Rect::new(rect.x1 - close - 6.0 * s, rect.y0 + (rect.height() - close) / 2.0, close, close);
-        let mut close_button =
-            plain_widget(WidgetId::TabClose(index), Role::Button, Region::TitleBar, close_rect, format!("Close {title}"));
+        let mut close_button = plain_widget(WidgetId::TabClose(index), Role::Button, Region::TitleBar, close_rect, format!("Close {title}"));
         close_button.glyph = Some(commands::glyph::CANCEL);
         close_button.tooltip = "Close tab (Ctrl+W)".into();
         // Ctrl+W closes the focused tab, so the close button stays out of Tab order.
@@ -388,25 +388,17 @@ pub(super) fn layout(input: &Input) -> Layout {
         w.push(close_button);
         x += tab_w;
     }
-    let mut new_tab = command_widget(
-        Command::Open,
-        Region::TitleBar,
-        Rect::new(x + GAP * s, tab_top, new_tab_w, title_h - tab_top - 2.0 * s),
-        &input.ctx,
-    );
+    let mut new_tab = command_widget(Command::Open, Region::TitleBar, Rect::new(x + GAP * s, tab_top, new_tab_w, title_h - tab_top - 2.0 * s), &input.ctx);
     new_tab.id = WidgetId::NewTab;
     new_tab.glyph = Some(commands::glyph::ADD);
     new_tab.label = "Open in new tab".into();
     new_tab.tooltip = "Open in new tab (Ctrl+T)".into();
     new_tab.access_key = None;
     w.push(new_tab);
-    for (index, (id, label)) in [
-        (WidgetId::Minimize, "Minimize"),
-        (WidgetId::Maximize, if input.maximized { "Restore" } else { "Maximize" }),
-        (WidgetId::Close, "Close"),
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, (id, label)) in
+        [(WidgetId::Minimize, "Minimize"), (WidgetId::Maximize, if input.maximized { "Restore" } else { "Maximize" }), (WidgetId::Close, "Close")]
+            .into_iter()
+            .enumerate()
     {
         let rect = Rect::new(caption_x + index as f32 * caption_w, 0.0, caption_w, title_h);
         let mut button = plain_widget(id, Role::Caption, Region::TitleBar, rect, label.into());
@@ -421,12 +413,9 @@ pub(super) fn layout(input: &Input) -> Layout {
     out.toolbar = Rect::new(0.0, title_h, width, row_h);
     let button = BUTTON * s;
     let button_y = title_h + (row_h - button) / 2.0;
-    w.push(command_widget(
-        Command::ToggleSidebar,
-        Region::Toolbar,
-        Rect::new(PAD * s, button_y, button, button),
-        &input.ctx,
-    ));
+    let mut sidebar = command_widget(Command::ToggleSidebar, Region::Toolbar, Rect::new(PAD * s, button_y, button, button), &input.ctx);
+    sidebar.enabled = !input.has_document || input.ctx.pdf;
+    w.push(sidebar);
     let step = button + GAP * s;
     let room = width - 2.0 * PAD * s - step - step;
     let fits = (room / step).floor().max(0.0) as usize;
@@ -459,12 +448,7 @@ pub(super) fn layout(input: &Input) -> Layout {
             x += step;
         }
         if !hidden.is_empty() && input.markup >= 1.0 {
-            w.push(command_widget(
-                Command::MoreTools,
-                Region::MarkupBar,
-                Rect::new(x, top + (row_h - button) / 2.0, button, button),
-                &input.ctx,
-            ));
+            w.push(command_widget(Command::MoreTools, Region::MarkupBar, Rect::new(x, top + (row_h - button) / 2.0, button, button), &input.ctx));
         }
         out.markup_overflow = hidden;
         top = bar.y1;
@@ -485,6 +469,8 @@ pub(super) fn layout(input: &Input) -> Layout {
         let each = (side_w - 2.0 * PAD * s) / SIDEBAR_TABS.len() as f32;
         for (index, label) in SIDEBAR_TABS.iter().enumerate() {
             let rect = Rect::new(PAD * s + index as f32 * each, top + PAD * s, each, tab_h);
+            // The full "Thumbnails" label clips at Windows' 225% text size.
+            let label = if ts >= 2.0 && index == 0 { "Pages" } else { label };
             let mut tab = plain_widget(WidgetId::SidebarTab(index), Role::SidebarTab, Region::Sidebar, rect, (*label).into());
             tab.checked = Some(input.sidebar_tab == index);
             w.push(tab);
@@ -494,8 +480,7 @@ pub(super) fn layout(input: &Input) -> Layout {
         let list = &input.sidebar_list;
         let (rows, total) = sidebar_rows(list, panel, input.sidebar_scroll, s, ts);
         out.sidebar_content = total;
-        let active =
-            if rows.iter().any(|(i, _)| *i == input.sidebar_active) { Some(input.sidebar_active) } else { rows.first().map(|r| r.0) };
+        let active = if rows.iter().any(|(i, _)| *i == input.sidebar_active) { Some(input.sidebar_active) } else { rows.first().map(|r| r.0) };
         for (index, row) in rows {
             // Clipped to the panel, so a half-hidden row never takes clicks
             // meant for the sidebar tabs or the status bar.
@@ -522,25 +507,23 @@ pub(super) fn layout(input: &Input) -> Layout {
         // Empty state: an Open button and the recent files area. No tool tiles.
         let line = 28.0 * ts * s;
         let control = control_height(ts) * s;
-        let block = line + 16.0 * s + control + 32.0 * s + 20.0 * ts * s + 8.0 * s + 20.0 * ts * s;
+        let hint = 20.0 * ts * s;
+        let block = line + 16.0 * s + control + 8.0 * s + hint + 32.0 * s + 20.0 * ts * s + 8.0 * s + 20.0 * ts * s;
         let y = doc.y0 + ((doc.height() - block) / 2.0).max(16.0 * s);
         let cx = (doc.x0 + doc.x1) / 2.0;
         let text_w = (doc.width() - 32.0 * s).max(0.0);
         let heading = Rect::new(cx - text_w / 2.0, y, text_w, line);
         let open_w = 120f32.max(48.0 + 40.0 * ts) * s;
-        let mut open = command_widget(
-            Command::Open,
-            Region::Document,
-            Rect::new(cx - open_w / 2.0, heading.y1 + 16.0 * s, open_w, control),
-            &input.ctx,
-        );
+        let mut open = command_widget(Command::Open, Region::Document, Rect::new(cx - open_w / 2.0, heading.y1 + 16.0 * s, open_w, control), &input.ctx);
         open.primary = true;
         open.label = "Open".into();
         open.tooltip = "Open a file (Ctrl+O)".into();
+        let open_bottom = open.rect.y1;
         w.push(open);
-        let recent_heading = Rect::new(heading.x0, heading.y1 + 16.0 * s + control + 32.0 * s, text_w, 20.0 * ts * s);
+        let drop_hint = Rect::new(heading.x0, open_bottom + 8.0 * s, text_w, hint);
+        let recent_heading = Rect::new(heading.x0, drop_hint.y1 + 32.0 * s, text_w, 20.0 * ts * s);
         let recent = Rect::new(heading.x0, recent_heading.y1 + 8.0 * s, text_w, 20.0 * ts * s);
-        out.empty = Some(Empty { heading, recent_heading, recent });
+        out.empty = Some(Empty { heading, drop_hint, recent_heading, recent });
     }
 
     if let Some(sheet) = &input.sheet {
@@ -593,11 +576,7 @@ pub(super) fn layout(input: &Input) -> Layout {
 /// Topmost widget under the point. A sheet blocks everything outside it.
 pub(super) fn hit(widgets: &[Widget], x: f32, y: f32) -> Option<&Widget> {
     let modal = widgets.iter().any(|w| w.region == Region::Sheet);
-    widgets
-        .iter()
-        .rev()
-        .filter(|w| !modal || w.region == Region::Sheet || w.role == Role::Caption)
-        .find(|w| w.rect.contains(x, y))
+    widgets.iter().rev().filter(|w| !modal || w.region == Region::Sheet || w.role == Role::Caption).find(|w| w.rect.contains(x, y))
 }
 
 fn can_focus(w: &Widget) -> bool {
@@ -652,10 +631,7 @@ pub(super) fn in_scope(widget: &Widget, scope: Scope) -> bool {
 /// The enabled widget whose access key is `key` in this scope.
 pub(super) fn access_key_target(widgets: &[Widget], scope: Scope, key: char) -> Option<WidgetId> {
     let key = key.to_ascii_uppercase();
-    widgets
-        .iter()
-        .find(|w| w.enabled && w.access_key == Some(key) && in_scope(w, scope))
-        .map(|w| w.id)
+    widgets.iter().find(|w| w.enabled && w.access_key == Some(key) && in_scope(w, scope)).map(|w| w.id)
 }
 
 #[cfg(test)]
@@ -761,7 +737,7 @@ mod tests {
         let mut i = input(1100.0, &tabs);
         i.markup = 0.5;
         let half = layout(&i);
-        assert_eq!(half.markup_bar.unwrap().height(), 24.0);
+        assert_eq!(half.markup_bar.unwrap().height(), 22.0);
         assert_eq!(half.document.y0, half.markup_bar.unwrap().y1);
         assert!(ids(&half, Region::MarkupBar).is_empty());
     }
@@ -785,12 +761,19 @@ mod tests {
         let tabs = vec!["a.pdf".to_string()];
         let mut big = input(1100.0, &tabs);
         big.text_scale = 2.25;
+        big.sidebar_open = true;
         let big = layout(&big);
         let normal = layout(&input(1100.0, &tabs));
+        assert_eq!(normal.toolbar.height(), 44.0);
         assert!(big.title_bar.height() > normal.title_bar.height());
         assert!(big.status.height() > normal.status.height());
         let button = |l: &Layout| l.widgets.iter().find(|w| w.id == cmd(Command::Rotate)).unwrap().rect.width();
-        assert_eq!(button(&big), button(&normal));
+        assert_eq!(button(&normal), 40.0);
+        assert_eq!(button(&big), button(&normal), "225% text keeps 40 DIP icon targets");
+        assert!(big.toolbar.height() >= 20.0 * 2.25 + 12.0, "the row grows only enough to keep large text readable");
+        let tabs: Vec<_> = big.widgets.iter().filter(|w| w.role == Role::SidebarTab).collect();
+        assert_eq!(tabs[0].label, "Pages", "the compact selector label stays readable at 225% text");
+        assert!(tabs.windows(2).all(|pair| pair[0].rect.x1 <= pair[1].rect.x0));
     }
 
     #[test]
@@ -920,8 +903,7 @@ mod tests {
         let first = far.widgets.iter().find(|w| w.role == Role::ListItem).unwrap();
         assert_eq!(first.id, WidgetId::SidebarItem(250));
         assert!(first.focusable, "page 4 is out of view, so the first row in view takes the Tab stop");
-        let outline: Vec<OutlineItem> =
-            (0..100_000).map(|n| OutlineItem { title: format!("Part {n}"), page: (n % 2 == 0).then_some(n), level: 0 }).collect();
+        let outline: Vec<OutlineItem> = (0..100_000).map(|n| OutlineItem { title: format!("Part {n}"), page: (n % 2 == 0).then_some(n), level: 0 }).collect();
         i.sidebar_list = SidebarList::Contents(&outline);
         i.sidebar_scroll = 32.0 * 5000.0;
         let contents = layout(&i);
@@ -948,7 +930,8 @@ mod tests {
         assert_eq!(open.id, cmd(Command::Open));
         assert!(open.primary && open.enabled);
         let empty = layout.empty.as_ref().unwrap();
-        assert!(empty.heading.y1 <= open.rect.y0 && open.rect.y1 <= empty.recent_heading.y0);
+        assert!(empty.heading.y1 <= open.rect.y0 && open.rect.y1 <= empty.drop_hint.y0);
+        assert!(empty.drop_hint.y1 <= empty.recent_heading.y0);
         assert!(layout.document.contains(open.rect.x0, open.rect.y0));
         assert!(!layout.widgets.iter().any(|w| w.id == WidgetId::Document));
     }

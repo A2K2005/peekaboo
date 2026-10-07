@@ -230,7 +230,11 @@ pub(super) unsafe fn ask(
 
 /// Text fields with OK and Cancel.
 pub(super) unsafe fn input(hwnd: HWND, title: &str, fields: &[(&str, String)]) -> Option<Vec<String>> {
-    ask(hwnd, title, "", fields, false, &["OK", "Cancel"], 1, None).map(|(_, v)| v)
+    input_action(hwnd, title, fields, "OK")
+}
+
+pub(super) unsafe fn input_action(hwnd: HWND, title: &str, fields: &[(&str, String)], action: &str) -> Option<Vec<String>> {
+    ask(hwnd, title, "", fields, false, &[action, "Cancel"], 1, None).map(|(_, v)| v)
 }
 
 pub(super) unsafe fn password(hwnd: HWND, title: &str, message: &str) -> Option<String> {

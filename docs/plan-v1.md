@@ -66,14 +66,14 @@ These rules bind every wave-1 agent. Change them only through the orchestrator.
 | Slice | Status |
 | --- | --- |
 | W1-A to W1-E | Merged into `v1`. Reviewed; fixes merged or in progress (W1-C fixes). |
-| W2-1 Viewer | Merged into `v1`. Verifier running. |
-| W2-2 Text | Partial, merged: tested selection, copy, and search logic in `src/ui/text.rs`, not wired into the app. To do: PDF text fetch and drag selection, Ctrl+F search UI, OCR on hover for images, Narrator text runs. Then delete the old `page_text`, `find`, and `recognize` paths. |
-| W2-3 Save model | Partial, merged: tested disk layer in `src/ui/disk.rs` (snapshot, atomic replace with ReplaceFileW, external-change check, copy naming, writability, remembered choice), not wired. Files are still only written by "Save a copy". To do: first-edit sheet with checkbox, autosave jobs (PDF via `save_incremental` from the snapshot, images via `export_with`), revert, redo, edited marker, progress and error bars, save on close and shutdown, crash recovery. Engine requests: forget saved size and times after the app rewrites a file; keep EXIF on export; detect JPEG quality and WebP lossless to keep original quality. |
+| W2-1 Viewer | Implemented in this worktree: view modes, virtualized sidebar, bounded cache, predecode, stale-source checks, and corrected page targeting. Headless tests pass. Reference-device performance remains unverified. |
+| W2-2 Text | Implemented in this worktree: PDF and OCR text layers, pointer and keyboard selection, reading-order copy, highlights, Ctrl+F with F3/Shift+F3 navigation, hover OCR, stale-result handling, and accessibility text. The first pass passed 129 UI tests. Four independent-review fixes are present but were not rerun because the owner stopped testing for this handoff. See `docs/remaining-work.md`. |
+| W2-3 Save model | Implemented and independently reviewed in this worktree: first-edit overwrite/save-copy policy, remembered choice, immutable opened snapshots, revision-aware debounced autosave, incremental PDF writes, image export/copy rules, conflict handling, Revert to opened, persistent state, and close/logoff protection. Serial binary suite passed 150 tests. Remaining: live interaction QA, dedicated failed-save Retry, and crash-abandoned snapshot cleanup/recovery. |
 | W2-4 to W2-7 | Not started |
 
 ## Open findings (verified, not fixed yet)
 
-From the W2-1 verifier, 2026-10-07. Failing tests: `scratchpad/review-w2-1/repo`, names start with `verifier`.
+The following W2-1 findings were recorded before the current worktree fixes. Items 1 through 5 are fixed and covered by focused tests; keep the list as decision history.
 
 1. Major. `src/ui/app.rs:828`: `received` clears `state.sent` for every non-PDF result, so an open image re-requests its neighbors forever (16,598 cycles in 2 s; each reads and sorts the folder). Fix: clear `sent` only for stale PDF results, or remember finished pre-decodes.
 2. Major. Tile cache churn at 4K and after zooming out: 48 MiB budget (`cache.rs:11`), half-screen margins (`document.rs:738`), and old-scale fallback tiles pinned by `get` every frame (`document.rs:604`). Fix: draw fallback only where a current tile is missing (use `peek`), stop when complete, and size the budget or prefetch from the viewport.

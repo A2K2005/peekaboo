@@ -4,16 +4,16 @@ A free, native Windows app that opens PDFs and images in under 400 ms and does e
 
 ## Current status
 
-Building v1 end to end. Plan and slice status: [docs/plan-v1.md](docs/plan-v1.md). Per-task acceptance: [docs/acceptance.md](docs/acceptance.md).
+Building v1 end to end. Plan and slice status: [docs/plan-v1.md](docs/plan-v1.md). Per-task acceptance: [docs/acceptance.md](docs/acceptance.md). Current handoff and remaining work: [docs/remaining-work.md](docs/remaining-work.md).
 
 | Phase | Status | Output |
 | --- | --- | --- |
 | 1. Research | Done (some measurements pending) | `docs/research/*.md`, `docs/research/SUMMARY.md` |
 | Codex development build | Merged here (D9) | Rust app: viewing, page edits, markup, images, OCR, background removal |
-| Wave 1: foundations | Merged into branch `v1`; review fixes in progress | UI foundation, PDF engine, imaging and AI, Windows integration, benchmarks |
-| Wave 2: v1 tasks | In progress (W2-1 viewer) | 7 slices in PRD order |
+| Wave 1: foundations | Implemented; current worktree contains reviewed fixes | UI foundation, PDF engine, imaging and AI, Windows integration, benchmarks |
+| Wave 2: v1 tasks | In progress; viewer and save model reviewed, text integrated with final fixes awaiting rerun, later workflows partial | 7 slices in PRD order |
 
-Branches: `master` holds the research and the Codex merge. All wave work merges into `v1`. Nothing merges into `master` without the owner (D14). Worktrees live in `Desktop/extension/pfw-worktrees/`.
+Branches: `master` holds the research and the Codex merge. All wave work merges into `v1`. The active uncommitted review worktree is `Desktop/Portfolio/preview-for-windows-latest` on `codex/glance-gap-fixes`. Nothing merges into `master` without the owner (D14).
 | Wave 3: release gates | Not started | Accessibility, performance, round trip, packaging, final review |
 
 ## Architecture summary
@@ -91,3 +91,5 @@ This PC is not the PRD reference laptop (i5 12th gen, 8 GB, Windows 11) or the l
 | D16 | 2026-10-07 | Background removal ships the Snap model (Apache-2.0 weights, undisclosed training data) on the CPU path: 0.31 s for 12 MP, IoU 0.90 against BiRefNet. BiRefNet, BEN2, and ormbg are rejected: trained on data with no-commercial-use terms. DirectML stays off: the iGPU was slower than the CPU and the NVIDIA path hit GPU timeouts. | Measured in W1-C. Lawyer review before release: Snap's training data is undisclosed, and its Depth Anything V2 Small backbone (Apache-2.0 weights) was distilled from a teacher trained on VKITTI 2 (CC BY-NC-SA 3.0) and pseudo-labeled research-only sets (W1-C review). |
 | D17 | 2026-10-07 | Arrows save as Ink annotations. | PDFium cannot create Line annotations. Ink has an appearance stream; pdf.js draws it (W1-B test). Edge and Acrobat display is unverified. |
 | D15 | 2026-10-07 | No GUI launches while the owner uses the PC. Headless tests only. GUI checks (screenshots, UIA dumps, launch timing) run only after the owner says they are away. | Owner revoked an earlier "launch briefly" permission after test windows disrupted their work. |
+| D18 | 2026-10-07 | The visual direction is a restrained dark glass Windows shell: Mica commanding/content layers, near-black opaque viewer canvas, subtle edge halos, sparse system accent, opaque transients, and solid/high-contrast fallbacks. | Owner supplied dark glass references. The app adapts their material and depth without copying their dashboard or onboarding composition, and without copying Glance. |
+| D19 | 2026-10-07 | Autosave replays edits from one immutable opened snapshot and identifies work by the logical file path. Every overwrite requires first-edit consent; external changes pause; reader leases block snapshot cleanup. | Prevents double-applied edits, stale completions, cross-tab status errors, and close/logoff data loss found during adversarial review. |

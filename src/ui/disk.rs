@@ -156,8 +156,7 @@ pub(super) fn write_verified(
     write: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<Stamp, Failure> {
     let target = std::path::absolute(target).map_err(|e| e.to_string())?;
-    let found = current(&target)?;
-    if found != expected && !force {
+    if current(&target)? != expected && !force {
         return Err(Failure::Changed);
     }
     let folder = target.parent().ok_or("Choose a valid folder.")?;
@@ -168,6 +167,14 @@ pub(super) fn write_verified(
         .open(&staged.0)
         .and_then(|file| file.sync_all())
         .map_err(|e| format!("Cannot finish writing {}: {e}", target.display()))?;
+    // Rendering a large document can take long enough for another app to
+    // replace the destination after the first check. Revalidate immediately
+    // before publication so that work is preserved as a conflict instead of
+    // overwriting the other writer.
+    let found = current(&target)?;
+    if found != expected && !force {
+        return Err(Failure::Changed);
+    }
     match found {
         Some(_) => replace(&target, &staged.0)?,
         None => publish(&staged.0, &target)?,
@@ -320,6 +327,22 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"edits");
         fs::remove_file(&target).unwrap();
         assert_eq!(write_verified(&target, Some(seen), false, write), Err(Failure::Changed), "deleted by another app");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_file_changed_while_the_staged_version_is_being_built() {
+        let dir = temp("changed-during-write");
+        let target = dir.join("large.pdf");
+        fs::write(&target, b"opened").unwrap();
+        let seen = Stamp::of(&target).unwrap();
+        let result = write_verified(&target, Some(seen), false, |staged| {
+            fs::write(staged, b"preview edits").map_err(|e| e.to_string())?;
+            fs::write(&target, b"a longer version from another app").map_err(|e| e.to_string())
+        });
+        assert_eq!(result, Err(Failure::Changed));
+        assert_eq!(fs::read(&target).unwrap(), b"a longer version from another app");
+        assert_eq!(names(&dir), vec!["large.pdf"], "the rejected staged file is removed");
         fs::remove_dir_all(dir).unwrap();
     }
 

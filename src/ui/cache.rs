@@ -5,8 +5,8 @@ use std::{collections::HashMap, hash::Hash};
 
 /// Tiles and thumbnails share 48 MiB. The PRD caps a 20-page PDF at 120 MB
 /// in total. A 1080p view needs about 9 MiB of 512-pixel tiles (1 MiB each)
-/// and a 4K view about 40 MiB, so 48 MiB holds the visible pages plus the
-/// prefetch margin while leaving about 70 MB for the process itself (code,
+/// and a 4K view about 40 MiB, so 48 MiB holds the visible pages plus bounded
+/// prefetch while leaving about 70 MB for the process itself (code,
 /// Direct2D, DirectWrite, PDFium). Unverified until a GUI memory run.
 pub(super) const TILE_BUDGET: usize = 48 << 20;
 
@@ -131,6 +131,23 @@ mod tests {
         lru.insert("next", 0, 100);
         assert!(lru.peek(&"old").is_none() && lru.peek(&"visible").is_none());
         assert!(lru.peek(&"new").is_some() && lru.peek(&"next").is_some());
+        assert_eq!(lru.used(), 200);
+    }
+
+    #[test]
+    fn fallback_peeks_do_not_pin_old_scale_over_current_tiles() {
+        let mut lru = Lru::new(200);
+        lru.new_frame();
+        lru.insert("old scale", 0, 100);
+        for _ in 0..3 {
+            lru.new_frame();
+            assert!(lru.peek(&"old scale").is_some());
+        }
+        lru.insert("current 1", 0, 100);
+        lru.get(&"current 1");
+        lru.insert("current 2", 0, 100);
+        assert!(lru.peek(&"old scale").is_none());
+        assert!(lru.peek(&"current 1").is_some() && lru.peek(&"current 2").is_some());
         assert_eq!(lru.used(), 200);
     }
 }

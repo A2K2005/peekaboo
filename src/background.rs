@@ -24,8 +24,8 @@ use windows::{
             WinTrust::{
                 WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
                 WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
-                WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_FILE,
-                WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+                WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_FILE, WTD_REVOKE_NONE,
+                WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
             },
         },
         Storage::FileSystem::FILE_SHARE_READ,
@@ -53,7 +53,8 @@ const MODELS: [(&str, &str); 3] = [
         "9C10A55FCB01F871B35ACC5DB03DC30A8C92A15C0E445D4D8BA3C8F4DA3C3A80",
     ),
 ];
-const DAMAGED: &str = "The AI pack is damaged or was changed. Install the AI pack again, then try again.";
+const DAMAGED: &str =
+    "The AI pack is damaged or was changed. Install the AI pack again, then try again.";
 /// The refiner's longest side. Full resolution took 4.6 s for 12 MP.
 const REFINE: u32 = 1024;
 /// The depth input's shorter side. 266 kept quality close to the 518 the
@@ -78,7 +79,11 @@ fn pack_folders(app: &Path) -> Vec<PathBuf> {
         paths.push(PathBuf::from(local).join("PreviewForWindows").join("ai"));
     }
     if cfg!(any(test, debug_assertions)) {
-        paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime").join("ai"));
+        paths.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("runtime")
+                .join("ai"),
+        );
     }
     paths
 }
@@ -162,7 +167,11 @@ fn verify_microsoft(path: &Path, file: &std::fs::File) -> Result<(), String> {
     let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     let action = &mut action as *mut _;
     unsafe {
-        let status = WinVerifyTrust(HWND::default(), action, (&mut data as *mut WINTRUST_DATA).cast());
+        let status = WinVerifyTrust(
+            HWND::default(),
+            action,
+            (&mut data as *mut WINTRUST_DATA).cast(),
+        );
         let signer = (status == 0)
             .then(|| {
                 let provider = WTHelperProvDataFromStateData(data.hWVTStateData);
@@ -180,7 +189,11 @@ fn verify_microsoft(path: &Path, file: &std::fs::File) -> Result<(), String> {
             })
             .flatten();
         data.dwStateAction = WTD_STATEACTION_CLOSE;
-        WinVerifyTrust(HWND::default(), action, (&mut data as *mut WINTRUST_DATA).cast());
+        WinVerifyTrust(
+            HWND::default(),
+            action,
+            (&mut data as *mut WINTRUST_DATA).cast(),
+        );
         match signer {
             Some(name) if name == "Microsoft Corporation" => Ok(()),
             _ => Err(DAMAGED.into()),
@@ -223,12 +236,26 @@ fn run(
     let (shape, values) = value
         .try_extract_tensor::<f32>()
         .map_err(|e| e.to_string())?;
-    let size = |i: usize| shape.len().checked_sub(i).map(|i| shape[i] as usize);
-    let (height, width) = (size(2).unwrap_or(0), size(1).unwrap_or(0));
-    if height * width != values.len() || values.iter().any(|v| !v.is_finite()) {
-        return Err("The background model returned an invalid mask.".into());
-    }
+    let (height, width) = validate_mask(&shape, values)?;
     Ok((height, width, values.to_vec()))
+}
+
+// Accept a single plane only, before downstream resampling indexes its pixels.
+fn validate_mask(shape: &[i64], values: &[f32]) -> Result<(usize, usize), String> {
+    let invalid = || "The background model returned an invalid mask.".to_string();
+    if shape.len() < 2 || shape[..shape.len() - 2].iter().any(|&n| n != 1) {
+        return Err(invalid());
+    }
+    let height = usize::try_from(shape[shape.len() - 2]).map_err(|_| invalid())?;
+    let width = usize::try_from(shape[shape.len() - 1]).map_err(|_| invalid())?;
+    if height == 0
+        || width == 0
+        || height.checked_mul(width) != Some(values.len())
+        || values.iter().any(|v| !v.is_finite())
+    {
+        return Err(invalid());
+    }
+    Ok((height, width))
 }
 
 /// Remove the background. Returns the full-resolution cut-out: premultiplied
@@ -264,25 +291,31 @@ pub fn cutout(path: &Path, edits: &[ImageEdit]) -> Result<Frame, String> {
             .for_each(|v| *v = (*v - low) / (high - low).max(1e-6));
         let mut input = planes(&small, false);
         input.extend(resize_plane(&depth, w, h, 256, 256));
-        let (_, _, coarse) = run(
+        let (coarse_h, coarse_w, coarse) = run(
             &mut snap.matting,
             "rgbd_input",
             "alpha_output",
             [1, 4, 256, 256],
             input,
         )?;
+        if (coarse_h, coarse_w) != (256, 256) {
+            return Err("The background model returned unexpected mask dimensions.".into());
+        }
         let coarse: Vec<f32> = coarse.iter().map(|v| v.clamp(0.0, 1.0)).collect();
         let (rw, rh) = (width as usize, height as usize);
         let mut input = planes(&refine, false);
         input.extend(resize_plane(&depth, w, h, rw, rh));
         input.extend(resize_plane(&coarse, 256, 256, rw, rh));
-        let (_, _, fine) = run(
+        let (fine_h, fine_w, fine) = run(
             &mut snap.refiner,
             "rgbd_alpha_input",
             "alpha_output",
             [1, 5, rh, rw],
             input,
         )?;
+        if (fine_h, fine_w) != (rh, rw) {
+            return Err("The background model returned unexpected mask dimensions.".into());
+        }
         Ok(fine.iter().map(|v| v.clamp(0.0, 1.0)).collect())
     })?;
     apply_alpha(&mut original, &alpha, width as usize, height as usize);
@@ -430,7 +463,25 @@ mod tests {
         assert!(check(&changed).is_err());
         let (name, hash) = MODELS[1];
         assert!(read_model(&pack.join(name), hash).is_ok());
-        assert_eq!(read_model(&pack.join(name), MODELS[2].1), Err(DAMAGED.into()));
+        assert_eq!(
+            read_model(&pack.join(name), MODELS[2].1),
+            Err(DAMAGED.into())
+        );
+    }
+    #[test]
+    fn invalid_model_masks_are_rejected() {
+        for shape in [
+            vec![],
+            vec![1],
+            vec![0, 2],
+            vec![-1, 2],
+            vec![2, 1, 2],
+            vec![i64::MAX, i64::MAX],
+        ] {
+            assert!(validate_mask(&shape, &[0.0, 1.0]).is_err());
+        }
+        assert!(validate_mask(&[1, 2], &[f32::NAN, 0.0]).is_err());
+        assert_eq!(validate_mask(&[1, 1, 1, 2], &[0.0, 1.0]).unwrap(), (1, 2));
     }
     #[test]
     fn depth_sizes_are_patch_multiples() {
