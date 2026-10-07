@@ -10,6 +10,7 @@ windows-collections = "=0.3.2"
 image-webp = "=0.2.4"
 accesskit = "=0.25.1"
 accesskit_windows = "=0.35.1"
+libwebp-sys = "=0.14.4"
 
 [dependencies.ort]
 version = "=2.0.0-rc.13"
@@ -29,7 +30,7 @@ features = [
     "Win32_System_Variant", "Win32_UI_Controls_Dialogs", "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging",
     "Win32_Storage_FileSystem", "Win32_Storage_Xps", "Win32_System_Ole", "Win32_Security", "Win32_System_DataExchange",
-    "Win32_UI_Controls", "Win32_UI_Input_Pointer", "Win32_UI_Accessibility", "Win32_System_Registry"
+    "Win32_UI_Controls", "Win32_UI_Input_Pointer", "Win32_UI_Accessibility", "Win32_System_Registry", "Win32_Media_MediaFoundation"
 ]
 
 [profile.release]
