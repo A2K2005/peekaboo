@@ -354,6 +354,7 @@ fn apply_alpha(frame: &mut Frame, alpha: &[f32], width: usize, height: usize) {
     });
 }
 /// Save a new full-resolution PNG. The original and its edit history remain intact.
+#[allow(dead_code)] // The shell keeps the cut-out in memory; tests/background_smoke.rs uses this.
 pub fn remove(path: &Path, output: &Path, edits: &[ImageEdit]) -> Result<String, String> {
     if output
         .extension()

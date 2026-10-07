@@ -296,8 +296,62 @@ fn sheet(l: &Look, state: &State, layout: &Layout) {
             l.p.fill_round(Rect { y0: rect.y1 - line, ..*rect }, s, l.t.accent);
         }
     }
-    for w in layout.widgets.iter().filter(|w| w.region == Region::Sheet && w.role == Role::Button) {
-        text_button(l, state, w);
+    for w in layout.widgets.iter().filter(|w| w.region == Region::Sheet) {
+        match w.id {
+            WidgetId::SheetControl(i) => {
+                if let Some(c) = sheet.controls.get(i) {
+                    sheet_control(l, state, w, c);
+                }
+            }
+            WidgetId::SheetButton(_) => text_button(l, state, w),
+            _ => {}
+        }
+    }
+}
+
+fn sheet_control(l: &Look, state: &State, w: &Widget, c: &super::sheet::Control) {
+    use super::sheet::Kind;
+    let (s, r) = (l.s, w.rect);
+    let color = if w.enabled { l.t.text } else { l.t.text_disabled };
+    let border = l.t.border_width * s.floor().max(1.0);
+    let hover = background(state, w).map(|fill| if fill == Fill::Hover { l.t.hover } else { l.t.pressed });
+    match c.kind {
+        Kind::Choice => {
+            l.p.fill_round(r, 6.0 * s, hover.unwrap_or(l.t.field));
+            l.p.stroke_round(r, 6.0 * s, l.t.control_border, border);
+            let text = Rect { x0: r.x0 + 12.0 * s, x1: r.x1 - 36.0 * s, ..r };
+            l.p.text(&c.text(), text, &l.f.body, color, Align::Leading);
+            l.p.glyph(glyph::CHEVRON_DOWN, Rect { x0: r.x1 - 36.0 * s, ..r }, &l.f.caption_icon, color);
+        }
+        Kind::Toggle => {
+            if let Some(fill) = hover {
+                l.p.fill_round(r, 6.0 * s, fill);
+            }
+            let side = 20.0 * s;
+            let check = Rect::new(r.x0 + 6.0 * s, r.y0 + (r.height() - side) / 2.0, side, side);
+            if c.value == 1 {
+                l.p.fill_round(check, 4.0 * s, if w.enabled { l.t.accent } else { l.t.text_disabled });
+                l.p.glyph(glyph::CHECK, check, &l.f.caption_icon, l.t.on_accent);
+            } else {
+                l.p.fill_round(check, 4.0 * s, l.t.field);
+                l.p.stroke_round(check, 4.0 * s, l.t.control_border, border);
+            }
+            l.p.text(&c.text(), Rect { x0: check.x1 + 10.0 * s, ..r }, &l.f.body, color, Align::Leading);
+        }
+        Kind::Slider => {
+            let track = super::sheet::track(r, s);
+            l.p.text(&c.text(), Rect { x1: track.x0 - 8.0 * s, ..r }, &l.f.body, color, Align::Leading);
+            let mid = (r.y0 + r.y1) / 2.0;
+            let rail = Rect { y0: mid - 2.0 * s, y1: mid + 2.0 * s, ..track };
+            let x = track.x0 + track.width() * (c.value.clamp(1, 100) - 1) as f32 / 99.0;
+            let filled = if w.enabled { l.t.accent } else { l.t.text_disabled };
+            l.p.fill_round(rail, 2.0 * s, l.t.control_border);
+            l.p.fill_round(Rect { x1: x, ..rail }, 2.0 * s, filled);
+            let thumb = Rect::new(x - 10.0 * s, mid - 10.0 * s, 20.0 * s, 20.0 * s);
+            l.p.fill_round(thumb, 10.0 * s, l.t.surface);
+            l.p.stroke_round(thumb, 10.0 * s, l.t.control_border, border);
+            l.p.fill_round(thumb.inset(5.0 * s), 5.0 * s, filled);
+        }
     }
 }
 
@@ -610,6 +664,8 @@ mod tests {
                     buttons: vec!["Resize".into(), "Cancel".into()],
                     cancel: 1,
                     result: None,
+                    controls: Vec::new(),
+                    live: None,
                 });
                 state.focus = Some(WidgetId::SheetField(0));
                 state.focus_visible = false;

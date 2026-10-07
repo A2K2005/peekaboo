@@ -4,17 +4,14 @@ use super::{
     app::{add_tabs, close_tab, invalidate, navigate, open, schedule, select_tab, with_state, SaveStatus},
     commands::{self, Command, MenuItem, Pick},
     document,
-    files::{choose, choose_many, destination, folder, load_signature, save_signature},
+    files::{choose, choose_many, destination, load_signature, save_signature},
     disk::{self, Choice}, menu, sheet,
     view::{ViewMode, Zoom},
     widgets::{self, WidgetId},
     worker::{Job, Request, SaveKind},
 };
 use crate::model::{AnnotationKind, ImageEdit, PdfEdit, PdfFormType, PdfMetadata};
-use std::{
-    sync::{atomic::AtomicBool, Arc},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use windows::Win32::{
     Foundation::{HWND, LPARAM, POINT, WPARAM},
     Graphics::Gdi::ClientToScreen,
@@ -86,6 +83,12 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
         }
         Exit => {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            return;
+        }
+        BatchSelected => {
+            if let Some(paths) = choose_many(hwnd, true).filter(|paths| !paths.is_empty()) {
+                super::imagetools::batch(hwnd, paths, false);
+            }
             return;
         }
         CloseTab => {
@@ -234,14 +237,9 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             }
             invalidate(hwnd);
         }
-        BatchFolder | BatchSelected => batch(hwnd, command, request),
-        RemoveBackground => {
-            let Some(mut output) = destination(hwnd, false) else {
-                return;
-            };
-            output.set_extension("png");
-            start_export(hwnd, Job::Background(request, output), "Removing background on this PC...");
-        }
+        BatchFolder => super::imagetools::batch_folder(hwnd, &request.path),
+        RemoveBackground => super::imagetools::remove_background(hwnd, request),
+        SaveCopy if !pdf => super::imagetools::export(hwnd, request, width, height),
         SaveSignature => save_signature(hwnd),
         PlaceSignature | Draw | Highlight | Underline | Strikethrough | Note | TextBox | Rectangle | Ellipse | Arrow => {
             choose_tool(hwnd, command)
@@ -317,21 +315,7 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
                 None => sheet::alert(hwnd, "Move page", &format!("Enter a page number from 1 to {count}.")),
             }
         }
-        Resize => {
-            let fields = resize_fields(width);
-            let Some(values) = sheet::input_action(
-                hwnd,
-                "Resize image",
-                &fields,
-                "Resize",
-            ) else {
-                return;
-            };
-            match resize_edit(width, height, &values) {
-                Some(resize) => edit(hwnd, |_, edits| edits.image.push(resize)),
-                None => sheet::alert(hwnd, "Resize image", "Enter a width and height above 0, with at most 200 million pixels in total."),
-            }
-        }
+        Resize => super::imagetools::resize(hwnd, request, width, height),
         DeletePage => {
             if count <= 1
                 || !sheet::confirm(
@@ -387,12 +371,13 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
                 s.signature = None;
                 s.zoom_select = false;
                 s.crop = !s.crop;
+                s.tools.crop = None;
                 s.status = if !s.crop {
                     "Crop is off.".into()
                 } else if pdf {
                     "Drag a rectangle to crop the page view. Hidden content stays in the file. Escape cancels.".into()
                 } else {
-                    "Drag a rectangle over the image to crop. Escape cancels.".into()
+                    super::imagetools::CROP_HINT.into()
                 };
             });
             invalidate(hwnd);
@@ -596,7 +581,7 @@ pub(super) unsafe fn resolve_save_conflict(hwnd: HWND, path: std::path::PathBuf)
 }
 
 /// Applies one recipe change to the open file and renders again.
-unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
+pub(super) unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
     let Some(path) = with_state(|s| s.path.clone()).flatten() else {
         return;
     };
@@ -628,24 +613,7 @@ unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut supe
     });
 }
 
-fn resize_fields(width: u32) -> [(&'static str, String); 2] {
-    [("Width in pixels", width.to_string()), ("Height in pixels (leave empty to keep the shape)", String::new())]
-}
-
-/// Width and height from the resize sheet. An empty height keeps the shape.
-pub(super) fn resize_edit(width: u32, height: u32, values: &[String]) -> Option<ImageEdit> {
-    let new_width = values.first()?.trim().parse::<u32>().ok().filter(|v| *v > 0 && *v <= 100_000)?;
-    let new_height = match values.get(1).map(|v| v.trim()) {
-        None | Some("") => {
-            ((height as u64 * new_width as u64 + width.max(1) as u64 / 2) / width.max(1) as u64).max(1) as u32
-        }
-        Some(text) => text.parse::<u32>().ok()?,
-    };
-    (new_height > 0 && new_width as u64 * new_height as u64 <= 200_000_000)
-        .then_some(ImageEdit::Resize { width: new_width, height: new_height })
-}
-
-unsafe fn start_export(hwnd: HWND, job: Job, status: &str) {
+pub(super) unsafe fn start_export(hwnd: HWND, job: Job, status: &str) {
     with_state(|s| {
         if s.exporting {
             return;
@@ -658,40 +626,6 @@ unsafe fn start_export(hwnd: HWND, job: Job, status: &str) {
         }
     });
     invalidate(hwnd);
-}
-
-unsafe fn batch(hwnd: HWND, command: Command, request: Request) {
-    let selected = if command == Command::BatchSelected {
-        match choose_many(hwnd, true) {
-            Some(paths) if !paths.is_empty() => Some(paths),
-            _ => return,
-        }
-    } else {
-        None
-    };
-    let Some(values) =
-        sheet::input(hwnd, "Convert images", &[("Format: png, jpg, tif, bmp, pdf, or webp", "png".into())])
-    else {
-        return;
-    };
-    let extension = values.first().map(|v| v.trim().trim_start_matches('.').to_lowercase()).unwrap_or_default();
-    if !matches!(extension.as_str(), "png" | "jpg" | "tif" | "bmp" | "pdf" | "webp") {
-        sheet::alert(hwnd, "Convert images", "Choose one of these formats: png, jpg, tif, bmp, pdf, or webp.");
-        return;
-    }
-    let Some(output) = folder(hwnd) else {
-        return;
-    };
-    let question = match &selected {
-        Some(paths) => format!("Apply the current image edits to {} images and save new copies? Existing files are not replaced.", paths.len()),
-        None => "Apply the current image edits to every image in this folder and save new copies? Existing files are not replaced.".into(),
-    };
-    if !sheet::confirm(hwnd, "Convert images?", &question, "Convert") {
-        return;
-    }
-    let cancel = Arc::new(AtomicBool::new(false));
-    with_state(|s| s.cancel = Some(cancel.clone()));
-    start_export(hwnd, Job::Batch(request, output, extension, cancel, selected), "Starting batch conversion...");
 }
 
 unsafe fn choose_tool(hwnd: HWND, command: Command) {
@@ -739,7 +673,7 @@ unsafe fn choose_tool(hwnd: HWND, command: Command) {
 }
 
 /// "2.4 MB" style sizes, in decimal units as File Explorer's details pane.
-fn file_size(bytes: u64) -> String {
+pub(super) fn file_size(bytes: u64) -> String {
     match bytes {
         0..=999 => format!("{bytes} bytes"),
         1_000..=999_999 => format!("{:.0} KB", bytes as f64 / 1e3),
@@ -1051,17 +985,5 @@ mod tests {
         s.generation = 9;
         s.path = Some(PathBuf::from("other.pdf"));
         assert!(!same_target(&s, &request), "another tab");
-    }
-
-    #[test]
-    fn resize_keeps_shape_when_height_is_empty_and_rejects_bad_sizes() {
-        let v = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
-        assert_eq!(resize_fields(400), [("Width in pixels", "400".into()), ("Height in pixels (leave empty to keep the shape)", String::new())]);
-        assert_eq!(resize_edit(400, 300, &v("200", "")), Some(ImageEdit::Resize { width: 200, height: 150 }));
-        assert_eq!(resize_edit(400, 300, &v(" 200 ", "50")), Some(ImageEdit::Resize { width: 200, height: 50 }));
-        assert_eq!(resize_edit(400, 300, &v("0", "")), None);
-        assert_eq!(resize_edit(400, 300, &v("abc", "")), None);
-        assert_eq!(resize_edit(400, 300, &v("100000", "100000")), None);
-        assert_eq!(resize_edit(3, 1, &v("1", "")), Some(ImageEdit::Resize { width: 1, height: 1 }));
     }
 }

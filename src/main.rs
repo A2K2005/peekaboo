@@ -2,6 +2,9 @@
 
 mod background;
 mod imaging;
+// Only argument parsing is wired into the shell.
+#[allow(dead_code)]
+mod integration;
 mod model;
 mod ocr;
 mod pdf;

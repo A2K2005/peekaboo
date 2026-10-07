@@ -753,6 +753,7 @@ pub(super) fn paint(p: &Painter, bitmap: Option<&ID2D1Bitmap>, state: &mut State
         let r = Rect { x0: x1.min(x2), y0: y1.min(y2), x1: x1.max(x2), y1: y1.max(y2) };
         p.stroke_round(r, 0.0, theme.accent, 2.0 * s);
     }
+    super::imagetools::paint_crop(p, state);
     p.pop_clip();
     drew
 }
@@ -922,6 +923,9 @@ pub(super) fn request(state: &mut State, layout: &widgets::Layout) {
 pub(super) unsafe fn on_pointer(hwnd: HWND, state: &mut State, e: &PointerEvent) -> bool {
     if e.kind == PointerKind::Touch && touch(state, e) {
         return true;
+    }
+    if state.crop && state.pdf.is_none() {
+        return super::imagetools::crop_pointer(hwnd, state, e);
     }
     if e.phase == Phase::Move && state.drag.is_none() {
         if let Some((page, _, _)) = text_point(state, e.x, e.y) {
@@ -1213,16 +1217,10 @@ unsafe fn finish_crop(hwnd: HWND, state: &mut State) {
     if right <= left || bottom <= top {
         return;
     }
-    let pdf = state.is_pdf();
+    // Image crops use handles and Enter (imagetools), so only PDF pages get here.
     let page = state.page;
     let edits = state.sessions.entry(path.clone()).or_default();
-    if pdf {
-        edits.pdf.push(PdfEdit::Crop { page, left, top, right, bottom });
-    } else {
-        edits.image.push(ImageEdit::Crop { left, top, right, bottom });
-        state.pan = (0.0, 0.0);
-        state.zoom = Zoom::Fit;
-    }
+    edits.pdf.push(PdfEdit::Crop { page, left, top, right, bottom });
     edits.dirty = true;
     state.edited_for_save(&path, Instant::now());
     state.crop = false;

@@ -553,13 +553,46 @@ pub fn export_with(
     unsafe {
         let factory = factory()?;
         let (source, _) = edited_source(&factory, path, edits, None)?;
-        write_source(&factory, &source, output, options)
+        let profile = rgb_profile(&factory, path);
+        write_source(&factory, &source, output, options, profile.as_deref())
     }
+}
+/// The source's embedded RGB color profile. Pixels are written without
+/// color conversion, so the profile still describes them. Gray and CMYK
+/// profiles are left out: every output is RGB.
+unsafe fn rgb_profile(factory: &IWICImagingFactory, path: &Path) -> Option<Vec<u8>> {
+    let filename = wide(path);
+    let frame = factory
+        .CreateDecoderFromFilename(
+            PCWSTR(filename.as_ptr()),
+            None,
+            GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand,
+        )
+        .and_then(|decoder| decoder.GetFrame(0))
+        .ok()?;
+    let mut count = 0;
+    frame.GetColorContexts(&mut [], &mut count).ok()?;
+    let mut contexts = Vec::new();
+    for _ in 0..count.min(8) {
+        contexts.push(Some(factory.CreateColorContext().ok()?));
+    }
+    frame.GetColorContexts(&mut contexts, &mut count).ok()?;
+    contexts.into_iter().flatten().find_map(|context| {
+        if context.GetType().ok()? != WICColorContextProfile {
+            return None;
+        }
+        let mut length = 0;
+        context.GetProfileBytes(&mut [], &mut length).ok()?;
+        let mut bytes = vec![0u8; length as usize];
+        context.GetProfileBytes(&mut bytes, &mut length).ok()?;
+        // ICC header bytes 16 to 19: the data color space.
+        (bytes.get(16..20) == Some(b"RGB ".as_slice())).then_some(bytes)
+    })
 }
 /// The bytes `export_with` would write. No file is written. Above a pixel
 /// budget it encodes full-resolution row bands and scales the size up: a full
 /// encode of a 24 MP photo took 0.3 s for JPEG, 1.3 s for PNG, 1.9 s for WebP.
-#[allow(dead_code)] // The shell calls this in wave 2.
 pub fn estimate_size(
     path: &Path,
     edits: &[ImageEdit],
@@ -572,15 +605,17 @@ pub fn estimate_size(
         if options.format == ImageFormat::WebP {
             webp_length(width, height)?;
         }
+        let profile = rgb_profile(&factory, path);
+        let profile = profile.as_deref();
         let budget = match options.format {
             ImageFormat::Jpeg | ImageFormat::Bmp => 40_000_000,
             _ => 4_000_000,
         };
         if width as u64 * height as u64 <= budget {
-            return encoded_length(&factory, &source, options);
+            return encoded_length(&factory, &source, options, profile);
         }
         let (sample, rows) = row_sample(&factory, &source, width, height)?;
-        let length = encoded_length(&factory, &sample, options)?;
+        let length = encoded_length(&factory, &sample, options, profile)?;
         Ok((length as f64 * height as f64 / rows as f64).round() as u64)
     }
 }
@@ -588,10 +623,11 @@ unsafe fn encoded_length(
     factory: &IWICImagingFactory,
     source: &IWICBitmapSource,
     options: &ExportOptions,
+    profile: Option<&[u8]>,
 ) -> Result<u64, String> {
     // SHCreateMemStream: a TIFF took 0.8 s here, CreateStreamOnHGlobal took 29.6 s.
     let stream = SHCreateMemStream(None).ok_or("Not enough memory to estimate the file size.")?;
-    encode(factory, source, &stream, options)?;
+    encode(factory, source, &stream, options, profile)?;
     let mut length = 0;
     stream
         .Seek(0, STREAM_SEEK_END, Some(&mut length))
@@ -660,7 +696,7 @@ pub fn export_frame(frame: &Frame, output: &Path) -> Result<(), String> {
     unsafe {
         let factory = factory()?;
         let bitmap = frame_bitmap(&factory, frame)?;
-        write_source(&factory, &bitmap, output, &default_options(output)?).map(|_| ())
+        write_source(&factory, &bitmap, output, &default_options(output)?, None).map(|_| ())
     }
 }
 /// Scale `frame` to `width` x `height` with WIC's Fant filter.
@@ -705,7 +741,7 @@ unsafe fn frame_bitmap(
         .cast()
         .map_err(err)
 }
-fn format_for(path: &Path) -> Option<ImageFormat> {
+pub fn format_for(path: &Path) -> Option<ImageFormat> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match extension.as_str() {
         "jpg" | "jpeg" | "jpe" | "jfif" => ImageFormat::Jpeg,
@@ -740,7 +776,6 @@ pub fn heic_decode_available() -> bool {
 /// True when Windows can save HEIC. This encodes a small test image: on the
 /// dev PC, Media Foundation listed 3 hardware HEVC encoders, yet the HEIF
 /// encoder failed with 0xC00D5212 because HEVC Video Extensions are missing.
-#[allow(dead_code)] // The shell calls this in wave 2.
 pub fn heic_encode_available() -> bool {
     unsafe {
         let Ok(factory) = factory() else {
@@ -761,7 +796,7 @@ pub fn heic_encode_available() -> bool {
         };
         bitmap
             .cast()
-            .is_ok_and(|source| encode_wic(&factory, &source, &stream, &options).is_ok())
+            .is_ok_and(|source| encode_wic(&factory, &source, &stream, &options, None).is_ok())
     }
 }
 /// Count the HEVC decoders that Media Foundation lists.
@@ -804,6 +839,7 @@ unsafe fn write_source(
     source: &IWICBitmapSource,
     output: &Path,
     options: &ExportOptions,
+    profile: Option<&[u8]>,
 ) -> Result<u64, String> {
     if output.exists() {
         return Err("A file already exists there. Choose a new name to keep both files.".into());
@@ -833,7 +869,7 @@ unsafe fn write_source(
         stream
             .InitializeFromFilename(PCWSTR(filename.as_ptr()), GENERIC_WRITE.0)
             .map_err(err)?;
-        encode(factory, source, &stream, options)?;
+        encode(factory, source, &stream, options, profile)?;
     }
     std::fs::OpenOptions::new()
         .read(true)
@@ -880,12 +916,13 @@ unsafe fn encode(
     source: &IWICBitmapSource,
     stream: &IStream,
     options: &ExportOptions,
+    profile: Option<&[u8]>,
 ) -> Result<(), String> {
     if !(0.0..=1.0).contains(&options.quality) {
         return Err("Choose a quality from 0 to 100 percent.".into());
     }
     if options.format == ImageFormat::WebP {
-        let bytes = webp_bytes(factory, source, options)?;
+        let bytes = webp_bytes(factory, source, options, profile)?;
         let length = u32::try_from(bytes.len()).map_err(|e| e.to_string())?;
         let mut written = 0;
         stream
@@ -898,7 +935,7 @@ unsafe fn encode(
             Err("Could not write the whole image.".into())
         };
     }
-    let result = encode_wic(factory, source, stream, options);
+    let result = encode_wic(factory, source, stream, options, profile);
     if options.format == ImageFormat::Heic {
         result.map_err(|e| format!("Windows cannot save HEIC on this PC. {HEIC_HELP} ({e})"))
     } else {
@@ -910,6 +947,7 @@ unsafe fn encode_wic(
     source: &IWICBitmapSource,
     stream: &IStream,
     options: &ExportOptions,
+    profile: Option<&[u8]>,
 ) -> Result<(), String> {
     let (container, mut pixel_format) = match options.format {
         ImageFormat::Jpeg => (GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR),
@@ -958,6 +996,14 @@ unsafe fn encode_wic(
     let (width, height) = size(source)?;
     frame.SetSize(width, height).map_err(err)?;
     frame.SetPixelFormat(&mut pixel_format).map_err(err)?;
+    if let Some(profile) = profile {
+        // An encoder that cannot store a profile refuses it; the image still saves.
+        if let Ok(context) = factory.CreateColorContext() {
+            if context.InitializeFromMemory(profile).is_ok() {
+                let _ = frame.SetColorContexts(&[Some(context)]);
+            }
+        }
+    }
     let converter = factory.CreateFormatConverter().map_err(err)?;
     if pixel_format == GUID_WICPixelFormat24bppBGR {
         // The output has no alpha: composite onto white, one band of rows at a time.
@@ -1036,6 +1082,7 @@ unsafe fn webp_bytes(
     factory: &IWICImagingFactory,
     source: &IWICBitmapSource,
     options: &ExportOptions,
+    profile: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
     let (width, height) = size(source)?;
     let length = webp_length(width, height)?;
@@ -1057,11 +1104,16 @@ unsafe fn webp_bytes(
     if options.lossless {
         // image-webp: 221 ms and 11.7 MB for a 12 MP photo; libwebp took 13.6 s for 10.3 MB.
         let mut bytes = Vec::new();
-        image_webp::WebPEncoder::new(&mut bytes)
+        let mut encoder = image_webp::WebPEncoder::new(&mut bytes);
+        if let Some(profile) = profile {
+            encoder.set_icc_profile(profile.to_vec());
+        }
+        encoder
             .encode(&pixels, width, height, image_webp::ColorType::Rgba8)
             .map_err(|e| e.to_string())?;
         return Ok(bytes);
     }
+    // ponytail: lossy WebP drops the color profile; libwebp's WebPMux API can add it.
     let mut output = std::ptr::null_mut();
     // Simple encoding API: https://developers.google.com/speed/webp/docs/api#simple_encoding_api
     let written = libwebp_sys::WebPEncodeRGBA(
@@ -1105,17 +1157,16 @@ pub fn clipboard_image() -> Result<Frame, String> {
         decode_clipboard(&bytes, dib)
     }
 }
-/// Put `frame` on the clipboard as CF_DIBV5 and PNG, both with alpha.
-/// `owner` is the app window: SetClipboardData fails when no window owns the clipboard.
-#[allow(dead_code)] // The shell calls this in wave 2.
-pub fn copy_image(owner: HWND, frame: &Frame) -> Result<(), String> {
-    let (dib, png) = encode_clipboard(frame)?;
+/// Put the bytes from `encode_clipboard` on the clipboard: CF_DIBV5 and PNG,
+/// both with alpha. `owner` is the app window: SetClipboardData fails when
+/// no window owns the clipboard.
+pub fn put_clipboard(owner: HWND, dib: &[u8], png: &[u8]) -> Result<(), String> {
     unsafe {
         OpenClipboard(Some(owner)).map_err(|_| "Another app is using the clipboard. Try again.")?;
         let write = || -> Result<(), String> {
             EmptyClipboard().map_err(err)?;
-            set_global(CF_DIBV5.0 as u32, &dib)?;
-            set_global(RegisterClipboardFormatW(w!("PNG")), &png)
+            set_global(CF_DIBV5.0 as u32, dib)?;
+            set_global(RegisterClipboardFormatW(w!("PNG")), png)
         };
         let result = write();
         let _ = CloseClipboard();
@@ -1252,7 +1303,7 @@ pub fn encode_clipboard(frame: &Frame) -> Result<(Vec<u8>, Vec<u8>), String> {
             quality: 1.0,
             lossless: true,
         };
-        encode(&factory, &bitmap, &stream, &options)?;
+        encode(&factory, &bitmap, &stream, &options, None)?;
         let mut length = 0;
         stream
             .Seek(0, STREAM_SEEK_END, Some(&mut length))
@@ -1310,7 +1361,6 @@ pub fn encode_clipboard(frame: &Frame) -> Result<(Vec<u8>, Vec<u8>), String> {
 /// Up to 4 files run at once. `progress(done, total)` runs after each file,
 /// from a worker thread. Setting `cancel` skips the files not yet started.
 /// Returns one result per input, in input order.
-#[allow(dead_code)] // The shell calls this in wave 2.
 pub fn batch(
     inputs: &[PathBuf],
     output_dir: &Path,
@@ -1441,7 +1491,8 @@ unsafe fn batch_one(
             source = scaler.cast().map_err(err)?;
         }
     }
-    write_source(&factory, &source, output, options)
+    let profile = rgb_profile(&factory, input);
+    write_source(&factory, &source, output, options, profile.as_deref())
 }
 /// The size a batch resize gives a `width` x `height` image.
 fn resize_target(width: u32, height: u32, resize: BatchResize) -> Result<(u32, u32), String> {

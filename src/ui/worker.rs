@@ -100,7 +100,7 @@ pub(super) struct Request {
     pub(super) sources: HashMap<PathBuf, PathBuf>,
 }
 impl Request {
-    fn source(&self) -> &Path {
+    pub(super) fn source(&self) -> &Path {
         self.sources.get(&self.path).map(PathBuf::as_path).unwrap_or(&self.path)
     }
 }
@@ -129,8 +129,8 @@ fn reader_paths(job: &Job) -> Vec<PathBuf> {
         | Job::Text(request, _)
         | Job::Find(request, _)
         | Job::Fields(request)
-        | Job::Background(request, _)
         | Job::Print(request, _)
+        | Job::Tool(request, _)
         | Job::Password(request, _) => (request, None),
         Job::Batch(request, _, _, _, selected) => (request, selected.as_ref()),
         Job::Autosave(_) | Job::Wake => return Vec::new(),
@@ -175,10 +175,10 @@ pub(super) enum Job {
     Text(Request, Option<Selection>),
     Find(Request, String),
     Fields(Request),
-    Background(Request, PathBuf),
     Print(Request, crate::printing::PrintJob),
     Batch(Request, PathBuf, String, Arc<AtomicBool>, Option<Vec<PathBuf>>),
     Password(Request, String),
+    Tool(Request, super::imagetools::Task),
     /// New queued work: wakes a waiting worker.
     Wake,
 }
@@ -196,6 +196,7 @@ pub(super) enum Event {
     Background(PathBuf, std::result::Result<String, String>),
     Finished(std::result::Result<String, String>),
     Progress(String),
+    Tool(super::imagetools::Done),
 }
 pub(super) struct Completed {
     pub(super) generation: u64,
@@ -635,6 +636,12 @@ impl Worker {
                 }))
             }
             Job::Autosave(request) => Event::Autosaved(self.autosave(request)),
+            Job::Tool(request, task) => {
+                let progress = |done, total| {
+                    let _ = sender.send(Event::Tool(super::imagetools::Done::Progress(done, total)));
+                };
+                task.run(&request, &progress)
+            }
             Job::Wake | Job::Password(..) => return true,
             job => return self.other(job, readers, sender),
         };
@@ -652,14 +659,13 @@ impl Worker {
             Some(Long::Batch(mut batch)) => {
                 if batch.next >= batch.files.len() || batch.cancel.load(Ordering::Acquire) {
                     completed_readers = std::mem::take(&mut batch.readers);
-                    let total = batch.files.len();
-                    let failed = batch.errors.len();
-                    Event::Finished(Ok(format!(
-                        "Batch finished: {} saved, {failed} failed, {} not processed.{}",
-                        batch.good,
-                        total - batch.good - failed,
-                        batch.errors.first().map(|e| format!(" First error: {e}")).unwrap_or_default()
-                    )))
+                    let skipped = batch.files.len() - batch.good - batch.errors.len();
+                    Event::Tool(super::imagetools::Done::Batched(super::imagetools::BatchSummary {
+                        folder: batch.folder,
+                        saved: batch.good,
+                        failed: batch.errors,
+                        skipped,
+                    }))
                 } else {
                     let path = batch.files[batch.next].clone();
                     let source = batch.sources.get(&path).unwrap_or(&path).clone();
@@ -725,7 +731,6 @@ impl Worker {
             | Job::Text(r, _)
             | Job::Find(r, _)
             | Job::Fields(r)
-            | Job::Background(r, _)
             | Job::Print(r, _)
             | Job::Batch(r, _, _, _, _) => r.clone(),
             _ => return true,
@@ -837,10 +842,6 @@ impl Worker {
                     None => Err("Open a PDF first.".into()),
                 },
             ),
-            Job::Background(_, output) => {
-                let result = crate::background::remove(&source, &output, &edits.image);
-                Event::Background(output, result)
-            }
             Job::Print(..) | Job::Batch(..) if self.long.is_some() => {
                 Event::Finished(Err("Wait for the current print or conversion to finish, then try again.".into()))
             }
@@ -948,7 +949,7 @@ fn worker(receiver: mpsc::Receiver<QueuedJob>, sender: Events, queue: Arc<Mutex<
 pub(super) fn runs_on_task_worker(job: &Job) -> bool {
     match job {
         Job::Layer(request) | Job::Text(request, _) => !is_pdf(&request.path),
-        Job::Background(request, _) => !request.sources.contains_key(&request.path),
+        Job::Tool(request, _) => !request.sources.contains_key(&request.path),
         Job::Batch(request, _, extension, _, _) => extension != "pdf" && request.sources.is_empty(),
         Job::Save(request, output, SaveKind::Copy) => {
             !is_pdf(&request.path) && !is_pdf(output) && !request.sources.contains_key(&request.path)
@@ -1423,8 +1424,8 @@ mod tests {
         assert!(worker.step(&events));
         assert!(matches!(receiver.recv().unwrap(), Event::Progress(_)));
         assert!(worker.step(&events));
-        let Event::Finished(result) = receiver.recv().unwrap() else { panic!("expected finished") };
-        result.unwrap();
+        let Event::Tool(super::super::imagetools::Done::Batched(summary)) = receiver.recv().unwrap() else { panic!("expected finished") };
+        assert!(summary.failed.is_empty());
         let converted = output.join("photo.png");
         let frame = crate::imaging::decode(&converted, 100, 100).unwrap();
         assert_eq!((frame.source_width, frame.source_height), (1, 2), "batch applies the rotation once");
@@ -1517,7 +1518,7 @@ mod tests {
         assert!(runs_on_task_worker(&Job::Text(request("a.png"), None)), "OCR copy");
         assert!(!runs_on_task_worker(&Job::Layer(request("a.pdf"))), "PDF text uses PDFium");
         assert!(!runs_on_task_worker(&Job::Text(request("a.pdf"), None)), "PDF copy uses PDFium");
-        assert!(runs_on_task_worker(&Job::Background(request("a.png"), PathBuf::from("b.png"))));
+        assert!(runs_on_task_worker(&Job::Tool(request("a.png"), super::super::imagetools::Task::Cutout)));
         assert!(runs_on_task_worker(&Job::Batch(request("a.png"), PathBuf::from("out"), "webp".into(), cancel.clone(), None)));
         assert!(!runs_on_task_worker(&Job::Batch(request("a.png"), PathBuf::from("out"), "pdf".into(), cancel, None)));
         assert!(runs_on_task_worker(&Job::Save(request("a.png"), PathBuf::from("b.jpg"), SaveKind::Copy)));
@@ -1544,7 +1545,7 @@ mod tests {
         snapshot_backed.sources.insert(PathBuf::from("a.png"), PathBuf::from("opened/a.png"));
         assert!(runs_on_task_worker(&Job::Layer(snapshot_backed.clone())), "snapshot-backed OCR remains off the document worker");
         assert!(runs_on_task_worker(&Job::Text(snapshot_backed.clone(), None)), "snapshot-backed OCR copy remains off the document worker");
-        assert!(!runs_on_task_worker(&Job::Background(snapshot_backed.clone(), PathBuf::from("b.png"))));
+        assert!(!runs_on_task_worker(&Job::Tool(snapshot_backed.clone(), super::super::imagetools::Task::Cutout)));
         assert!(!runs_on_task_worker(&Job::Save(
             snapshot_backed,
             PathBuf::from("b.png"),
@@ -1631,8 +1632,8 @@ mod tests {
                     assert_eq!(opened.result.unwrap().len(), 20);
                     order.push("pages");
                 }
-                Event::Finished(result) => {
-                    assert!(result.unwrap().starts_with("Batch finished: 30 saved"));
+                Event::Tool(super::super::imagetools::Done::Batched(summary)) => {
+                    assert_eq!(summary.saved, 30);
                     order.push("finished");
                     break;
                 }

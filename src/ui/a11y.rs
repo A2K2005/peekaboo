@@ -60,6 +60,7 @@ pub(super) fn node_id(id: WidgetId) -> NodeId {
         WidgetId::SidebarTab(i) => 50_000 + i as u64,
         WidgetId::SheetButton(i) => 60_000 + i as u64,
         WidgetId::SheetField(i) => 61_000 + i as u64,
+        WidgetId::SheetControl(i) => 62_000 + i as u64,
         WidgetId::Document => 70_000,
         WidgetId::SidebarItem(i) => 2_000_000 + i as u64,
     })
@@ -75,6 +76,7 @@ fn widget_node(w: &Widget) -> Node {
         WidgetRole::ListItem => Role::ListItem,
         WidgetRole::Document => Role::Document,
         WidgetRole::Field => Role::TextInput,
+        WidgetRole::Slider => Role::Slider,
         WidgetRole::Button | WidgetRole::Caption => Role::Button,
     });
     node.set_label(w.label.clone());
@@ -231,6 +233,14 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
             children.push(SHEET_MESSAGE);
         }
         children.extend(ids(&|w| w.region == Region::Sheet && w.role != WidgetRole::Field));
+        for (index, control) in sheet.controls.iter().enumerate().filter(|(_, c)| c.kind == super::sheet::Kind::Slider) {
+            if let Some((_, node)) = nodes.iter_mut().find(|(id, _)| *id == node_id(WidgetId::SheetControl(index))) {
+                node.set_numeric_value(control.value as f64);
+                node.set_min_numeric_value(1.0);
+                node.set_max_numeric_value(100.0);
+                node.set_numeric_value_step(1.0);
+            }
+        }
         let mut dialog = group(Role::Dialog, &sheet.title, card.card, children);
         dialog.set_modal();
         nodes.push((SHEET, dialog));
@@ -372,6 +382,8 @@ mod tests {
                     buttons: vec!["Delete page".into(), "Cancel".into()],
                     cancel: 1,
                     result: None,
+                    controls: Vec::new(),
+                    live: None,
                 });
                 s.focus = Some(WidgetId::SheetButton(1));
             }
@@ -434,7 +446,7 @@ mod tests {
             sidebar_active: 0,
             markup: 1.0,
             ctx: commands::Ctx { has_frame: true, pdf: true, tabs: 2, ..Default::default() },
-            sheet: Some(SheetView { message_height: 0.0, fields: vec!["Text to find"], buttons: vec!["OK", "Cancel"] }),
+            sheet: Some(SheetView { message_height: 0.0, fields: vec!["Text to find"], buttons: vec!["OK", "Cancel"], controls: &[] }),
         };
         for with_document in [true, false] {
             input.has_document = with_document;
