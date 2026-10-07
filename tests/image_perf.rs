@@ -59,6 +59,16 @@ fn display_decode_24mp() {
         let f = imaging::decode(&path, 1920, 1080).unwrap();
         assert_eq!((f.source_width, f.source_height), (6000, 4000));
     });
+    // A full-image crop turns native scaling off: the path before this change.
+    let crop = [model::ImageEdit::Crop {
+        left: 0.0,
+        top: 0.0,
+        right: 1.0,
+        bottom: 1.0,
+    }];
+    times("decode 24 MP to 1920x1080 without native scaling", 7, || {
+        imaging::decode_edited(&path, 1920, 1080, &crop).unwrap();
+    });
 }
 
 /// Where the display decode time goes: native JPEG scale factors and the scaler.
