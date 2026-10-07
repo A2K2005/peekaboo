@@ -1,5 +1,4 @@
-//! Runs commands. Ported from the pre-split shell's command handler, with
-//! sheets in place of dialog windows and message boxes.
+//! Runs commands.
 use super::{
     app::{add_tabs, close_tab, invalidate, navigate, open, schedule, select_tab, with_state, SaveStatus},
     commands::{self, Command, MenuItem, Pick},
@@ -213,6 +212,11 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             });
         }
         FileInfo => sheet::alert(hwnd, "File information", &image_info(&request.path, width, height)),
+        Share => {
+            if let Err(error) = crate::integration::share_files(hwnd, std::slice::from_ref(&request.path)) {
+                sheet::alert(hwnd, "Share", &error);
+            }
+        }
         Slideshow => {
             with_state(|s| {
                 s.slideshow = if s.slideshow.is_some() { None } else { Some(Instant::now() + Duration::from_secs(3)) };

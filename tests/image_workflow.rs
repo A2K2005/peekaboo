@@ -112,7 +112,6 @@ fn image_exports_preserve_resolution_alpha_and_source() {
     .unwrap();
     let resized = imaging::decode(&resize, 10, 10).unwrap();
     assert_eq!((resized.width, resized.height), (4, 6));
-    // PFW_FIXTURES overrides the fixtures folder.
     let fixtures = std::env::var_os("PFW_FIXTURES")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("fixtures"));

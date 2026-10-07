@@ -37,9 +37,7 @@ mod text;
 
 static ENGINE_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub const PASSWORD_REQUIRED: &str = "This PDF requires a password.";
-#[allow(dead_code)]
 pub const XFA_FORM: &str = "This form needs Adobe Acrobat Reader.";
-#[allow(dead_code)]
 pub const SEARCH_CANCELED: &str = "Search was canceled.";
 struct Password(Vec<u8>);
 impl Drop for Password {
@@ -108,7 +106,7 @@ pub enum FormFieldKind {
     Checkbox,
     Unsupported,
 }
-#[allow(dead_code)]
+#[allow(dead_code)] // tests/pdf_*.rs use this.
 #[derive(Clone, Debug)]
 pub struct FormField {
     pub page: u32,
@@ -1041,6 +1039,7 @@ impl PdfEngine {
         }
     }
 
+    #[allow(dead_code)] // tests/pdf_*.rs use this.
     pub fn render(
         &mut self,
         path: &Path,
@@ -1120,7 +1119,6 @@ impl PdfEngine {
     /// Renders one tile of a page. The page is laid out at `scale` device
     /// pixels per point; `region` is `[x, y, width, height]` in those pixels,
     /// from the page's top-left corner. Annotations and form fields are drawn.
-    #[allow(dead_code)]
     pub fn render_region(
         &mut self,
         path: &Path,
@@ -1458,10 +1456,12 @@ impl PdfEngine {
         Ok(())
     }
 
+    #[allow(dead_code)] // tests/pdf_*.rs use this.
     pub fn page_text(&mut self, path: &Path, page: u32) -> Result<String, String> {
         self.page_text_edited(path, page, &[])
     }
 
+    #[allow(dead_code)] // tests/pdf_*.rs use this.
     pub fn page_text_edited(
         &mut self,
         path: &Path,
@@ -1506,15 +1506,7 @@ impl PdfEngine {
         Ok(())
     }
 
-    pub fn find(
-        &mut self,
-        path: &Path,
-        query: &str,
-        start_page: u32,
-    ) -> Result<Option<u32>, String> {
-        self.find_edited(path, query, start_page, &[])
-    }
-
+    #[allow(dead_code)] // tests/pdf_workflow.rs uses this.
     pub fn find_edited(
         &mut self,
         path: &Path,

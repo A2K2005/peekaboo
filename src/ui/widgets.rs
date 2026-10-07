@@ -470,7 +470,7 @@ pub(super) fn layout(input: &Input) -> Layout {
     out.status = Rect::new(0.0, (height - status_h).max(top), width, status_h);
     let bottom = out.status.y0;
 
-    // Sidebar frame with three tabs. Wave 2 fills the panels.
+    // Sidebar: three tabs over the panel list.
     let mut left = 0.0;
     if input.sidebar_open {
         // Wider with large text, so the three tab names still fit.
@@ -836,7 +836,9 @@ mod tests {
     #[test]
     fn tab_order_skips_disabled_and_wraps() {
         let tabs = vec!["a.pdf".to_string(), "b.pdf".to_string()];
-        let layout = layout(&input(1100.0, &tabs));
+        let mut i = input(1100.0, &tabs);
+        i.ctx.pending = true;
+        let layout = layout(&i);
         let first = next_focus(&layout.widgets, None, false).unwrap();
         assert_eq!(first, WidgetId::Tab(0));
         let mut seen = vec![first];
@@ -901,7 +903,7 @@ mod tests {
         assert_eq!(access_key_target(&layout.widgets, Scope::Root, 'm'), Some(cmd(Command::ToggleMarkup)));
         assert_eq!(access_key_target(&layout.widgets, Scope::Root, 'O'), Some(cmd(Command::AppMenu)));
         assert_eq!(access_key_target(&layout.widgets, Scope::Markup, 'H'), Some(cmd(Command::Highlight)));
-        assert_eq!(access_key_target(&layout.widgets, Scope::Root, 'H'), None, "Share is disabled");
+        assert_eq!(access_key_target(&layout.widgets, Scope::Root, 'H'), Some(cmd(Command::Share)));
         assert_eq!(access_key_target(&layout.widgets, Scope::Markup, 'S'), None);
     }
 

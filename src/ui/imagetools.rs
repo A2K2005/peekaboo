@@ -237,8 +237,6 @@ fn plain_request(path: PathBuf) -> Request {
     Request { generation: 0, path, page: 0, delta: 0, width: 1, height: 1, sessions: HashMap::new(), sources: HashMap::new() }
 }
 
-// ---------- Size estimate ----------
-
 #[derive(Default)]
 struct Estimate {
     /// The file being estimated while its sheet is open.
@@ -291,8 +289,6 @@ fn send_estimate(s: &mut State) {
         s.tools.refresh = true;
     }
 }
-
-// ---------- Formats ----------
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Output {
@@ -357,8 +353,6 @@ fn decimal(value: f64) -> String {
     }
 }
 
-// ---------- Save a copy ----------
-
 /// Save a copy of an image: format, quality, and the file size before saving.
 pub(super) unsafe fn export(hwnd: HWND, request: Request, width: u32, height: u32) {
     let list = outputs(false);
@@ -397,8 +391,6 @@ pub(super) unsafe fn export(hwnd: HWND, request: Request, width: u32, height: u3
     };
     start_export(hwnd, job, "Saving a new copy...");
 }
-
-// ---------- Resize ----------
 
 /// The new size in pixels from the resize fields.
 fn resize_target(source: [u32; 2], percent: bool, width: &str, height: &str) -> Result<[u32; 2], String> {
@@ -474,8 +466,6 @@ pub(super) unsafe fn resize(hwnd: HWND, request: Request, width: u32, height: u3
         Err(error) => sheet::alert(hwnd, "Resize image", &error),
     }
 }
-
-// ---------- Batch ----------
 
 const RESIZES: [&str; 4] = ["Do not resize", "Percent", "Longest side", "Width and height"];
 /// The size field's label and starting text for each resize choice.
@@ -629,8 +619,6 @@ unsafe fn show_summary(hwnd: HWND, summary: BatchSummary) {
     }
 }
 
-// ---------- Background removal ----------
-
 pub(super) unsafe fn remove_background(hwnd: HWND, request: Request) {
     start_export(hwnd, Job::Tool(request, Task::Cutout), "Removing the background on this PC...");
 }
@@ -663,8 +651,6 @@ unsafe fn show_cutout(hwnd: HWND, cutout: Cutout) {
         return;
     }
 }
-
-// ---------- Crop ----------
 
 /// Edges that a press at (x, y) grabs: a corner or edge handle, all four
 /// inside the box to move it, or None outside it.

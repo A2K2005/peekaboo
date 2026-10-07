@@ -99,7 +99,7 @@ fn load(pack: &Path) -> Result<Snap, String> {
     RUNTIME
         .get_or_init(|| load_runtime(&pack.join("onnxruntime.dll")))
         .clone()?;
-    // CPU only. DirectML hung the GPU with the earlier BiRefNet model (see report).
+    // CPU only. DirectML hung the GPU with BiRefNet; see docs/adr/005-background.md.
     // Each model is read once, checked, and loaded from memory, so the file
     // cannot change between the check and the load.
     let open = |(name, hash): (&str, &str)| {
@@ -429,7 +429,7 @@ mod tests {
     use super::*;
     #[test]
     fn the_pack_loads_only_from_the_app_profile_or_checkout() {
-        // The old search also tried two folders up from the app: C:\runtime\ai.
+        // Rejects folders outside these, such as C:\runtime\ai two levels up from the app.
         let app = Path::new(r"C:\Tools\Preview");
         let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
         let folders = pack_folders(app);

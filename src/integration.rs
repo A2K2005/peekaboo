@@ -45,8 +45,6 @@ pub const COPYDATA_TAG: usize = 0x5046_5731;
 const MAX_PAYLOAD: u32 = 1 << 20;
 const HANDOFF_WAIT: Duration = Duration::from_secs(5);
 
-// ---------- Command line and single instance ----------
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Open,
@@ -265,8 +263,6 @@ pub fn hand_off(class: &str, command: &Command) -> Option<InstanceGuard> {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
-
-// ---------- File associations, per user ----------
 
 const APP_KEY: &str = "PreviewForWindows";
 const THUMBNAIL_HANDLER: &str = "{e357fccd-a995-4576-b01f-234630154e96}";
@@ -701,8 +697,6 @@ pub fn windows_build() -> u32 {
     text.trim().parse().unwrap_or(0)
 }
 
-// ---------- Share ----------
-
 /// Opens the Windows share sheet for files. Call on the UI thread that owns `hwnd`.
 pub fn share_files(hwnd: HWND, paths: &[PathBuf]) -> Result<(), String> {
     let title = match paths {
@@ -760,8 +754,6 @@ pub fn share_files(hwnd: HWND, paths: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-// ---------- Drag out ----------
-
 /// A shell data object (CF_HDROP plus shell ID lists) for existing files in any folders.
 pub fn file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
     if paths.is_empty() {
@@ -805,8 +797,6 @@ pub fn drag_files(hwnd: HWND, paths: &[PathBuf]) -> Result<DROPEFFECT, String> {
     unsafe { SHDoDragDrop(Some(hwnd), &data, None::<&IDropSource>, DROPEFFECT_COPY) }
         .map_err(|e| format!("Could not drag the files: {}", e.message()))
 }
-
-// ---------- Recent files ----------
 
 pub const RECENT_LIMIT: usize = 20;
 const RECENT_FILE: &str = "recent.txt";

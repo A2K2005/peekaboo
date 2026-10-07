@@ -15,7 +15,6 @@ pub(super) struct Glyph {
     pub rect: Option<[f32; 4]>,
 }
 
-#[allow(dead_code)]
 impl PdfEngine {
     /// The page's text in reading order with one box per character, for
     /// selection, search highlights, and Narrator. It needs only the

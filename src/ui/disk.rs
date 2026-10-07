@@ -1,10 +1,6 @@
-//! Save model file steps (W2-3) that run off the window thread: a snapshot
-//! of the opened version, crash-safe replacement of the user's file, copy
-//! names, and the remembered first-edit choice.
-//!
-//! Not wired into the shell yet. Autosave stays off, and edits leave the app
-//! only through "Save a copy", which never replaces an existing file.
-#![allow(dead_code)]
+//! Save model file steps that run off the window thread: a snapshot of the
+//! opened version, crash-safe replacement of the user's file, copy names,
+//! and the remembered first-edit choice.
 
 use std::{
     ffi::{OsStr, OsString},

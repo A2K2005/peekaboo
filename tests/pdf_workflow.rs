@@ -6,7 +6,7 @@ mod model;
 #[path = "../src/pdf.rs"]
 mod pdf;
 
-// Independent workflow check. Run serially because PDFium is process-global.
+// Workflow check. Run serially because PDFium is process-global.
 #[test]
 fn pdf_edits_round_trip_without_changing_the_source() {
     use model::PdfEdit;

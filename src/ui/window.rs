@@ -29,7 +29,7 @@ use windows::{
     },
 };
 
-/// W1-D's single-instance handoff finds the window by this class name.
+/// The single-instance handoff finds the window by this class name.
 pub(super) const CLASS: PCWSTR = w!("PreviewForWindowsMain");
 const WM_APP_TEXT_SCALE: u32 = WM_APP + 3;
 
@@ -44,7 +44,7 @@ pub fn run() -> Result<()> {
         // process-wide and must come before any window exists.
         // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-enablemouseinpointer
         let _ = EnableMouseInPointer(true);
-        // OLE, not only COM: drag-out and the share sheet (W1-D) need it.
+        // OLE, not only COM: drag-out and the share sheet need it.
         // https://learn.microsoft.com/windows/win32/api/ole2/nf-ole2-oleinitialize
         OleInitialize(None)?;
         let command = crate::integration::parse_args(std::env::args_os().skip(1));
@@ -479,7 +479,7 @@ fn key_char(vk: u16) -> Option<char> {
     matches!(vk, 0x30..=0x39 | 0x41..=0x5A).then(|| vk as u8 as char)
 }
 
-/// Escape leaves modes and cancels long jobs, as in the pre-split shell.
+/// Escape leaves modes and cancels long jobs.
 unsafe fn escape(hwnd: HWND) {
     with_state(|s| {
         s.crop = false;

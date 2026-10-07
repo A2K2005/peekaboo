@@ -372,7 +372,7 @@ pub(super) struct Ctx {
     pub(super) zoom_select: bool,
 }
 
-/// Rules match the pre-split shell (`update_controls`), plus the new UI commands.
+/// Whether `command` can run in the state `x`.
 pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
     let ready = x.has_frame && !x.pending && !x.failed;
     match command {
@@ -380,8 +380,6 @@ pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
         NextTab | PreviousTab => x.tabs > 1,
         Tab(_) | CloseTab => x.tabs > 0,
         Undo | Revert => x.has_frame && !x.pending,
-        // The Windows share sheet arrives with W1-D in wave 2.
-        Share => false,
         _ if !ready => false,
         Flip | Resize | RemoveBackground | BatchFolder => !x.pdf,
         ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | InsertImagePage | ViewContinuous | ViewSingle | ViewTwoPages => x.pdf,
@@ -437,7 +435,6 @@ impl MenuItem {
         self.pick.is_none() && self.children.is_empty()
     }
     /// A plain choice. `label` is shown as is, so `&` is doubled.
-    #[allow(dead_code)]
     pub(super) fn choice(label: &str, index: usize) -> Self {
         Self {
             label: label.replace('&', "&&"),

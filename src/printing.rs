@@ -143,7 +143,7 @@ impl Drop for CancelScope {
 
 /// A print job in progress. `page` prints one page per call, so the
 /// document worker can render pages for the window between them. Run on
-/// the existing decoder worker. No PDFium calls run outside its engine owner.
+/// the document worker. No PDFium calls run outside its engine owner.
 pub struct Printing {
     job: PrintJob,
     next: u32,

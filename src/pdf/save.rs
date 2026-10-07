@@ -4,7 +4,6 @@
 use super::*;
 use crate::model::SaveMode;
 
-#[allow(dead_code)]
 impl PdfEngine {
     /// Writes `output` as the original file's bytes, unchanged, plus an
     /// incremental update with `edits`. The edits replay on a fresh document,
@@ -81,9 +80,10 @@ impl PdfEngine {
         self.write_new(destination.handle, output, FULL_SAVE)
     }
 
-    /// Makes a new PDF with one page per image, for "Combine into PDF" and
-    /// image-to-PDF export. Each page is the image size at 96 DPI. JPEG
-    /// files keep their original bytes. Initialize COM on this thread first.
+    /// Makes a new PDF with one page per image. Each page is the image size
+    /// at 96 DPI. JPEG files keep their original bytes. Initialize COM on
+    /// this thread first.
+    #[allow(dead_code)] // tests/pdf_engine.rs uses this.
     pub fn create_from_images(&mut self, images: &[PathBuf], output: &Path) -> Result<(), String> {
         if images.is_empty() {
             return Err("Choose at least one image.".into());

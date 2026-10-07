@@ -56,15 +56,12 @@ pub enum PdfEdit {
         right: f32,
         bottom: f32,
     },
-    // PDF types (W1-B). The shell starts using these in wave 2.
     /// Removes the annotation at `index` in the page's annotation list.
-    #[allow(dead_code)]
     DeleteAnnotation {
         page: u32,
         index: u32,
     },
     /// Replaces the annotation's text (its Contents entry).
-    #[allow(dead_code)]
     SetAnnotationText {
         page: u32,
         index: u32,
@@ -130,11 +127,8 @@ pub struct SearchHit {
     pub rects: Vec<NormRect>,
 }
 
-// PDF types (W1-B)
-
 /// One table-of-contents entry. `level` is 0 for top-level entries.
 /// `page` is `None` when the entry has no destination in this document.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutlineItem {
     pub title: String,
@@ -142,7 +136,6 @@ pub struct OutlineItem {
     pub level: u32,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PdfFormType {
     None,
@@ -153,7 +146,6 @@ pub enum PdfFormType {
 
 /// Document information. Dates are raw PDF date strings, such as
 /// `D:20261006120000Z`. `version` is like `1.7`.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PdfMetadata {
     pub title: String,
@@ -173,7 +165,6 @@ pub struct PdfMetadata {
 /// An annotation on a page. `kind` is the PDF subtype name, such as
 /// `Highlight`, `Ink`, `Link`, or `Widget`. `index` is the position in the
 /// page's annotation list, as used by `PdfEdit::DeleteAnnotation`.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PdfAnnotation {
     pub index: u32,
@@ -186,7 +177,6 @@ pub struct PdfAnnotation {
 /// top-left corner of the displayed page, in the units of `page_sizes`.
 /// Send WM_KEYDOWN keys as `Key` (virtual-key codes) and WM_CHAR text as
 /// `Char`. Tab goes only through `Key`.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FormInput {
     PointerDown {
@@ -216,7 +206,6 @@ pub enum FormInput {
 /// Result of one form input. `focus` is the page and rectangle of the
 /// focused field. Append `commits` to the edit recipe in order: the open
 /// document already holds those values, so the session stays intact.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FormFeedback {
     pub focus: Option<(u32, NormRect)>,
@@ -225,7 +214,6 @@ pub struct FormFeedback {
 }
 
 /// How `save_incremental` wrote the file.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SaveMode {
     /// The original bytes, unchanged, plus an appended update.
@@ -244,10 +232,7 @@ pub struct Frame {
     pub source_height: u32,
 }
 
-// Imaging types (W1-C)
-
 /// Image file formats the app can write.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFormat {
     Jpeg,
@@ -260,7 +245,6 @@ pub enum ImageFormat {
 
 /// `quality` is 0..1 and applies to JPEG, HEIC, and lossy WebP.
 /// `lossless` applies to WebP only.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExportOptions {
     pub format: ImageFormat,
@@ -270,7 +254,6 @@ pub struct ExportOptions {
 
 /// How a batch resizes each image. `Percent` is 100 for the original size.
 /// `MaxEdge` shrinks the longest side to the value and never enlarges.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BatchResize {
     Pixels { width: u32, height: u32 },
@@ -280,7 +263,6 @@ pub enum BatchResize {
 
 /// One batch action, applied to every input: rotate, then resize, then
 /// write in `options.format` (or each input's own format when `None`).
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchJob {
     pub quarter_turns: u8,
@@ -289,7 +271,6 @@ pub struct BatchJob {
 }
 
 /// The outcome for one batch input: the new file, or why it failed.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchResult {
     pub input: std::path::PathBuf,

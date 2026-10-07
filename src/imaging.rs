@@ -1063,7 +1063,6 @@ unsafe fn encode_wic(
     frame.Commit().map_err(err)?;
     encoder.Commit().map_err(err)
 }
-/// WIC has no WebP encoder. libwebp encodes lossy WebP; image-webp encodes lossless.
 fn webp_length(width: u32, height: u32) -> Result<usize, String> {
     if width > 16383 || height > 16383 {
         return Err(
@@ -1078,6 +1077,7 @@ fn webp_length(width: u32, height: u32) -> Result<usize, String> {
         .ok_or_else(|| "Resize images above 64 megapixels before exporting WebP.".into())
 }
 
+/// WIC has no WebP encoder. libwebp encodes lossy WebP; image-webp encodes lossless.
 unsafe fn webp_bytes(
     factory: &IWICImagingFactory,
     source: &IWICBitmapSource,

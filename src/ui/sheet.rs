@@ -1,4 +1,4 @@
-//! In-window sheets replace the old dialog windows and message boxes.
+//! In-window sheets for dialogs and messages.
 //! Text fields are Win32 EDIT children, so IME and text services work
 //! (CLAUDE.md D11). `ask` runs a nested message loop, like DialogBox, so
 //! callers keep a simple call-and-return flow.

@@ -247,7 +247,6 @@ pub(super) struct State {
     pub(super) tabs: Vec<PathBuf>,
     pub(super) password_attempts: HashMap<PathBuf, u32>,
     pub(super) views: HashMap<PathBuf, (u32, Zoom, (f32, f32))>,
-    // Window and chrome.
     pub(super) size: (f32, f32),
     pub(super) scale: f32,
     pub(super) text_scale: f32,
@@ -414,7 +413,6 @@ impl State {
         self.next_save_session = self.next_save_session.wrapping_add(1).max(1);
         self.saves.insert(path, SaveSession::new(id, stamp));
     }
-    #[allow(dead_code)] // The first-edit command path calls this in the next stage.
     pub(super) fn edited_for_save(&mut self, path: &PathBuf, now: Instant) {
         if let Some(save) = self.saves.get_mut(path) {
             save.edited(now);
@@ -697,7 +695,7 @@ impl State {
             .filter_map(|(path, save)| save.snapshot.as_ref().map(|snapshot| (path.clone(), snapshot.clone())))
             .collect()
     }
-    /// Clears hover, press, and tooltips when the pointer moves to `id`.
+    /// Moves hover to `id` and hides the tooltip. Returns true when hover changed.
     pub(super) fn set_hover(&mut self, id: Option<WidgetId>) -> bool {
         if self.hover == id {
             return false;
@@ -1653,6 +1651,8 @@ mod tests {
                 buttons: labels.iter().map(|label| (*label).into()).collect(),
                 cancel: usize::MAX,
                 result: None,
+                controls: Vec::new(),
+                live: None,
             });
             let layout = state.layout();
             let buttons: Vec<_> = layout

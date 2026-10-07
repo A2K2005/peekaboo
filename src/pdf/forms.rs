@@ -17,7 +17,7 @@ const NO_ACROFORM: &str =
     "This document does not contain supported AcroForm fields. XFA forms require another reader.";
 
 impl PdfEngine {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // tests/pdf_*.rs use this.
     pub fn form_fields(
         &mut self,
         path: &Path,
@@ -100,7 +100,6 @@ impl PdfEngine {
     /// Append those commits to `edits` before the next call, or the session
     /// restarts from the recipe. Call with `FormInput::Blur` before saving,
     /// so a field being typed in commits.
-    #[allow(dead_code)]
     pub fn form_event(
         &mut self,
         path: &Path,
@@ -128,7 +127,6 @@ impl PdfEngine {
     /// `form_event`. Call after each request that passes a new recipe, and
     /// append the result to `path`'s recipe; it is empty when nothing was
     /// typed. Each commit is returned once.
-    #[allow(dead_code)]
     pub fn take_form_commits(&mut self, path: &Path) -> Vec<PdfEdit> {
         let Ok(path) = path.canonicalize() else {
             return Vec::new();

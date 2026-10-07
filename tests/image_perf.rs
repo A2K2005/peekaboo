@@ -59,7 +59,7 @@ fn display_decode_24mp() {
         let f = imaging::decode(&path, 1920, 1080).unwrap();
         assert_eq!((f.source_width, f.source_height), (6000, 4000));
     });
-    // A full-image crop turns native scaling off: the path before this change.
+    // A full-image crop turns native scaling off, as a baseline.
     let crop = [model::ImageEdit::Crop {
         left: 0.0,
         top: 0.0,

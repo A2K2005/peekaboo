@@ -16,7 +16,7 @@ pub(super) struct Pos {
 pub(super) const END: usize = usize::MAX;
 
 /// A selection in reading order. `anchor` stays put; `focus` follows the
-/// pointer or Shift+click. The markup slice turns `range` and `rects` into
+/// pointer or Shift+click. Text markup turns `range` and `rects` into
 /// highlight, underline, or strikeout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Selection {

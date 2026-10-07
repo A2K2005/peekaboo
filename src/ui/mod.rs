@@ -52,8 +52,6 @@ mod pan;
 mod render;
 mod sheet;
 mod sidebar;
-// W2-2: tested core only; the shell does not call it yet.
-#[allow(dead_code)]
 mod text;
 mod theme;
 mod view;

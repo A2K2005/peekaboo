@@ -171,7 +171,6 @@ pub(super) enum Job {
     Open(Request),
     Metadata(Request),
     Save(Request, PathBuf, SaveKind),
-    #[allow(dead_code)] // First-edit consent schedules this in the next save-model stage.
     Autosave(AutosaveRequest),
     Layer(Request),
     Text(Request, Option<Selection>),

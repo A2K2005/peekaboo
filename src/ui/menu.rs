@@ -73,7 +73,7 @@ fn selectable(item: &MenuItem) -> bool {
     !item.is_separator()
 }
 
-/// Next selectable row after `from` in direction `step`, wrapping.
+/// Next selectable row after `from`, forward or back, wrapping.
 pub(super) fn step_selection(items: &[MenuItem], from: Option<usize>, forward: bool) -> Option<usize> {
     let n = items.len();
     if n == 0 {

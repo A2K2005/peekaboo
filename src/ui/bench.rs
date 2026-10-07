@@ -1,6 +1,6 @@
-//! Benchmark scenarios from docs/benchmarks.md, "Marker contracts for wave
-//! 2": next image and scrolling. The variables are read once at startup;
-//! without them nothing here runs and no file is written.
+//! Benchmark scenarios from docs/benchmarks.md, "Next image" and
+//! "Scrolling". The variables are read once at startup; without them
+//! nothing here runs and no file is written.
 use super::{
     actions,
     app::{invalidate, with_state, State},

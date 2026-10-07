@@ -1,4 +1,4 @@
-// PDF engine checks (W1-B). Run serially: PDFium is process-global.
+// PDF engine checks. Run serially: PDFium is process-global.
 // cargo test --release --test pdf_engine -- --test-threads=1 --nocapture
 #![allow(dead_code)]
 #[path = "../src/imaging.rs"]

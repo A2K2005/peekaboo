@@ -52,7 +52,6 @@ const SUBTYPES: [&str; 29] = [
     "Redact",
 ];
 
-#[allow(dead_code)]
 impl PdfEngine {
     /// The size in points of every page, after edits and rotation.
     pub fn page_sizes(&mut self, path: &Path, edits: &[PdfEdit]) -> Result<Vec<[f32; 2]>, String> {
@@ -493,7 +492,7 @@ unsafe extern "C" fn read_bytes(
 const TOO_LARGE: &str = "Resize images above 16 megapixels before adding them to a PDF.";
 
 /// Decodes a non-JPEG image at full size with WIC, and reads its EXIF
-/// orientation. Images over the frame limit (64 MiB of pixels) are refused,
+/// orientation. Images over the frame limit (64 MiB of BGRA pixel data) are refused,
 /// never scaled down. COM must be initialized on this thread.
 fn decode_image(bytes: &[u8]) -> Result<(Frame, u16), String> {
     use windows::core::w;
