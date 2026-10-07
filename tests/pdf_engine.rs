@@ -854,6 +854,48 @@ fn image_pages_keep_jpeg_bytes_orientation_and_page_size_rules() {
     assert!(!dir.join("broken.pdf").exists());
 }
 
+/// Writes a black 1-bit BMP. It stays small however many pixels it has.
+fn bmp(path: &std::path::Path, width: u32, height: u32) {
+    let size = width.div_ceil(32) * 4 * height;
+    let mut data = b"BM".to_vec();
+    for value in [62 + size, 0, 62, 40, width, height] {
+        data.extend(value.to_le_bytes());
+    }
+    data.extend([1, 0, 1, 0]); // one plane, one bit per pixel
+    for value in [0, size, 2835, 2835, 2, 0] {
+        data.extend(value.to_le_bytes());
+    }
+    data.extend([0, 0, 0, 0, 255, 255, 255, 0]);
+    data.resize(data.len() + size as usize, 0);
+    std::fs::write(path, data).unwrap();
+}
+
+#[test]
+fn image_pages_keep_full_resolution_and_refuse_oversized_images() {
+    let _com = Com::new();
+    let dir = out_dir("full-size");
+    let png = dir.join("wide.png");
+    imaging::export_frame(
+        &image(5000, 1000, |x, _| if x < 2500 { RED } else { BLUE }),
+        &png,
+    )
+    .unwrap();
+    let mut engine = PdfEngine::new().unwrap();
+    let combined = dir.join("combined.pdf");
+    engine.create_from_images(&[png], &combined).unwrap();
+    // 0.75 points per pixel: all 5000 pixels are kept, not 4096.
+    assert_eq!(
+        engine.page_sizes(&combined, &[]).unwrap(),
+        vec![[3750.0, 750.0]]
+    );
+    let huge = dir.join("huge.bmp");
+    bmp(&huge, 4200, 4200);
+    let error = engine
+        .create_from_images(&[huge], &dir.join("huge.pdf"))
+        .unwrap_err();
+    assert!(error.contains("16 megapixels"), "{error}");
+}
+
 #[test]
 fn merge_flattens_forms_only_when_asked() {
     let dir = out_dir("merge");
