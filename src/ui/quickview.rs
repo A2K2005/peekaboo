@@ -46,7 +46,8 @@ use windows::{
         UI::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{
-                GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR,
+                GetKeyState, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+                VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR,
                 VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
             },
             Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_RESIZETOFIT},
@@ -295,7 +296,8 @@ unsafe fn show_file(hwnd: HWND) {
     open(hwnd, path);
     with_state(|s| {
         if pdf {
-            s.zoom = Zoom::FitWidth;
+            // The whole first page shows, as in Quick Look.
+            s.zoom = Zoom::Fit;
             s.view_mode = ViewMode::Continuous;
         }
     });
@@ -402,31 +404,72 @@ unsafe fn set_alpha(hwnd: HWND, alpha: f32) {
     let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), (alpha.clamp(0.0, 1.0) * 255.0).round() as u8, LWA_ALPHA);
 }
 
+/// Marks the Alt tap `activate_window` injects, so the window does not
+/// treat it as a keytip press.
+pub(super) const ACTIVATION_TAP: usize = 0x5046_5741;
+
 unsafe fn activate_window(hwnd: HWND) {
     let _ = ShowWindow(hwnd, if IsIconic(hwnd).as_bool() { SW_RESTORE } else { SW_SHOW });
-    // A background process may not take the foreground; a thread that
-    // shares the foreground thread's input state may.
+    for retry in [false, true] {
+        if GetForegroundWindow() == hwnd {
+            break;
+        }
+        bring_forward(hwnd, retry);
+    }
+    if crate::resident::logging() {
+        let shown = IsWindowVisible(hwnd).as_bool();
+        crate::resident::log(&format!("show: shown {shown}, foreground after show {}", GetForegroundWindow() == hwnd));
+    }
+}
+
+/// A background process started by a keyboard hook may not take the
+/// foreground: Windows refuses SetForegroundWindow and the window opens
+/// behind Explorer. Sharing the foreground thread's input state is not
+/// always enough, so the retry also taps Alt, which lifts the foreground
+/// lock, and raises the window through the topmost band.
+/// https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setforegroundwindow
+unsafe fn bring_forward(hwnd: HWND, alt: bool) {
     let current = GetCurrentThreadId();
     let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
     let attached = foreground != current && AttachThreadInput(current, foreground, true).as_bool();
+    if alt {
+        tap_alt(KEYBD_EVENT_FLAGS(0));
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+    }
     let _ = SetForegroundWindow(hwnd);
+    let _ = BringWindowToTop(hwnd);
+    let _ = SetFocus(Some(hwnd));
+    if alt {
+        tap_alt(KEYEVENTF_KEYUP);
+    }
     if attached {
         let _ = AttachThreadInput(current, foreground, false);
     }
 }
 
+unsafe fn tap_alt(flags: KEYBD_EVENT_FLAGS) {
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, dwFlags: flags, dwExtraInfo: ACTIVATION_TAP, ..Default::default() } },
+    };
+    SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+}
+
 /// The client size for the content: images at 100% when they fit, else in
-/// 80% of the work area; PDFs at page width, at most 85% of its height.
+/// 80% of the work area; PDFs one whole page, at most 80% of its width
+/// and 85% of its height.
 fn content_size(s: &State, work: (f32, f32)) -> (f32, f32) {
     let (ww, wh) = work;
     let size = match (&s.pdf, &s.frame) {
         (Some(v), _) => {
+            // The scale Zoom::Fit picks in this window: the whole page fits.
             let gap = document::gap(s);
             let widest = v.sizes.iter().map(|p| p[0]).fold(1.0, f32::max);
-            let width = (widest * view::actual(s.scale) + 2.0 * gap).min(0.8 * ww);
-            let scale = (width - 2.0 * gap) / widest;
-            let height = v.sizes.iter().map(|p| (p[1] * scale).round() + gap).sum::<f32>() + gap;
-            (width, height.min(0.85 * wh))
+            let tallest = v.sizes.iter().map(|p| p[1]).fold(1.0, f32::max);
+            let scale = view::actual(s.scale).min((0.8 * ww - 2.0 * gap) / widest).min((0.85 * wh - 2.0 * gap) / tallest).max(0.0);
+            (widest * scale + 2.0 * gap, tallest * scale + 2.0 * gap)
         }
         (None, Some(f)) => {
             let (w, h) = (f.source_width.max(1) as f32, f.source_height.max(1) as f32);

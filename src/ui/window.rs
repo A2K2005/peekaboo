@@ -648,7 +648,8 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
     let down = |key: VIRTUAL_KEY| GetKeyState(key.0 as i32) < 0;
     let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
     if vk == VK_MENU.0 {
-        with_state(|s| s.alt_armed = true);
+        let tap = GetMessageExtraInfo().0 as usize == super::quickview::ACTIVATION_TAP;
+        with_state(|s| s.alt_armed = !tap);
         return true;
     }
     with_state(|s| {

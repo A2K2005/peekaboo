@@ -10,7 +10,10 @@
 use crate::integration::{self, Action, Command};
 use std::cell::Cell;
 use std::ffi::OsString;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
+    OnceLock,
+};
 use windows::core::{w, Error, Result, HSTRING, PCWSTR};
 use windows::Win32::{
     Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM},
@@ -48,6 +51,8 @@ static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 static SPACE_DOWN: AtomicBool = AtomicBool::new(false);
 /// Set when the hook took a Space press; its repeats and key-up are taken too.
 static SWALLOW: AtomicBool = AtomicBool::new(false);
+/// Event time of the last Space down, in ms.
+static LAST_SPACE: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     /// Reading the selection makes cross-process COM calls, which dispatch
@@ -207,7 +212,12 @@ unsafe fn install() -> Option<HHOOK> {
 unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let key = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-        if key.vkCode == VK_SPACE.0 as u32 && key.flags.0 & LLKHF_INJECTED.0 == 0 {
+        let injected = key.flags.0 & LLKHF_INJECTED.0 != 0;
+        if key.vkCode != VK_SPACE.0 as u32 && !injected {
+            // Another key means Space is not held, even if its key-up was missed.
+            SPACE_DOWN.store(false, Ordering::Relaxed);
+            SWALLOW.store(false, Ordering::Relaxed);
+        } else if key.vkCode == VK_SPACE.0 as u32 && !injected {
             let message = wparam.0 as u32;
             if matches!(message, WM_KEYUP | WM_SYSKEYUP) {
                 SPACE_DOWN.store(false, Ordering::Relaxed);
@@ -215,18 +225,29 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     return LRESULT(1);
                 }
             } else {
-                // Low-level hooks get no repeat flag; a down while down is a repeat.
-                let repeat = SPACE_DOWN.swap(true, Ordering::Relaxed);
+                // Low-level hooks get no repeat flag; a down while down is a
+                // repeat. Repeats come every 33 to 500 ms, so a longer gap
+                // means the key-up was missed and this is a fresh press.
+                let quiet = key.time.wrapping_sub(LAST_SPACE.swap(key.time, Ordering::Relaxed)) > 1000;
+                let repeat = SPACE_DOWN.swap(true, Ordering::Relaxed) && !quiet;
+                if !repeat {
+                    SWALLOW.store(false, Ordering::Relaxed);
+                }
                 if SWALLOW.load(Ordering::Relaxed) {
                     return LRESULT(1);
                 }
                 if !repeat && message == WM_KEYDOWN && no_modifiers() {
-                    if let Some(window) = file_view() {
-                        let target = HWND(TARGET.load(Ordering::Acquire) as *mut _);
-                        if PostMessageW(Some(target), WM_APP_PEEK, WPARAM(window.0 as usize), LPARAM(1)).is_ok() {
-                            SWALLOW.store(true, Ordering::Relaxed);
-                            return LRESULT(1);
-                        }
+                    let window = file_view();
+                    let target = HWND(TARGET.load(Ordering::Acquire) as *mut _);
+                    let posted = window.is_some_and(|window| {
+                        PostMessageW(Some(target), WM_APP_PEEK, WPARAM(window.0 as usize), LPARAM(1)).is_ok()
+                    });
+                    if logging() {
+                        log(&format!("space: {}, posted {posted}", focus_report()));
+                    }
+                    if posted {
+                        SWALLOW.store(true, Ordering::Relaxed);
+                        return LRESULT(1);
                     }
                 }
             }
@@ -248,6 +269,33 @@ unsafe fn file_view() -> Option<HWND> {
     GetGUIThreadInfo(GetWindowThreadProcessId(window, None), &mut info).ok()?;
     let list = matches!(class_name(info.hwndFocus).as_str(), "DirectUIHWND" | "SysListView32");
     (list && info.hwndCaret.is_invalid()).then_some(window)
+}
+
+/// Foreground class, focus class, and caret, for the diagnostic log.
+unsafe fn focus_report() -> String {
+    let window = GetForegroundWindow();
+    let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+    let _ = GetGUIThreadInfo(GetWindowThreadProcessId(window, None), &mut info);
+    format!("foreground {}, focus {}, caret {}", class_name(window), class_name(info.hwndFocus), !info.hwndCaret.is_invalid())
+}
+
+/// True when PFW_RESIDENT_LOG is set.
+pub(crate) fn logging() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PFW_RESIDENT_LOG").is_some())
+}
+
+/// Appends one line to %LOCALAPPDATA%\PreviewForWindows\resident.log.
+pub(crate) fn log(line: &str) {
+    use std::io::Write;
+    let Some(folder) = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("PreviewForWindows")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&folder);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(folder.join("resident.log")) {
+        let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let _ = writeln!(file, "{time} {line}");
+    }
 }
 
 /// Some(true) for the desktop, Some(false) for an Explorer window.
