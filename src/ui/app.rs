@@ -137,6 +137,72 @@ pub(super) fn file_name(path: &std::path::Path) -> String {
 }
 
 impl State {
+    /// The first path opens at once; every path gets a tab.
+    pub(super) fn new(workers: Workers, paths: &[PathBuf], size: (f32, f32), scale: f32, text_scale: f32, theme: Theme) -> Self {
+        let path = paths.first().cloned();
+        let mut state = State {
+            workers,
+            focus: path.as_ref().map(|_| WidgetId::Document),
+            status: if path.is_none() { EMPTY_STATUS.into() } else { "Opening...".into() },
+            path,
+            page: 0,
+            generation: 0,
+            frame: None,
+            pending: false,
+            painted: false,
+            due: Some(Instant::now()),
+            marked: false,
+            sessions: HashMap::new(),
+            zoom: 1.0,
+            requested_zoom: 1.0,
+            frame_zoom: 1.0,
+            pan: (0.0, 0.0),
+            drag: None,
+            crop: false,
+            selection: None,
+            image_rect: widgets::Rect::default(),
+            exporting: false,
+            displayed: None,
+            render_failed: false,
+            markup: None,
+            ink: Vec::new(),
+            markup_text: String::new(),
+            signature: None,
+            cancel: None,
+            slideshow: None,
+            tabs: Vec::new(),
+            password_attempts: HashMap::new(),
+            views: HashMap::new(),
+            size,
+            scale,
+            text_scale,
+            theme,
+            renderer: None,
+            maximized: false,
+            active: true,
+            sidebar_open: false,
+            sidebar_tab: 0,
+            markup_open: false,
+            markup_since: None,
+            markup_from: 0.0,
+            animations: super::theme::animations_enabled(),
+            hover: None,
+            hover_since: None,
+            tooltip: None,
+            pressed: None,
+            focus_visible: false,
+            keytips: None,
+            alt_armed: false,
+            caption_hover: None,
+            caption_pressed: None,
+            touches: Vec::new(),
+            pinch: None,
+            sheet: None,
+            started: false,
+        };
+        add_tabs(&mut state, paths);
+        state
+    }
     pub(super) fn is_pdf(&self) -> bool {
         self.path.as_ref().is_some_and(|p| is_pdf(p))
     }

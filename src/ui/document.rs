@@ -3,13 +3,17 @@
 //! so wave 2 can route pen input (with pressure) straight to ink.
 use super::{
     app::{schedule, State},
-    render::Renderer,
+    render::Painter,
     theme::Rgba,
     widgets::Rect,
 };
 use crate::model::{AnnotationKind, ImageEdit, PdfEdit};
 use std::time::{Duration, Instant};
-use windows::Win32::{Foundation::HWND, UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture}};
+use windows::Win32::{
+    Foundation::HWND,
+    Graphics::Direct2D::ID2D1Bitmap,
+    UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PointerKind {
@@ -78,20 +82,16 @@ pub(super) fn frame_rect(doc: Rect, frame: (u32, u32), zoom: f32, frame_zoom: f3
 
 /// Draws the canvas, the frame, and in-progress markup. Returns true when
 /// the frame was drawn (the launch benchmark marker needs real content).
-pub(super) fn paint(renderer: &Renderer, state: &mut State, doc: Rect) -> bool {
-    let p = &renderer.painter;
+pub(super) fn paint(p: &Painter, bitmap: Option<&ID2D1Bitmap>, state: &mut State, doc: Rect) -> bool {
     let theme = state.theme;
     p.fill(doc, theme.canvas);
-    let Some(frame) = state.frame.as_ref() else {
+    let (Some(frame), Some(bitmap)) = (state.frame.as_ref(), bitmap) else {
         return false;
     };
-    if renderer.bitmap.is_none() {
-        return false;
-    }
     let rect = frame_rect(doc, (frame.width, frame.height), state.zoom, state.frame_zoom, state.pan);
     state.image_rect = rect;
     p.push_clip(doc);
-    renderer.draw_bitmap(rect);
+    p.draw_bitmap(bitmap, rect);
     let s = state.scale;
     let outline = Rect { x0: rect.x0 - s, y0: rect.y0 - s, x1: rect.x1 + s, y1: rect.y1 + s };
     p.stroke_round(outline, 0.0, theme.border, s);

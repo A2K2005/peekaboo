@@ -252,6 +252,24 @@ impl Painter {
         };
         let _ = draw();
     }
+    /// Uploads a frame as a bitmap for this target.
+    pub(super) fn upload(&self, frame: &crate::model::Frame) -> Result<ID2D1Bitmap> {
+        unsafe {
+            self.target.CreateBitmap(
+                D2D_SIZE_U { width: frame.width, height: frame.height },
+                Some(frame.pixels.as_ptr().cast()),
+                frame.width * 4,
+                &D2D1_BITMAP_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                },
+            )
+        }
+    }
+    pub(super) fn draw_bitmap(&self, bitmap: &ID2D1Bitmap, r: Rect) {
+        unsafe { self.target.DrawBitmap(bitmap, Some(&d2d_rect(r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+    }
     pub(super) fn push_clip(&self, r: Rect) {
         unsafe { self.target.PushAxisAlignedClip(&d2d_rect(r), D2D1_ANTIALIAS_MODE_ALIASED) };
     }
@@ -292,29 +310,6 @@ impl Renderer {
     }
     pub(super) fn resize(&self, width: u32, height: u32) -> Result<()> {
         unsafe { self.target.Resize(&D2D_SIZE_U { width: width.max(1), height: height.max(1) }) }
-    }
-    pub(super) fn upload(&mut self, frame: &crate::model::Frame) -> Result<()> {
-        let bitmap = unsafe {
-            self.target.CreateBitmap(
-                D2D_SIZE_U { width: frame.width, height: frame.height },
-                Some(frame.pixels.as_ptr().cast()),
-                frame.width * 4,
-                &D2D1_BITMAP_PROPERTIES {
-                    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-                    dpiX: 96.0,
-                    dpiY: 96.0,
-                },
-            )?
-        };
-        self.bitmap = Some(bitmap);
-        Ok(())
-    }
-    pub(super) fn draw_bitmap(&self, r: Rect) {
-        if let Some(bitmap) = &self.bitmap {
-            unsafe {
-                self.target.DrawBitmap(bitmap, Some(&d2d_rect(r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None)
-            };
-        }
     }
     pub(super) fn begin(&self) {
         unsafe { self.target.BeginDraw() };

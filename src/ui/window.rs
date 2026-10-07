@@ -2,7 +2,7 @@
 //! pointer and keyboard input, and live theme, DPI, and text-size changes.
 use super::{
     a11y, actions,
-    app::{self, add_tabs, close_tab, install, invalidate, open, select_tab, tick, uninstall, with_state, State},
+    app::{add_tabs, close_tab, install, invalidate, open, select_tab, tick, uninstall, with_state, State},
     commands::{self, Chord, Command},
     document::{self, Phase, PointerEvent, PointerKind},
     paint, sheet, theme,
@@ -11,7 +11,7 @@ use super::{
 };
 use std::{
     cell::RefCell,
-    collections::HashMap,
+
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -84,68 +84,14 @@ pub fn run() -> Result<()> {
         let workers = Workers::start(hwnd).map_err(|_| Error::from_thread())?;
         let mut client = RECT::default();
         let _ = GetClientRect(hwnd, &mut client);
-        let path = paths.first().cloned();
-        let mut state = State {
+        let state = State::new(
             workers,
-            focus: path.as_ref().map(|_| WidgetId::Document),
-            path,
-            page: 0,
-            generation: 0,
-            frame: None,
-            status: if paths.is_empty() { app::EMPTY_STATUS.into() } else { "Opening...".into() },
-            pending: false,
-            painted: false,
-            due: Some(Instant::now()),
-            marked: false,
-            sessions: HashMap::new(),
-            zoom: 1.0,
-            requested_zoom: 1.0,
-            frame_zoom: 1.0,
-            pan: (0.0, 0.0),
-            drag: None,
-            crop: false,
-            selection: None,
-            image_rect: widgets::Rect::default(),
-            exporting: false,
-            displayed: None,
-            render_failed: false,
-            markup: None,
-            ink: Vec::new(),
-            markup_text: String::new(),
-            signature: None,
-            cancel: None,
-            slideshow: None,
-            tabs: Vec::new(),
-            password_attempts: HashMap::new(),
-            views: HashMap::new(),
-            size: (client.right as f32, client.bottom as f32),
-            scale: GetDpiForWindow(hwnd) as f32 / 96.0,
-            text_scale: theme::text_scale_from_registry(),
-            theme: theme::apply(hwnd, theme::current()),
-            renderer: None,
-            maximized: false,
-            active: true,
-            sidebar_open: false,
-            sidebar_tab: 0,
-            markup_open: false,
-            markup_since: None,
-            markup_from: 0.0,
-            animations: theme::animations_enabled(),
-            hover: None,
-            hover_since: None,
-            tooltip: None,
-            pressed: None,
-            focus_visible: false,
-            keytips: None,
-            alt_armed: false,
-            caption_hover: None,
-            caption_pressed: None,
-            touches: Vec::new(),
-            pinch: None,
-            sheet: None,
-            started: false,
-        };
-        add_tabs(&mut state, &paths);
+            &paths,
+            (client.right as f32, client.bottom as f32),
+            GetDpiForWindow(hwnd) as f32 / 96.0,
+            theme::text_scale_from_registry(),
+            theme::apply(hwnd, theme::current()),
+        );
         install(state);
         // Apply WM_NCCALCSIZE now that the state exists, so the caption goes.
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);

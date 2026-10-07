@@ -364,7 +364,8 @@ pub(super) fn layout(input: &Input) -> Layout {
     // Sidebar frame with three tabs. Wave 2 fills the panels.
     let mut left = 0.0;
     if input.sidebar_open {
-        let side_w = (SIDEBAR_WIDTH * s).min(width * 0.5);
+        // Wider with large text, so the three tab names still fit.
+        let side_w = (SIDEBAR_WIDTH * s * (0.8 * ts).max(1.0)).min(width * 0.5);
         let side = Rect { x0: 0.0, y0: top, x1: side_w, y1: bottom };
         out.sidebar = Some(side);
         let tab_h = control_height(ts) * s;

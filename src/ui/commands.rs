@@ -77,7 +77,8 @@ const fn i(label: &'static str, menu: &'static str, glyph: Option<u16>, key: Opt
 /// https://learn.microsoft.com/windows/apps/design/style/segoe-ui-symbol-font
 pub(super) mod glyph {
     pub(in crate::ui) const OPEN_PANE: u16 = 0xE8A0;
-    pub(in crate::ui) const ZOOM: u16 = 0xE71E;
+    /// ZoomIn, so the Zoom button does not look like Search.
+    pub(in crate::ui) const ZOOM: u16 = 0xE8A3;
     pub(in crate::ui) const EDIT: u16 = 0xE70F;
     pub(in crate::ui) const ROTATE: u16 = 0xE7AD;
     pub(in crate::ui) const SHARE: u16 = 0xE72D;

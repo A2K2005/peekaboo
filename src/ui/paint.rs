@@ -13,6 +13,7 @@ use windows::{
     core::Result,
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
+        Graphics::Direct2D::ID2D1Bitmap,
         Graphics::Dwm::DwmFlush,
         System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
         UI::{Input::KeyboardAndMouse::GetFocus, WindowsAndMessaging::*},
@@ -166,7 +167,7 @@ fn title_bar(l: &Look, state: &State, layout: &Layout) {
 
 fn bars(l: &Look, state: &State, layout: &Layout) {
     let s = l.s;
-    l.p.fill(layout.toolbar, l.t.selected);
+    l.p.fill(layout.toolbar, l.t.bar);
     if let Some(path) = &state.path {
         let name = super::app::file_name(path);
         l.p.text(&name, layout.title_text, &l.f.strong, l.t.text, Align::Leading);
@@ -203,7 +204,7 @@ fn bars(l: &Look, state: &State, layout: &Layout) {
         l.p.text(text, layout.sidebar_panel, &l.f.wrap, l.t.text_secondary, Align::Leading);
     }
     let status = layout.status;
-    l.p.fill(status, l.t.selected);
+    l.p.fill(status, l.t.bar);
     l.p.fill(Rect { y1: status.y0 + s, ..status }, l.t.border);
     let text = Rect { x0: status.x0 + 12.0 * s, y0: status.y0, x1: status.x1 - 12.0 * s, y1: status.y1 };
     l.p.text(&state.status, text, &l.f.caption, l.t.text_secondary, Align::Leading);
@@ -299,6 +300,28 @@ fn tooltip(l: &Look, state: &State, layout: &Layout) {
     l.p.text(&w.tooltip, r, &l.f.caption, l.t.text, Align::Center);
 }
 
+/// Draws everything between BeginDraw and EndDraw. Returns true when the
+/// document frame was drawn.
+pub(super) fn draw(p: &Painter, bitmap: Option<&ID2D1Bitmap>, fonts: &Fonts, state: &mut State) -> bool {
+    let layout = state.layout();
+    let look = Look { p, t: state.theme, f: fonts, s: state.scale };
+    p.clear(state.theme.chrome);
+    title_bar(&look, state, &layout);
+    bars(&look, state, &layout);
+    let drew = if layout.empty.is_some() {
+        p.fill(layout.document, state.theme.canvas);
+        empty_state(&look, state, &layout);
+        false
+    } else {
+        document::paint(p, bitmap, state, layout.document)
+    };
+    sheet(&look, state, &layout);
+    focus_ring(&look, state, &layout);
+    keytips(&look, state, &layout);
+    tooltip(&look, state, &layout);
+    drew
+}
+
 /// WM_PAINT body. Paints before any decode on launch; decode is scheduled
 /// from tick once `painted` is set.
 pub(super) unsafe fn paint(hwnd: HWND) {
@@ -314,28 +337,13 @@ pub(super) unsafe fn paint(hwnd: HWND) {
             }
             if let (Some(renderer), Some(frame)) = (state.renderer.as_mut(), state.frame.as_ref()) {
                 if renderer.bitmap.is_none() {
-                    renderer.upload(frame)?;
+                    renderer.bitmap = Some(renderer.painter.upload(frame)?);
                 }
             }
             let fonts = fonts(state.scale, state.text_scale)?;
-            let layout = state.layout();
             let renderer = state.renderer.take().unwrap();
             renderer.begin();
-            let look = Look { p: &renderer.painter, t: state.theme, f: &fonts, s: state.scale };
-            look.p.clear(state.theme.chrome);
-            title_bar(&look, state, &layout);
-            bars(&look, state, &layout);
-            let drew = if layout.empty.is_some() {
-                look.p.fill(layout.document, state.theme.canvas);
-                empty_state(&look, state, &layout);
-                false
-            } else {
-                document::paint(&renderer, state, layout.document)
-            };
-            sheet(&look, state, &layout);
-            focus_ring(&look, state, &layout);
-            keytips(&look, state, &layout);
-            tooltip(&look, state, &layout);
+            let drew = draw(&renderer.painter, renderer.bitmap.as_ref(), &fonts, state);
             let ended = renderer.end();
             state.renderer = Some(renderer);
             ended?;
@@ -369,6 +377,158 @@ unsafe fn benchmark_marker(hwnd: HWND, state: &mut State) {
             state.marked = true;
             if std::env::var_os("PFW_BENCH_AUTOCLOSE").is_some_and(|v| v == "1") {
                 let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{model::Frame, ui::theme::{palette, Mode, Rgba}, ui::widgets::Scope, ui::worker::Workers};
+    use std::path::PathBuf;
+    use windows::{
+        core::Interface,
+        Win32::{
+            Graphics::{Direct2D::{Common::*, *}, Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, Imaging::*},
+            System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED},
+        },
+    };
+
+    /// A white page with grey text lines.
+    fn page() -> Frame {
+        let (width, height) = (612u32, 792u32);
+        let mut pixels = vec![255u8; (width * height * 4) as usize];
+        for line in 0..24u32 {
+            let y0 = 80 + line * 26;
+            for y in y0..y0 + 8 {
+                let right = if line % 5 == 4 { 330 } else { 540 };
+                for x in 72..right {
+                    let i = ((y * width + x) * 4) as usize;
+                    pixels[i..i + 3].copy_from_slice(&[96, 96, 96]);
+                }
+            }
+        }
+        Frame { width, height, pixels, page_count: 20, source_width: width, source_height: height }
+    }
+
+    /// Draws one scene into a WIC bitmap with the window's own drawing code
+    /// and returns its premultiplied BGRA pixels. No window is created.
+    unsafe fn render(mode: Mode, scene: &str, size: (u32, u32), scale: f32, text_scale: f32) -> Frame {
+        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
+        let bitmap = wic.CreateBitmap(size.0, size.1, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad).unwrap();
+        let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).unwrap();
+        let target = factory
+            .CreateWicBitmapRenderTarget(
+                &bitmap,
+                &D2D1_RENDER_TARGET_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        let painter = Painter::new(target.cast().unwrap()).unwrap();
+        let paths: Vec<PathBuf> = if scene == "empty" {
+            Vec::new()
+        } else {
+            vec![PathBuf::from("Quarterly report.pdf"), PathBuf::from("Beach photo.jpg"), PathBuf::from("Lease agreement.pdf")]
+        };
+        let workers = Workers::start(HWND::default()).unwrap();
+        let mut state = State::new(workers, &paths, (size.0 as f32, size.1 as f32), scale, text_scale, palette(mode));
+        state.animations = false;
+        let mut frame_bitmap = None;
+        if !paths.is_empty() {
+            let frame = page();
+            frame_bitmap = Some(painter.upload(&frame).unwrap());
+            state.frame = Some(frame);
+            state.status = "Page 1 of 20".into();
+        }
+        match scene {
+            "document" => {
+                state.sidebar_open = true;
+                state.set_markup(true);
+                state.markup = Some(crate::model::AnnotationKind::Highlight);
+                state.hover = Some(WidgetId::Command(crate::ui::commands::Command::Rotate));
+                state.tooltip = state.hover;
+                state.focus = Some(WidgetId::Command(crate::ui::commands::Command::ZoomMenu));
+                state.focus_visible = true;
+            }
+            "keytips" => {
+                state.set_markup(true);
+                state.keytips = Some(Scope::Root);
+            }
+            "sheet" => {
+                state.sheet = Some(crate::ui::sheet::Sheet {
+                    title: "Resize image".into(),
+                    message: "The new size applies when you save a copy.".into(),
+                    fields: vec![
+                        crate::ui::sheet::Field { label: "Width in pixels".into(), edit: HWND::default() },
+                        crate::ui::sheet::Field { label: "Height in pixels".into(), edit: HWND::default() },
+                    ],
+                    buttons: vec!["OK".into(), "Cancel".into()],
+                    cancel: 1,
+                    result: None,
+                });
+                state.focus = Some(WidgetId::SheetButton(1));
+                state.focus_visible = true;
+            }
+            _ => {}
+        }
+        let fonts = fonts(scale, text_scale).unwrap();
+        painter.target.BeginDraw();
+        let drew = draw(&painter, frame_bitmap.as_ref(), &fonts, &mut state);
+        painter.target.EndDraw(None, None).unwrap();
+        assert_eq!(drew, !paths.is_empty());
+        let mut pixels = vec![0u8; (size.0 * size.1 * 4) as usize];
+        bitmap.CopyPixels(std::ptr::null(), size.0 * 4, &mut pixels).unwrap();
+        Frame { width: size.0, height: size.1, pixels, page_count: 1, source_width: size.0, source_height: size.1 }
+    }
+
+    fn pixel(frame: &Frame, x: u32, y: u32) -> Rgba {
+        let i = ((y * frame.width + x) * 4) as usize;
+        let p = &frame.pixels[i..i + 4];
+        Rgba(p[2] as f32 / 255.0, p[1] as f32 / 255.0, p[0] as f32 / 255.0, p[3] as f32 / 255.0)
+    }
+
+    fn close(a: Rgba, b: Rgba) -> bool {
+        (a.0 - b.0).abs() < 0.02 && (a.1 - b.1).abs() < 0.02 && (a.2 - b.2).abs() < 0.02
+    }
+
+    /// Headless screenshots of every theme, written to artifacts/screenshots.
+    /// The pixel checks prove each theme reaches the chrome and the canvas.
+    #[test]
+    fn every_theme_draws_chrome_document_and_sheets_headless() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/screenshots");
+            std::fs::create_dir_all(&out).unwrap();
+            for (mode, name) in [(Mode::Light, "light"), (Mode::Dark, "dark"), (Mode::Contrast, "contrast")] {
+                let theme = palette(mode);
+                for scene in ["document", "empty", "sheet", "keytips"] {
+                    let size = (1100, 760);
+                    let shot = render(mode, scene, size, 1.0, 1.0);
+                    // Title bar drag space and the bottom-right canvas corner.
+                    assert!(close(pixel(&shot, 700, 10), theme.chrome), "{name} {scene} title bar");
+                    assert!(close(pixel(&shot, 700, 45), theme.bar) || scene == "sheet", "{name} {scene} toolbar");
+                    if scene != "sheet" {
+                        assert!(close(pixel(&shot, size.0 - 4, size.1 - 40), theme.canvas), "{name} {scene} canvas");
+                    }
+                    let path = out.join(format!("{name}-{scene}.png"));
+                    let _ = std::fs::remove_file(&path);
+                    crate::imaging::export_frame(&shot, &path).unwrap();
+                }
+            }
+            // 150% display scale and 225% text size, the largest Windows allows.
+            for (scale, text_scale, file) in [(1.5, 1.0, "light-document-150dpi.png"), (1.0, 2.25, "light-document-text225.png")] {
+                let size = ((1100.0 * scale) as u32, (760.0 * scale) as u32);
+                let shot = render(Mode::Light, "document", size, scale, text_scale);
+                assert!(close(pixel(&shot, size.0 - 4, size.1 - 60), palette(Mode::Light).canvas), "{file}");
+                let path = out.join(file);
+                let _ = std::fs::remove_file(&path);
+                crate::imaging::export_frame(&shot, &path).unwrap();
             }
         }
     }

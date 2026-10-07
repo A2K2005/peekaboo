@@ -58,6 +58,8 @@ pub(super) struct Theme {
     /// Mica shows behind the chrome, so the chrome is painted transparent.
     pub(super) mica: bool,
     pub(super) chrome: Rgba,
+    /// Toolbar and status bar. Matches the selected tab in light and dark.
+    pub(super) bar: Rgba,
     pub(super) surface: Rgba,
     /// Behind the document. Always opaque.
     pub(super) canvas: Rgba,
@@ -89,6 +91,7 @@ pub(super) fn palette(mode: Mode) -> Theme {
             mode,
             mica: false,
             chrome: Rgba::hex(0xf3f3f3),
+            bar: Rgba::hex(0xffffff),
             surface: Rgba::hex(0xf9f9f9),
             canvas: Rgba::hex(0xe4e4e4),
             text: Rgba::hex(0x1b1b1b),
@@ -113,6 +116,7 @@ pub(super) fn palette(mode: Mode) -> Theme {
             mode,
             mica: false,
             chrome: Rgba::hex(0x202020),
+            bar: Rgba::hex(0x2e2e2e),
             surface: Rgba::hex(0x2c2c2c),
             canvas: Rgba::hex(0x181818),
             text: Rgba::hex(0xffffff),
@@ -146,6 +150,7 @@ fn contrast([window, text, highlight, highlight_text, gray]: [Rgba; 5]) -> Theme
         mode: Mode::Contrast,
         mica: false,
         chrome: window,
+        bar: window,
         surface: window,
         canvas: window,
         text,
@@ -325,11 +330,14 @@ mod tests {
             let t = palette(mode);
             assert_eq!(t.canvas.3, 1.0);
             assert_eq!(t.surface.3, 1.0);
+            assert_eq!(t.bar.3, 1.0);
             let luma = |c: Rgba| 0.2126 * c.0 + 0.7152 * c.1 + 0.0722 * c.2;
             assert!((luma(t.text) - luma(t.surface)).abs() > 0.6, "{mode:?}");
             assert!((luma(t.on_accent) - luma(t.accent)).abs() > 0.4, "{mode:?}");
         }
-        assert_eq!(palette(Mode::Contrast).border_width, 2.0);
+        let contrast = palette(Mode::Contrast);
+        assert_eq!(contrast.border_width, 2.0);
+        assert_eq!(contrast.bar, contrast.canvas, "contrast bars use the window color, not the highlight");
     }
 
     #[test]
