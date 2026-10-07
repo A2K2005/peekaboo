@@ -366,52 +366,66 @@ unsafe fn paint(hwnd: HWND) {
         let mut client = RECT::default();
         GetClientRect(hwnd, &mut client)?;
         target.BindDC(hdc, &client)?;
-        let theme = &t.theme;
-        let s = t.scale;
-        let fonts = fonts(s, t.text_scale)?;
         let l = &t.levels[level];
         painter.target.BeginDraw();
-        painter.clear(theme.surface);
-        let bounds = Rect { x0: 0.0, y0: 0.0, x1: client.right as f32, y1: client.bottom as f32 };
-        painter.stroke_round(bounds, 0.0, theme.border, theme.border_width * s.max(1.0).floor());
-        for (index, (item, row)) in l.items.iter().zip(&l.rows).enumerate() {
-            if item.is_separator() {
-                let y = (row.y0 + row.y1) / 2.0;
-                painter.line((row.x0 + 4.0 * s, y), (row.x1 - 4.0 * s, y), theme.border, s.max(1.0).floor());
-                continue;
-            }
-            let selected = l.selected == Some(index);
-            let color = if !item.enabled {
-                theme.text_disabled
-            } else if selected {
-                theme.hover_text
-            } else {
-                theme.text
-            };
-            if selected {
-                painter.fill_round(Rect { x0: row.x0 + 4.0 * s, y0: row.y0 + 2.0 * s, x1: row.x1 - 4.0 * s, y1: row.y1 - 2.0 * s }, 4.0 * s, theme.hover);
-            }
-            if item.checked == Some(true) {
-                painter.glyph(glyph::CHECK, Rect { x0: row.x0 + 8.0 * s, y0: row.y0, x1: row.x0 + 32.0 * s, y1: row.y1 }, &fonts.icon, color);
-            }
-            let (text, underline) = label_text(&item.label);
-            let label = Rect { x0: row.x0 + 36.0 * s, y0: row.y0, x1: row.x1 - 28.0 * s, y1: row.y1 };
-            let (_, text_h) = measure(&text, &fonts.body, label.width());
-            let label = Rect { y0: row.y0 + (row.height() - text_h) / 2.0, ..label };
-            painter.text_underlined(&text, underline, label, &fonts.body, color);
-            if !item.shortcut.is_empty() {
-                let keys = Rect { x0: row.x0 + 36.0 * s, y0: row.y0, x1: row.x1 - 12.0 * s, y1: row.y1 };
-                let secondary = if selected { color } else if item.enabled { theme.text_secondary } else { theme.text_disabled };
-                painter.text(&item.shortcut, keys, &fonts.body, secondary, Align::Trailing);
-            }
-            if !item.children.is_empty() {
-                let chevron = Rect { x0: row.x1 - 28.0 * s, y0: row.y0, x1: row.x1 - 8.0 * s, y1: row.y1 };
-                painter.glyph(glyph::CHEVRON_RIGHT, chevron, &fonts.caption_icon, color);
-            }
-        }
+        draw_level(painter, &t.theme, t.scale, t.text_scale, &l.items, &l.rows, l.selected, (client.right as f32, client.bottom as f32))?;
         painter.target.EndDraw(None, None)
     });
     let _ = EndPaint(hwnd, &ps);
+}
+
+/// Draws one popup level. Shared by the popup window and headless tests.
+#[allow(clippy::too_many_arguments)]
+fn draw_level(
+    painter: &Painter,
+    theme: &Theme,
+    s: f32,
+    text_scale: f32,
+    items: &[MenuItem],
+    rows: &[Rect],
+    selected: Option<usize>,
+    size: (f32, f32),
+) -> Result<()> {
+    let fonts = fonts(s, text_scale)?;
+    painter.clear(theme.surface);
+    let bounds = Rect { x0: 0.0, y0: 0.0, x1: size.0, y1: size.1 };
+    painter.stroke_round(bounds, 0.0, theme.border, theme.border_width * s.max(1.0).floor());
+    for (index, (item, row)) in items.iter().zip(rows).enumerate() {
+        if item.is_separator() {
+            let y = (row.y0 + row.y1) / 2.0;
+            painter.line((row.x0 + 4.0 * s, y), (row.x1 - 4.0 * s, y), theme.border, s.max(1.0).floor());
+            continue;
+        }
+        let selected = selected == Some(index);
+        let color = if !item.enabled {
+            theme.text_disabled
+        } else if selected {
+            theme.hover_text
+        } else {
+            theme.text
+        };
+        if selected {
+            painter.fill_round(Rect { x0: row.x0 + 4.0 * s, y0: row.y0 + 2.0 * s, x1: row.x1 - 4.0 * s, y1: row.y1 - 2.0 * s }, 4.0 * s, theme.hover);
+        }
+        if item.checked == Some(true) {
+            painter.glyph(glyph::CHECK, Rect { x0: row.x0 + 8.0 * s, y0: row.y0, x1: row.x0 + 32.0 * s, y1: row.y1 }, &fonts.icon, color);
+        }
+        let (text, underline) = label_text(&item.label);
+        let label = Rect { x0: row.x0 + 36.0 * s, y0: row.y0, x1: row.x1 - 28.0 * s, y1: row.y1 };
+        let (_, text_h) = measure(&text, &fonts.body, label.width());
+        let label = Rect { y0: row.y0 + (row.height() - text_h) / 2.0, ..label };
+        painter.text_underlined(&text, underline, label, &fonts.body, color);
+        if !item.shortcut.is_empty() {
+            let keys = Rect { x0: row.x0 + 36.0 * s, y0: row.y0, x1: row.x1 - 12.0 * s, y1: row.y1 };
+            let secondary = if selected { color } else if item.enabled { theme.text_secondary } else { theme.text_disabled };
+            painter.text(&item.shortcut, keys, &fonts.body, secondary, Align::Trailing);
+        }
+        if !item.children.is_empty() {
+            let chevron = Rect { x0: row.x1 - 28.0 * s, y0: row.y0, x1: row.x1 - 8.0 * s, y1: row.y1 };
+            painter.glyph(glyph::CHEVRON_RIGHT, chevron, &fonts.caption_icon, color);
+        }
+    }
+    Ok(())
 }
 
 fn item_at(t: &Tracker, level: usize, y: f32) -> Option<usize> {
@@ -672,6 +686,51 @@ mod tests {
     fn labels_drop_the_ampersand_and_mark_the_key() {
         assert_eq!(label_text("Save a &copy..."), ("Save a copy...".into(), Some(7)));
         assert_eq!(label_text("Plain"), ("Plain".into(), None));
+    }
+
+    /// Headless renders of the More menu and its Edit submenu in each theme,
+    /// written to artifacts/screenshots. No window is created.
+    #[test]
+    fn menus_render_in_every_theme_headless() {
+        use crate::ui::{commands::{app_menu, Ctx}, theme::{palette, Mode}};
+        use windows::Win32::{Graphics::Imaging::*, System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED}};
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/screenshots");
+            std::fs::create_dir_all(&out).unwrap();
+            let ctx = Ctx { has_frame: true, pdf: true, tabs: 2, can_next: true, markup_open: true, ..Default::default() };
+            let root = app_menu(&ctx, &[crate::ui::commands::Command::Share]);
+            let edit = root.iter().find(|m| m.label == "&Edit").unwrap().children.clone();
+            for (mode, name) in [(Mode::Light, "light"), (Mode::Dark, "dark"), (Mode::Contrast, "contrast")] {
+                for (items, selected, which) in [(&root, Some(3), "menu"), (&edit, Some(6), "menu-edit")] {
+                    let (w, h, rows) = measure_items(items, 1.0, 1.0);
+                    let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
+                    let bitmap = wic.CreateBitmap(w as u32, h as u32, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad).unwrap();
+                    let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).unwrap();
+                    let target = factory
+                        .CreateWicBitmapRenderTarget(
+                            &bitmap,
+                            &D2D1_RENDER_TARGET_PROPERTIES {
+                                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                                dpiX: 96.0,
+                                dpiY: 96.0,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    let painter = Painter::new(target.cast().unwrap()).unwrap();
+                    painter.target.BeginDraw();
+                    draw_level(&painter, &palette(mode), 1.0, 1.0, items, &rows, selected, (w, h)).unwrap();
+                    painter.target.EndDraw(None, None).unwrap();
+                    let mut pixels = vec![0u8; (w as u32 * h as u32 * 4) as usize];
+                    bitmap.CopyPixels(std::ptr::null(), w as u32 * 4, &mut pixels).unwrap();
+                    let frame = crate::model::Frame { width: w as u32, height: h as u32, pixels, page_count: 1, source_width: w as u32, source_height: h as u32 };
+                    let path = out.join(format!("{name}-{which}.png"));
+                    let _ = std::fs::remove_file(&path);
+                    crate::imaging::export_frame(&frame, &path).unwrap();
+                }
+            }
+        }
     }
 
     #[test]

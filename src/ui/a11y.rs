@@ -276,6 +276,68 @@ mod tests {
         assert!(nodes.iter().all(|n| *n > 15), "widget ids stay clear of the fixed group ids");
     }
 
+    /// Builds the full AccessKit tree headlessly for three scenes, writes it
+    /// to artifacts/a11y, and fails on an unnamed interactive node.
+    #[test]
+    fn full_tree_names_every_interactive_node() {
+        use crate::{model::Frame, ui::worker::Workers};
+        use std::{collections::HashMap, path::PathBuf};
+        let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/a11y");
+        std::fs::create_dir_all(&out).unwrap();
+        for scene in ["document", "empty", "sheet"] {
+            let paths: Vec<PathBuf> =
+                if scene == "empty" { vec![] } else { vec![PathBuf::from("Quarterly report.pdf"), PathBuf::from("Beach photo.jpg")] };
+            let workers = Workers::start(HWND::default()).unwrap();
+            let mut s = State::new(workers, &paths, (1100.0, 760.0), 1.0, 1.0, super::super::theme::palette(super::super::theme::Mode::Dark));
+            if !paths.is_empty() {
+                s.frame = Some(Frame { width: 1, height: 1, pixels: vec![255; 4], page_count: 20, source_width: 1, source_height: 1 });
+                s.sidebar_open = true;
+                s.animations = false;
+                s.set_markup(true);
+            }
+            if scene == "sheet" {
+                s.sheet = Some(super::super::sheet::Sheet {
+                    title: "Delete this page?".into(),
+                    message: "The page is removed from your working copy.".into(),
+                    fields: vec![],
+                    buttons: vec!["Delete page".into(), "Cancel".into()],
+                    cancel: 1,
+                    result: None,
+                });
+                s.focus = Some(WidgetId::SheetButton(1));
+            }
+            let update = tree(&s);
+            let nodes: HashMap<NodeId, &Node> = update.nodes.iter().map(|(id, n)| (*id, n)).collect();
+            let mut text = String::new();
+            fn walk(id: NodeId, depth: usize, nodes: &HashMap<NodeId, &Node>, text: &mut String, missing: &mut Vec<String>) {
+                let node = nodes[&id];
+                let label = node.label().unwrap_or_default();
+                text.push_str(&format!("{}{:?} \"{}\"
+", "  ".repeat(depth), node.role(), label));
+                let interactive = matches!(node.role(), Role::Button | Role::Tab | Role::Document | Role::TextInput | Role::MenuItem);
+                if interactive && label.trim().is_empty() {
+                    missing.push(format!("{:?} {:?}", node.role(), id));
+                }
+                for child in node.children() {
+                    walk(*child, depth + 1, nodes, text, missing);
+                }
+            }
+            let mut missing = Vec::new();
+            walk(ROOT, 0, &nodes, &mut text, &mut missing);
+            std::fs::write(out.join(format!("accesskit-{scene}.txt")), &text).unwrap();
+            assert!(missing.is_empty(), "{scene}: unnamed {missing:?}");
+            assert_eq!(nodes.len(), update.nodes.len(), "duplicate node ids");
+            match scene {
+                "document" => assert!(text.contains("Document \"Quarterly report.pdf, page 1 of 20\"")),
+                "empty" => assert!(text.contains("Button \"Open\"")),
+                _ => {
+                    assert!(text.contains("Dialog \"Delete this page?\""));
+                    assert_eq!(update.focus, node_id(WidgetId::SheetButton(1)));
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_interactive_widget_node_has_a_name_role_and_action() {
         use super::super::widgets::{layout, Input, SheetView};
