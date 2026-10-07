@@ -860,8 +860,13 @@ impl PdfEngine {
                         return Err("The blank page was not inserted.".into());
                     }
                 }
-                PdfEdit::InsertImage { at, ref path } => {
-                    self.insert_image(handle, at, path, pages::ImageFit::Neighbor)?;
+                PdfEdit::InsertImage {
+                    at,
+                    ref name,
+                    ref bytes,
+                } => {
+                    self.insert_image(handle, at, bytes, pages::ImageFit::Neighbor)
+                        .map_err(|e| format!("{e} ({name})"))?;
                 }
                 PdfEdit::Crop {
                     left,

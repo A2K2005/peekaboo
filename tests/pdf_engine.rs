@@ -825,8 +825,14 @@ fn image_pages_keep_jpeg_bytes_orientation_and_page_size_rules() {
     );
     let insert = [PdfEdit::InsertImage {
         at: 1,
-        path: png.clone(),
+        name: "wide.png".into(),
+        bytes: std::fs::read(&png).unwrap().into(),
     }];
+    // The recipe holds the image, so it replays and saves the same after the
+    // file is replaced or removed.
+    let gray = dir.join("gray.png");
+    imaging::export_frame(&image(100, 300, |_, _| GRAY), &gray).unwrap();
+    std::fs::rename(&gray, &png).unwrap();
     assert_eq!(
         engine.page_sizes(&letter, &insert).unwrap(),
         vec![[612.0, 792.0], [792.0, 612.0], [612.0, 792.0]]
@@ -839,9 +845,12 @@ fn image_pages_keep_jpeg_bytes_orientation_and_page_size_rules() {
         .page_text_edited(&letter, 2, &insert)
         .unwrap()
         .contains("Two"));
+    std::fs::remove_file(&png).unwrap();
     let out = dir.join("inserted.pdf");
     engine.save_copy(&letter, &out, &insert).unwrap();
     assert_eq!(engine.page_sizes(&out, &[]).unwrap().len(), 3);
+    let saved = engine.render(&out, 1, 792, 612).unwrap();
+    assert_eq!(changed(&saved.pixels, &inserted.pixels), 0);
 
     assert!(engine
         .create_from_images(&[], &dir.join("none.pdf"))
@@ -1024,7 +1033,8 @@ fn incremental_save_appends_only_the_update() {
             "image",
             vec![PdfEdit::InsertImage {
                 at: 2,
-                path: png.clone(),
+                name: "page.png".into(),
+                bytes: std::fs::read(&png).unwrap().into(),
             }],
             vec![(2, ""), (3, "page 3 of")],
         ),
