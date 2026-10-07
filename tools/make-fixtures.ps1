@@ -1,10 +1,10 @@
-#requires -Version 7.0
+#requires -Version 5.1
 [CmdletBinding()]
 param([string]$OutputDirectory = (Join-Path $PSScriptRoot '../fixtures'))
 $ErrorActionPreference = 'Stop'
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 [IO.Directory]::CreateDirectory($output) | Out-Null
-Add-Type -AssemblyName System.Drawing.Common
+Add-Type -AssemblyName System.Drawing
 if (-not ('PreviewFixtures' -as [type])) {
 Add-Type -TypeDefinition @"
 using System;
@@ -78,16 +78,16 @@ $objects = @(
 $stream = [IO.File]::Create((Join-Path $output 'acroform-text.pdf'))
 try {
     $offsets = [Collections.Generic.List[long]]::new()
-    $bytes = [Text.Encoding]::ASCII.GetBytes("%PDF-1.4`n"); $stream.Write($bytes)
+    $bytes = [Text.Encoding]::ASCII.GetBytes("%PDF-1.4`n"); $stream.Write($bytes, 0, $bytes.Length)
     for ($i=0; $i -lt $objects.Count; $i++) {
         $offsets.Add($stream.Position)
-        $bytes = [Text.Encoding]::ASCII.GetBytes("$($i+1) 0 obj`n$($objects[$i])`nendobj`n"); $stream.Write($bytes)
+        $bytes = [Text.Encoding]::ASCII.GetBytes("$($i+1) 0 obj`n$($objects[$i])`nendobj`n"); $stream.Write($bytes, 0, $bytes.Length)
     }
     $xref = $stream.Position
     $tail = "xref`n0 $($objects.Count+1)`n0000000000 65535 f `n"
     foreach ($offset in $offsets) { $tail += $offset.ToString('D10') + " 00000 n `n" }
     $tail += "trailer`n<< /Size $($objects.Count+1) /Root 1 0 R >>`nstartxref`n$xref`n%%EOF`n"
-    $stream.Write([Text.Encoding]::ASCII.GetBytes($tail))
+    $bytes = [Text.Encoding]::ASCII.GetBytes($tail); $stream.Write($bytes, 0, $bytes.Length)
 } finally { $stream.Dispose() }
 $manifest = @(Get-ChildItem -LiteralPath $output -File | Where-Object Name -ne 'manifest.json' | ForEach-Object {
     [ordered]@{name=$_.Name; bytes=$_.Length; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash}
