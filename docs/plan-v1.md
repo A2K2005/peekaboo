@@ -59,4 +59,25 @@ These rules bind every wave-1 agent. Change them only through the orchestrator.
 - Reference laptop and 4 GB eMMC laptop for the PRD launch gate.
 - ARM64: MSVC ARM64 tools need an admin install.
 - Store and winget publishing, code-signing certificate, AI model download host.
-- Lawyer review: HEVC, LGPL EULA, AI model training data.
+- Lawyer review: HEVC, LGPL EULA, AI model training data (Snap: undisclosed; Depth Anything V2 Small: teacher trained on VKITTI 2, CC BY-NC-SA 3.0).
+
+## Slice status
+
+| Slice | Status |
+| --- | --- |
+| W1-A to W1-E | Merged into `v1`. Reviewed; fixes merged or in progress (W1-C fixes). |
+| W2-1 Viewer | Merged into `v1`. Verifier running. |
+| W2-2 Text | Implementing |
+| W2-3 Save model | Implementing |
+| W2-4 to W2-7 | Not started |
+
+## Open findings (verified, not fixed yet)
+
+From the W2-1 verifier, 2026-10-07. Failing tests: `scratchpad/review-w2-1/repo`, names start with `verifier`.
+
+1. Major. `src/ui/app.rs:828`: `received` clears `state.sent` for every non-PDF result, so an open image re-requests its neighbors forever (16,598 cycles in 2 s; each reads and sorts the folder). Fix: clear `sent` only for stale PDF results, or remember finished pre-decodes.
+2. Major. Tile cache churn at 4K and after zooming out: 48 MiB budget (`cache.rs:11`), half-screen margins (`document.rs:738`), and old-scale fallback tiles pinned by `get` every frame (`document.rs:604`). Fix: draw fallback only where a current tile is missing (use `peek`), stop when complete, and size the budget or prefetch from the viewport.
+3. Minor to major. `document.rs:230` `set_top`: the end of a scroll glide makes the center page current and overrides `go_to_page`, so at 25% zoom the last page never becomes current (Delete and Rotate hit the wrong page; slideshow never ends). Fix: keep an explicit target page during a glide.
+4. Minor. `actions.rs:107`: closing the sidebar leaves focus on a thumbnail, so arrow keys change pages. Fix: move focus to the document.
+5. Minor. A running pre-decode cannot be interrupted, so Right arrow in the first 200 ms can miss 50 ms. Fix: pre-decode the next image first, the previous one later.
+6. Simplify. `actions.rs:557` `civil()` re-implements `FileTimeToSystemTime`; `received()` deep-compares edit lists per tile (use `Arc::ptr_eq`).
