@@ -6,10 +6,10 @@ mod model;
 mod ocr;
 mod pdf;
 mod printing;
-mod shell;
+mod ui;
 
 fn main() {
-    if let Err(error) = shell::run() {
+    if let Err(error) = ui::run() {
         eprintln!("Preview could not start: {error}");
         std::process::exit(1);
     }
