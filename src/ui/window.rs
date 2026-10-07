@@ -1,240 +1,151 @@
-use super::*;
+//! The main window: creation, the message loop, the custom title bar,
+//! pointer and keyboard input, and live theme, DPI, and text-size changes.
+use super::{
+    a11y, actions,
+    app::{self, add_tabs, close_tab, install, invalidate, open, select_tab, tick, uninstall, with_state, State},
+    commands::{self, Chord, Command},
+    document::{self, Phase, PointerEvent, PointerKind},
+    paint, sheet, theme,
+    widgets::{self, Layout, Scope, WidgetId},
+    worker::{Workers, WM_APP_WAKE},
+};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+use windows::{
+    core::*,
+    UI::ViewManagement::UISettings,
+    Win32::{
+        Foundation::*,
+        Graphics::Gdi::*,
+        System::{LibraryLoader::GetModuleHandleW, Ole::{OleInitialize, OleUninitialize}},
+        UI::{
+            HiDpi::*,
+            Input::{KeyboardAndMouse::*, Pointer::*},
+            Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP},
+            WindowsAndMessaging::*,
+        },
+    },
+};
 
-pub(super) fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
+/// W1-D's single-instance handoff finds the window by this class name.
+pub(super) const CLASS: PCWSTR = w!("PreviewForWindowsMain");
+const WM_APP_TEXT_SCALE: u32 = WM_APP + 3;
+
+thread_local! {
+    static SETTINGS: RefCell<Option<UISettings>> = const { RefCell::new(None) };
 }
 
 pub fn run() -> Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        let (send, requests) = mpsc::channel();
-        let (results, receive) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("document-render".into())
-            .spawn(move || worker(requests, results))
-            .map_err(|_| Error::from_thread())?;
+        // Mouse input arrives as WM_POINTER, like pen and touch. It is
+        // process-wide and must come before any window exists.
+        // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-enablemouseinpointer
+        let _ = EnableMouseInPointer(true);
+        // OLE, not only COM: drag-out and the share sheet (W1-D) need it.
+        // https://learn.microsoft.com/windows/win32/api/ole2/nf-ole2-oleinitialize
+        OleInitialize(None)?;
         let mut paths = Vec::new();
-        for path in std::env::args_os()
-            .skip(1)
-            .map(PathBuf::from)
-            .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-        {
+        for path in std::env::args_os().skip(1).map(PathBuf::from).map(|p| std::fs::canonicalize(&p).unwrap_or(p)) {
             if !paths.contains(&path) {
                 paths.push(path);
             }
         }
-        let path = paths.first().cloned();
-        STATE.with(|s| {
-            *s.borrow_mut() = Some(State {
-                sender: send,
-                receiver: receive,
-                path,
-                page: 0,
-                generation: 0,
-                frame: None,
-                graphics: None,
-                status: "Open a PDF or image · Ctrl+O".into(),
-                pending: false,
-                painted: false,
-                due: Some(Instant::now()),
-                marked: false,
-                sessions: HashMap::new(),
-                zoom: 1.0,
-                pan: (0.0, 0.0),
-                drag: None,
-                crop: false,
-                selection: None,
-                image_rect: D2D_RECT_F::default(),
-                exporting: false,
-                displayed: None,
-                render_failed: false,
-                markup: None,
-                ink: Vec::new(),
-                markup_text: String::new(),
-                signature: None,
-                cancel: None,
-                slideshow: None,
-                tabs: Vec::new(),
-                password_attempts: HashMap::new(),
-                views: HashMap::new(),
-            })
-        });
         let instance = GetModuleHandleW(None)?;
-        let class = w!("PreviewForWindowsSpeedSpike");
         let wc = WNDCLASSW {
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hInstance: instance.into(),
-            lpszClassName: class,
+            lpszClassName: CLASS,
             lpfnWndProc: Some(wndproc),
             ..Default::default()
         };
         if RegisterClassW(&wc) == 0 {
             return Err(Error::from_thread());
         }
-        let menu = CreateMenu()?;
-        let file = CreatePopupMenu()?;
-        let view = CreatePopupMenu()?;
-        let edit = CreatePopupMenu()?;
-        let markup = CreatePopupMenu()?;
-        AppendMenuW(file, MF_STRING, OPEN, w!("&Open...\tCtrl+O"))?;
-        for (id, title) in [
-            (SAVE, "Save a &copy...\tCtrl+Shift+S"),
-            (EXTRACT, "&Extract current PDF page..."),
-            (MERGE, "&Combine with another PDF..."),
-        ] {
-            let text = wide(title);
-            AppendMenuW(file, MF_STRING, id, PCWSTR(text.as_ptr()))?;
-        }
-        AppendMenuW(file, MF_STRING, PRINT, w!("&Print...\tCtrl+P"))?;
-        AppendMenuW(file, MF_STRING, BATCH, w!("Batch convert image folder..."))?;
-        AppendMenuW(
-            file,
-            MF_STRING,
-            BATCH_SELECTED,
-            w!("Batch convert selected images..."),
-        )?;
-        AppendMenuW(file, MF_STRING, INFO, w!("File information"))?;
-        AppendMenuW(file, MF_SEPARATOR, 0, PCWSTR::null())?;
-        AppendMenuW(file, MF_STRING, EXIT, w!("E&xit"))?;
-        AppendMenuW(view, MF_STRING, PREVIOUS, w!("&Previous\tLeft / Page Up"))?;
-        AppendMenuW(view, MF_STRING, NEXT, w!("&Next\tRight / Page Down"))?;
-        AppendMenuW(view, MF_STRING, SLIDESHOW, w!("Start / stop slideshow\tF5"))?;
-        for (id, title) in [
-            (FIT, "&Fit to window\tCtrl+0"),
-            (ZOOM_IN, "Zoom &in\tCtrl++"),
-            (ZOOM_OUT, "Zoom &out\tCtrl+-"),
-            (FIND, "&Find in PDF...\tCtrl+F"),
-        ] {
-            let text = wide(title);
-            AppendMenuW(view, MF_STRING, id, PCWSTR(text.as_ptr()))?;
-        }
-        for (id, title) in [
-            (UNDO, "&Undo\tCtrl+Z"),
-            (REVERT, "&Revert to opened"),
-            (ROTATE, "&Rotate right\tCtrl+R"),
-            (FLIP, "&Flip image horizontally"),
-            (CROP, "&Crop image or PDF page"),
-            (RESIZE, "Re&size image..."),
-            (DELETE, "&Delete PDF page..."),
-            (TEXT, "Copy &text\tCtrl+C"),
-            (BACKGROUND, "Remove image &background..."),
-        ] {
-            let text = wide(title);
-            AppendMenuW(edit, MF_STRING, id, PCWSTR(text.as_ptr()))?;
-        }
-        AppendMenuW(edit, MF_STRING, MOVE, w!("Move PDF page..."))?;
-        AppendMenuW(
-            edit,
-            MF_STRING,
-            INSERT,
-            w!("Insert blank PDF page after current"),
-        )?;
-        AppendMenuW(menu, MF_POPUP, file.0 as usize, w!("&File"))?;
-        AppendMenuW(menu, MF_POPUP, edit.0 as usize, w!("&Edit"))?;
-        for (index, title) in [
-            "&Ink / draw signature",
-            "&Highlight rectangle",
-            "&Underline",
-            "&Strike through",
-            "&Note...",
-            "&Rectangle",
-            "&Ellipse",
-            "&Arrow",
-            "&Text box...",
-        ]
-        .iter()
-        .enumerate()
-        {
-            let label = wide(title);
-            AppendMenuW(markup, MF_STRING, 200 + index, PCWSTR(label.as_ptr()))?;
-        }
-        AppendMenuW(markup, MF_SEPARATOR, 0, PCWSTR::null())?;
-        AppendMenuW(
-            markup,
-            MF_STRING,
-            SIGN_SAVE,
-            w!("Save last ink as signature"),
-        )?;
-        AppendMenuW(markup, MF_STRING, SIGN_PLACE, w!("Place saved signature"))?;
-        AppendMenuW(markup, MF_STRING, FORM, w!("Fill a form field..."))?;
-        AppendMenuW(menu, MF_POPUP, markup.0 as usize, w!("&Markup"))?;
-        AppendMenuW(menu, MF_POPUP, view.0 as usize, w!("&View"))?;
+        let system = GetDpiForSystem() as f32 / 96.0;
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
-            class,
+            CLASS,
             w!("Preview for Windows"),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            1100,
-            800,
+            (1100.0 * system) as i32,
+            (800.0 * system) as i32,
             None,
-            Some(menu),
+            None,
             Some(instance.into()),
             None,
         )?;
-        let _ = InitCommonControlsEx(&INITCOMMONCONTROLSEX {
-            dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_TAB_CLASSES,
-        });
-        let tabs = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
-            w!("SysTabControl32"),
-            w!("Open documents"),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            8,
-            44,
-            1060,
-            30,
-            Some(hwnd),
-            Some(HMENU(TABS as *mut _)),
-            Some(instance.into()),
-            None,
-        )?;
-        SendMessageW(
-            tabs,
-            WM_SETFONT,
-            Some(WPARAM(GetStockObject(DEFAULT_GUI_FONT).0 as usize)),
-            Some(LPARAM(1)),
-        );
-        add_tabs(hwnd, &paths);
-        for (index, (id, label)) in [
-            (OPEN, "Open"),
-            (PREVIOUS, "Previous"),
-            (NEXT, "Next"),
-            (FIT, "Fit"),
-            (ZOOM_IN, "Zoom +"),
-            (ZOOM_OUT, "Zoom -"),
-            (ROTATE, "Rotate"),
-            (CROP, "Crop"),
-            (SAVE, "Save copy"),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let label = wide(label);
-            let button = CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                w!("BUTTON"),
-                PCWSTR(label.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                8 + index as i32 * 94,
-                6,
-                88,
-                30,
-                Some(hwnd),
-                Some(HMENU(*id as *mut _)),
-                Some(instance.into()),
-                None,
-            )?;
-            SendMessageW(
-                button,
-                WM_SETFONT,
-                Some(WPARAM(GetStockObject(DEFAULT_GUI_FONT).0 as usize)),
-                Some(LPARAM(1)),
-            );
-        }
+        let workers = Workers::start(hwnd).map_err(|_| Error::from_thread())?;
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let path = paths.first().cloned();
+        let mut state = State {
+            workers,
+            focus: path.as_ref().map(|_| WidgetId::Document),
+            path,
+            page: 0,
+            generation: 0,
+            frame: None,
+            status: app::EMPTY_STATUS.into(),
+            pending: false,
+            painted: false,
+            due: Some(Instant::now()),
+            marked: false,
+            sessions: HashMap::new(),
+            zoom: 1.0,
+            requested_zoom: 1.0,
+            frame_zoom: 1.0,
+            pan: (0.0, 0.0),
+            drag: None,
+            crop: false,
+            selection: None,
+            image_rect: widgets::Rect::default(),
+            exporting: false,
+            displayed: None,
+            render_failed: false,
+            markup: None,
+            ink: Vec::new(),
+            markup_text: String::new(),
+            signature: None,
+            cancel: None,
+            slideshow: None,
+            tabs: Vec::new(),
+            password_attempts: HashMap::new(),
+            views: HashMap::new(),
+            size: (client.right as f32, client.bottom as f32),
+            scale: GetDpiForWindow(hwnd) as f32 / 96.0,
+            text_scale: theme::text_scale_from_registry(),
+            theme: theme::apply(hwnd, theme::current()),
+            renderer: None,
+            maximized: false,
+            active: true,
+            sidebar_open: false,
+            sidebar_tab: 0,
+            markup_open: false,
+            hover: None,
+            hover_since: None,
+            tooltip: None,
+            pressed: None,
+            focus_visible: false,
+            keytips: None,
+            alt_armed: false,
+            caption_hover: None,
+            caption_pressed: None,
+            touches: Vec::new(),
+            pinch: None,
+            sheet: None,
+            started: false,
+        };
+        add_tabs(&mut state, &paths);
+        install(state);
+        // Apply WM_NCCALCSIZE now that the state exists, so the caption goes.
+        let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         DragAcceptFiles(hwnd, true);
         SetTimer(Some(hwnd), 1, 10, None);
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -248,332 +159,591 @@ pub fn run() -> Result<()> {
             if result == 0 {
                 break;
             }
-            if message.message == WM_KEYDOWN
-                && (GetKeyState(VK_CONTROL.0 as i32) < 0
-                    || message.wParam.0 == 0x1b
-                    || message.wParam.0 == 0x74)
-            {
-                SendMessageW(hwnd, WM_KEYDOWN, Some(message.wParam), Some(message.lParam));
-                continue;
-            }
-            if !IsDialogMessageW(hwnd, &message).as_bool() {
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
         }
-        STATE.with(|s| *s.borrow_mut() = None);
-        CoUninitialize();
+        uninstall();
+        OleUninitialize();
         Ok(())
     }
 }
 
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match message {
-        WM_COMMAND => {
-            command(hwnd, wparam.0 & 0xffff);
-            LRESULT(0)
+/// Starts UISettings after first content: it is the documented source of
+/// the text size setting and raises TextScaleFactorChanged.
+/// https://learn.microsoft.com/uwp/api/windows.ui.viewmanagement.uisettings.textscalefactor
+pub(super) unsafe fn watch_text_scale(hwnd: HWND) {
+    let Ok(settings) = UISettings::new() else {
+        return;
+    };
+    let window = hwnd.0 as isize;
+    let _ = settings.TextScaleFactorChanged(&windows::Foundation::TypedEventHandler::new(move |_, _| {
+        let _ = PostMessageW(Some(HWND(window as *mut _)), WM_APP_TEXT_SCALE, WPARAM(0), LPARAM(0));
+        Ok(())
+    }));
+    SETTINGS.with(|cell| *cell.borrow_mut() = Some(settings));
+    text_scale_changed(hwnd);
+}
+
+unsafe fn text_scale_changed(hwnd: HWND) {
+    let Some(scale) = SETTINGS.with(|cell| cell.borrow().as_ref().and_then(|s| s.TextScaleFactor().ok())) else {
+        return;
+    };
+    let scale = (scale as f32).clamp(1.0, 2.25);
+    let changed = with_state(|s| {
+        let changed = (s.text_scale - scale).abs() > f32::EPSILON;
+        if changed {
+            s.text_scale = scale;
+            if s.frame.is_some() {
+                s.due = Some(Instant::now() + Duration::from_millis(120));
+            }
         }
-        WM_KEYDOWN => {
-            let control = GetKeyState(VK_CONTROL.0 as i32) < 0;
-            let id = match wparam.0 as u16 {
-                0x4f if control => OPEN,
-                0x53 if control => SAVE,
-                0x5a if control => UNDO,
-                0x52 if control => ROTATE,
-                0x46 if control => FIND,
-                0x43 if control => TEXT,
-                0x50 if control => PRINT,
-                0x74 => SLIDESHOW,
-                0x30 if control => FIT,
-                0xbb | 0x6b if control => ZOOM_IN,
-                0xbd | 0x6d if control => ZOOM_OUT,
-                0x25 | 0x21 => PREVIOUS,
-                0x27 | 0x22 => NEXT,
-                _ => 0,
+        changed
+    });
+    if changed == Some(true) {
+        sheet::position_fields(hwnd);
+        invalidate(hwnd);
+    }
+}
+
+/// Resize border height. Maximized windows extend past the monitor by this.
+unsafe fn frame_thickness(hwnd: HWND) -> i32 {
+    let dpi = GetDpiForWindow(hwnd);
+    GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+}
+
+/// Removes the caption but keeps the side and bottom frames, so resizing,
+/// snapping, and shadows stay native.
+/// https://learn.microsoft.com/windows/win32/dwm/customframe
+unsafe fn nc_calc_size(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
+    let top = params.rgrc[0].top;
+    DefWindowProcW(hwnd, WM_NCCALCSIZE, WPARAM(1), lparam);
+    params.rgrc[0].top = top + if IsZoomed(hwnd).as_bool() { frame_thickness(hwnd) } else { 0 };
+    LRESULT(0)
+}
+
+/// Maps a client point to a hit-test code. Returning HTMAXBUTTON over the
+/// maximize button turns on Windows 11 snap layouts.
+/// https://learn.microsoft.com/windows/apps/desktop/modernize/ui/apply-snap-layout-menu
+pub(super) fn hit_code(layout: &Layout, x: f32, y: f32, maximized: bool, border: f32) -> u32 {
+    if !maximized && y < border {
+        return HTTOP;
+    }
+    if let Some(w) = widgets::hit(&layout.widgets, x, y) {
+        return match w.id {
+            WidgetId::Minimize => HTMINBUTTON,
+            WidgetId::Maximize => HTMAXBUTTON,
+            WidgetId::Close => HTCLOSE,
+            _ => HTCLIENT,
+        };
+    }
+    if layout.title_bar.contains(x, y) {
+        HTCAPTION
+    } else {
+        HTCLIENT
+    }
+}
+
+unsafe fn nc_hit_test(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let hit = DefWindowProcW(hwnd, WM_NCHITTEST, wparam, lparam);
+    if hit.0 != HTCLIENT as isize {
+        return hit;
+    }
+    let mut point = lparam_point(lparam);
+    let _ = ScreenToClient(hwnd, &mut point);
+    let border = frame_thickness(hwnd) as f32;
+    let code = with_state(|s| hit_code(&s.layout(), point.x as f32, point.y as f32, s.maximized, border));
+    LRESULT(code.unwrap_or(HTCLIENT) as isize)
+}
+
+/// Signed screen coordinates packed in an LPARAM. Negative values occur on
+/// monitors left of or above the primary one.
+fn lparam_point(lparam: LPARAM) -> POINT {
+    POINT { x: (lparam.0 as u16 as i16) as i32, y: ((lparam.0 >> 16) as u16 as i16) as i32 }
+}
+
+fn caption_widget(code: u32) -> Option<WidgetId> {
+    match code {
+        HTMINBUTTON => Some(WidgetId::Minimize),
+        HTMAXBUTTON => Some(WidgetId::Maximize),
+        HTCLOSE => Some(WidgetId::Close),
+        _ => None,
+    }
+}
+
+unsafe fn caption_command(hwnd: HWND, id: WidgetId) {
+    let command = match id {
+        WidgetId::Minimize => SC_MINIMIZE,
+        WidgetId::Maximize if IsZoomed(hwnd).as_bool() => SC_RESTORE,
+        WidgetId::Maximize => SC_MAXIMIZE,
+        _ => SC_CLOSE,
+    };
+    let _ = PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(command as usize), LPARAM(0));
+}
+
+/// Caption buttons draw their own hover and press, because DefWindowProc
+/// would draw classic buttons on Windows 10.
+unsafe fn caption_input(hwnd: HWND, code: u32, phase: Phase) -> bool {
+    let target = caption_widget(code);
+    match phase {
+        Phase::Move => {
+            let changed = with_state(|s| std::mem::replace(&mut s.caption_hover, target) != target).unwrap_or(false);
+            if target.is_some() {
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE | TME_NONCLIENT,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut track);
+            }
+            if changed {
+                invalidate(hwnd);
+            }
+            false
+        }
+        Phase::Down => {
+            let Some(target) = target else {
+                return false;
             };
-            if id != 0 {
-                command(hwnd, id);
-            }
-            if wparam.0 == 0x1b {
-                STATE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        state.crop = false;
-                        state.slideshow = None;
-                        if let Some(cancel) = &state.cancel {
-                            cancel.store(true, Ordering::Release);
-                        }
-                        state.markup = None;
-                        state.ink.clear();
-                        state.signature = None;
-                        state.selection = None;
-                        state.drag = None;
-                    }
-                });
-                let _ = ReleaseCapture();
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
-            LRESULT(0)
+            with_state(|s| s.caption_pressed = Some(target));
+            invalidate(hwnd);
+            true
         }
-        WM_DROPFILES => {
-            let drop = HDROP(wparam.0 as *mut _);
-            let count = DragQueryFileW(drop, u32::MAX, None);
-            let mut paths = Vec::new();
-            for index in 0..count {
-                let length = DragQueryFileW(drop, index, None);
-                let mut path = vec![0u16; length as usize + 1];
-                DragQueryFileW(drop, index, Some(&mut path));
-                if length > 0 {
-                    paths.push(PathBuf::from(String::from_utf16_lossy(
-                        &path[..length as usize],
-                    )));
-                }
+        Phase::Up | Phase::Cancel => {
+            let pressed = with_state(|s| s.caption_pressed.take()).flatten();
+            invalidate(hwnd);
+            if phase == Phase::Up && pressed.is_some() && pressed == target {
+                caption_command(hwnd, pressed.unwrap());
             }
-            DragFinish(drop);
-            add_tabs(hwnd, &paths);
-            if let Some(path) = paths.into_iter().next() {
-                open(hwnd, path);
+            target.is_some()
+        }
+    }
+}
+
+/// Runs a widget's action. Click, Enter, Space, access keys, and UI
+/// Automation Invoke all come here.
+pub(super) unsafe fn activate(hwnd: HWND, id: WidgetId, keyboard: bool) {
+    match id {
+        WidgetId::Tab(index) => select_tab(hwnd, index),
+        WidgetId::TabClose(index) => close_tab(hwnd, index),
+        WidgetId::NewTab => actions::execute(hwnd, Command::Open, keyboard),
+        WidgetId::Command(command) => actions::execute(hwnd, command, keyboard),
+        WidgetId::Minimize | WidgetId::Maximize | WidgetId::Close => caption_command(hwnd, id),
+        WidgetId::SidebarTab(index) => {
+            with_state(|s| s.sidebar_tab = index);
+        }
+        WidgetId::SheetButton(index) => sheet::finish(Some(index)),
+        WidgetId::SheetField(index) => {
+            let edit = with_state(|s| s.sheet.as_ref().and_then(|x| x.fields.get(index)).map(|f| f.edit)).flatten();
+            if let Some(edit) = edit {
+                let _ = SetFocus(Some(edit));
             }
-            LRESULT(0)
         }
-        WM_TIMER => {
-            tick(hwnd);
-            LRESULT(0)
+        WidgetId::Document => {
+            with_state(|s| s.focus = Some(WidgetId::Document));
         }
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            BeginPaint(hwnd, &mut ps);
-            paint(hwnd);
-            let _ = EndPaint(hwnd, &ps);
-            LRESULT(0)
+    }
+    invalidate(hwnd);
+}
+
+unsafe fn read_pointer(hwnd: HWND, message: u32, wparam: WPARAM) -> Option<(PointerEvent, bool)> {
+    let id = (wparam.0 & 0xffff) as u32;
+    let mut info = POINTER_INFO::default();
+    GetPointerInfo(id, &mut info).ok()?;
+    let kind = match info.pointerType {
+        PT_PEN => PointerKind::Pen,
+        PT_TOUCH => PointerKind::Touch,
+        _ => PointerKind::Mouse,
+    };
+    let (mut pressure, mut eraser) = (None, false);
+    if kind == PointerKind::Pen {
+        let mut pen = POINTER_PEN_INFO::default();
+        if GetPointerPenInfo(id, &mut pen).is_ok() {
+            // POINTER_PEN_INFO.pressure runs from 0 to 1024.
+            // https://learn.microsoft.com/windows/win32/api/winuser/ns-winuser-pointer_pen_info
+            pressure = Some(pen.pressure.min(1024) as f32 / 1024.0);
+            eraser = pen.penFlags & PEN_FLAG_ERASER != 0;
         }
-        WM_ERASEBKGND => LRESULT(1),
-        WM_SIZE => {
-            if let Ok(tabs) = GetDlgItem(Some(hwnd), TABS as i32) {
-                let _ = MoveWindow(
-                    tabs,
-                    8,
-                    44,
-                    ((lparam.0 as u16) as i32 - 16).max(1),
-                    30,
-                    true,
-                );
-            }
-            STATE.with(|cell| {
-                if let Ok(mut value) = cell.try_borrow_mut() {
-                    if let Some(state) = value.as_mut() {
-                        state.graphics = None;
-                        state.due = Some(
-                            Instant::now()
-                                + if state.frame.is_some() {
-                                    Duration::from_millis(120)
-                                } else {
-                                    Duration::ZERO
-                                },
-                        );
-                    }
-                }
-            });
-            let _ = InvalidateRect(Some(hwnd), None, false);
-            LRESULT(0)
+    }
+    let mut point = info.ptPixelLocation;
+    let _ = ScreenToClient(hwnd, &mut point);
+    let change = info.ButtonChangeType;
+    let phase = if info.pointerFlags.contains(POINTER_FLAG_CANCELED) {
+        Phase::Cancel
+    } else if change == POINTER_CHANGE_FIRSTBUTTON_DOWN {
+        Phase::Down
+    } else if change == POINTER_CHANGE_FIRSTBUTTON_UP || (message == WM_POINTERUP && kind != PointerKind::Mouse) {
+        Phase::Up
+    } else {
+        Phase::Move
+    };
+    let event = PointerEvent {
+        id,
+        kind,
+        phase,
+        x: point.x as f32,
+        y: point.y as f32,
+        pressure,
+        contact: info.pointerFlags.contains(POINTER_FLAG_INCONTACT) || info.pointerFlags.contains(POINTER_FLAG_FIRSTBUTTON),
+        eraser,
+    };
+    Some((event, change == POINTER_CHANGE_SECONDBUTTON_UP))
+}
+
+/// Routes one pointer event to the sheet, a widget, or the document.
+unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
+    if secondary_up {
+        actions::context_menu(hwnd, Some((e.x, e.y)));
+        return;
+    }
+    let mut activate_id = None;
+    let mut to_document = false;
+    let mut repaint = false;
+    with_state(|s| {
+        if s.caption_hover.take().is_some() {
+            repaint = true;
         }
-        WM_NOTIFY => {
-            let header = &*(lparam.0 as *const NMHDR);
-            if header.idFrom == TABS && header.code == TCN_SELCHANGE {
-                let selected = SendMessageW(header.hwndFrom, TCM_GETCURSEL, None, None).0;
-                let path = STATE.with(|cell| {
-                    cell.try_borrow().ok().and_then(|v| {
-                        v.as_ref()
-                            .and_then(|s| s.tabs.get(selected as usize).cloned())
-                    })
-                });
-                if let Some(path) = path {
-                    open(hwnd, path);
-                }
-            }
-            LRESULT(0)
-        }
-        WM_LBUTTONDOWN => {
-            let point = point(lparam);
-            STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    if !state.pending
-                        && !state.render_failed
-                        && state.frame.is_some()
-                        && point.1 >= 80.0
-                    {
-                        state.drag = Some(point);
-                        state.ink = vec![[point.0, point.1]];
-                        if state.crop || state.markup.is_some() {
-                            state.selection = Some((point.0, point.1, point.0, point.1));
-                        }
+        let layout = s.layout();
+        let over = widgets::hit(&layout.widgets, e.x, e.y).filter(|w| w.enabled).map(|w| (w.id, !w.tooltip.is_empty()));
+        let on_document = s.sheet.is_none() && matches!(over, Some((WidgetId::Document, _)));
+        let tracking = s.drag.is_some() || s.pinch.is_some() || s.touches.iter().any(|(id, _)| *id == e.id);
+        match e.phase {
+            Phase::Down => {
+                s.focus_visible = false;
+                s.keytips = None;
+                s.tooltip = None;
+                s.hover_since = None;
+                if on_document {
+                    s.focus = Some(WidgetId::Document);
+                    to_document = true;
+                } else if let Some((id, _)) = over {
+                    s.pressed = Some(id);
+                    if e.kind == PointerKind::Mouse {
                         SetCapture(hwnd);
                     }
                 }
-            });
-            LRESULT(0)
-        }
-        WM_MOUSEMOVE => {
-            let point = point(lparam);
-            STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    if let Some(start) = state.drag {
-                        if state.crop || state.markup.is_some() {
-                            state.selection = Some((start.0, start.1, point.0, point.1));
-                            if state.ink.len() < 10000 {
-                                state.ink.push([point.0, point.1]);
-                            }
-                        } else {
-                            state.pan.0 += point.0 - start.0;
-                            state.pan.1 += point.1 - start.1;
-                            state.drag = Some(point);
-                        }
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                    }
-                }
-            });
-            LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            let _ = ReleaseCapture();
-            STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    state.drag = None;
-                    if state.markup.is_some() {
-                        if let (Some(kind), Some((x1, y1, x2, y2)), Some(path)) =
-                            (state.markup, state.selection.take(), state.path.clone())
-                        {
-                            let rect = state.image_rect;
-                            let width = rect.right - rect.left;
-                            let height = rect.bottom - rect.top;
-                            if width > 0.0 && height > 0.0 {
-                                let normalized = |x: f32, y: f32| {
-                                    [
-                                        ((x - rect.left) / width).clamp(0.0, 1.0),
-                                        ((y - rect.top) / height).clamp(0.0, 1.0),
-                                    ]
-                                };
-                                let first = normalized(x1, y1);
-                                let mut last = normalized(x2, y2);
-                                if matches!(kind, AnnotationKind::Note | AnnotationKind::Text)
-                                    && (x1 - x2).abs() < 3.0
-                                {
-                                    last = [(first[0] + 0.25).min(1.0), (first[1] + 0.08).min(1.0)];
-                                }
-                                let points = if let Some(signature) = &state.signature {
-                                    signature
-                                        .iter()
-                                        .map(|p| {
-                                            [
-                                                first[0].min(last[0])
-                                                    + p[0] * (first[0] - last[0]).abs(),
-                                                first[1].min(last[1])
-                                                    + p[1] * (first[1] - last[1]).abs(),
-                                            ]
-                                        })
-                                        .collect()
-                                } else if kind == AnnotationKind::Ink {
-                                    state.ink.iter().map(|p| normalized(p[0], p[1])).collect()
-                                } else {
-                                    vec![first, last]
-                                };
-                                let pdf = is_pdf(&path);
-                                let edits = state.sessions.entry(path).or_default();
-                                if pdf {
-                                    edits.pdf.push(PdfEdit::Annotate {
-                                        page: state.page,
-                                        kind,
-                                        points,
-                                        text: state.markup_text.clone(),
-                                    });
-                                } else {
-                                    edits.image.push(ImageEdit::Annotate {
-                                        kind,
-                                        points,
-                                        text: state.markup_text.clone(),
-                                    });
-                                }
-                                edits.dirty = true;
-                                state.ink.clear();
-                                schedule(hwnd, state, 0);
-                            }
-                        }
-                    }
-                    if state.crop {
-                        if let (Some((x1, y1, x2, y2)), Some(path)) =
-                            (state.selection.take(), state.path.clone())
-                        {
-                            let rect = state.image_rect;
-                            let width = rect.right - rect.left;
-                            let height = rect.bottom - rect.top;
-                            if width > 0.0
-                                && height > 0.0
-                                && (x1 - x2).abs() > 3.0
-                                && (y1 - y2).abs() > 3.0
-                            {
-                                let left = ((x1.min(x2) - rect.left) / width).clamp(0.0, 1.0);
-                                let right = ((x1.max(x2) - rect.left) / width).clamp(0.0, 1.0);
-                                let top = ((y1.min(y2) - rect.top) / height).clamp(0.0, 1.0);
-                                let bottom = ((y1.max(y2) - rect.top) / height).clamp(0.0, 1.0);
-                                if right > left && bottom > top {
-                                    let pdf = is_pdf(&path);
-                                    let edits = state.sessions.entry(path).or_default();
-                                    if pdf {
-                                        edits.pdf.push(PdfEdit::Crop {
-                                            page: state.page,
-                                            left,
-                                            top,
-                                            right,
-                                            bottom,
-                                        });
-                                    } else {
-                                        edits.image.push(ImageEdit::Crop {
-                                            left,
-                                            top,
-                                            right,
-                                            bottom,
-                                        });
-                                    }
-                                    edits.dirty = true;
-                                    state.crop = false;
-                                    state.pan = (0.0, 0.0);
-                                    state.zoom = 1.0;
-                                    schedule(hwnd, state, 0);
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-            let _ = InvalidateRect(Some(hwnd), None, false);
-            LRESULT(0)
-        }
-        WM_MOUSEWHEEL => {
-            if GetKeyState(VK_CONTROL.0 as i32) < 0 {
-                command(
-                    hwnd,
-                    if ((wparam.0 >> 16) as u16 as i16) > 0 {
-                        ZOOM_IN
-                    } else {
-                        ZOOM_OUT
-                    },
-                );
-            } else {
-                STATE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        state.pan.1 += ((wparam.0 >> 16) as u16 as i16) as f32;
-                    }
-                });
-                let _ = InvalidateRect(Some(hwnd), None, false);
+                repaint = true;
             }
+            Phase::Move => {
+                if tracking {
+                    to_document = true;
+                } else {
+                    let hover = over.filter(|(id, _)| *id != WidgetId::Document);
+                    let tooltip = hover.is_some_and(|(_, t)| t);
+                    if s.set_hover(hover.map(|(id, _)| id)) {
+                        repaint = true;
+                    }
+                    if !tooltip {
+                        s.hover_since = None;
+                    }
+                }
+            }
+            Phase::Up | Phase::Cancel => {
+                if tracking {
+                    to_document = true;
+                }
+                if let Some(pressed) = s.pressed.take() {
+                    let _ = ReleaseCapture();
+                    repaint = true;
+                    if e.phase == Phase::Up && over.map(|(id, _)| id) == Some(pressed) {
+                        activate_id = Some(pressed);
+                    }
+                }
+            }
+        }
+    });
+    if to_document && with_state(|s| document::on_pointer(hwnd, s, &e)).unwrap_or(false) {
+        repaint = true;
+    }
+    if let Some(id) = activate_id {
+        activate(hwnd, id, false);
+    }
+    if repaint {
+        invalidate(hwnd);
+    }
+}
+
+unsafe fn wheel(hwnd: HWND, wparam: WPARAM, horizontal: bool) {
+    let delta = ((wparam.0 >> 16) as u16 as i16) as f32;
+    if !horizontal && GetKeyState(VK_CONTROL.0 as i32) < 0 {
+        actions::execute(hwnd, if delta > 0.0 { Command::ZoomIn } else { Command::ZoomOut }, false);
+        return;
+    }
+    with_state(|s| {
+        if horizontal {
+            s.pan.0 -= delta;
+        } else {
+            s.pan.1 += delta;
+        }
+    });
+    invalidate(hwnd);
+}
+
+fn key_char(vk: u16) -> Option<char> {
+    matches!(vk, 0x30..=0x39 | 0x41..=0x5A).then(|| vk as u8 as char)
+}
+
+/// Escape leaves modes and cancels long jobs, as in the pre-split shell.
+unsafe fn escape(hwnd: HWND) {
+    with_state(|s| {
+        s.crop = false;
+        s.slideshow = None;
+        if let Some(cancel) = &s.cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+        }
+        s.markup = None;
+        s.ink.clear();
+        s.signature = None;
+        s.selection = None;
+        s.drag = None;
+        s.tooltip = None;
+    });
+    let _ = ReleaseCapture();
+    invalidate(hwnd);
+}
+
+/// Returns true when the key was handled.
+unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
+    let down = |key: VIRTUAL_KEY| GetKeyState(key.0 as i32) < 0;
+    let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
+    if vk == VK_MENU.0 {
+        with_state(|s| s.alt_armed = true);
+        return true;
+    }
+    with_state(|s| {
+        s.alt_armed = false;
+        s.tooltip = None;
+    });
+    // Alt+F4 and Alt+Space belong to Windows.
+    if alt && matches!(VIRTUAL_KEY(vk), VK_F4 | VK_SPACE) {
+        return false;
+    }
+    if with_state(|s| s.sheet.is_some()).unwrap_or(false) {
+        let focus = with_state(|s| s.focus).flatten();
+        match VIRTUAL_KEY(vk) {
+            VK_TAB => sheet::move_focus(hwnd, shift),
+            VK_ESCAPE => sheet::finish(None),
+            VK_RETURN => sheet::finish(Some(match focus {
+                Some(WidgetId::SheetButton(i)) => i,
+                _ => 0,
+            })),
+            VK_SPACE => {
+                if let Some(WidgetId::SheetButton(i)) = focus {
+                    sheet::finish(Some(i));
+                }
+            }
+            _ => {}
+        }
+        return true;
+    }
+    // Keytips: Alt shows them; a letter runs that button. Alt+letter works
+    // directly. https://learn.microsoft.com/windows/apps/design/input/access-keys
+    let scope = with_state(|s| s.keytips).flatten().or((system && alt).then_some(Scope::Root));
+    if let Some(scope) = scope {
+        if vk == VK_ESCAPE.0 {
+            with_state(|s| s.keytips = (scope == Scope::Markup).then_some(Scope::Root));
+            invalidate(hwnd);
+            return true;
+        }
+        if let Some(key) = key_char(vk) {
+            let target = with_state(|s| {
+                s.keytips = None;
+                widgets::access_key_target(&s.layout().widgets, scope, key)
+            })
+            .flatten();
+            match target {
+                Some(WidgetId::Command(Command::ToggleMarkup)) if scope == Scope::Root => {
+                    // Alt, M opens the markup bar and its scope (Alt, M, H).
+                    with_state(|s| {
+                        if !s.markup_open {
+                            s.markup_open = true;
+                            if s.frame.is_some() {
+                                s.due = Some(Instant::now() + Duration::from_millis(120));
+                            }
+                        }
+                        s.keytips = Some(Scope::Markup);
+                    });
+                }
+                Some(id) => activate(hwnd, id, true),
+                None => {}
+            }
+            invalidate(hwnd);
+            return true;
+        }
+        with_state(|s| s.keytips = None);
+        invalidate(hwnd);
+    }
+    if vk == VK_TAB.0 && !ctrl && !alt {
+        with_state(|s| {
+            let layout = s.layout();
+            s.focus = widgets::next_focus(&layout.widgets, s.focus, shift);
+            s.focus_visible = true;
+        });
+        invalidate(hwnd);
+        return true;
+    }
+    if matches!(VIRTUAL_KEY(vk), VK_RETURN | VK_SPACE) && !ctrl && !alt {
+        let focus = with_state(|s| s.focus.filter(|f| *f != WidgetId::Document && s.focus_visible)).flatten();
+        if let Some(id) = focus {
+            activate(hwnd, id, true);
+            return true;
+        }
+    }
+    if let Some(command) = commands::lookup(Chord { key: vk, ctrl, shift, alt }) {
+        if matches!(command, Command::NextPane | Command::PreviousPane) {
+            with_state(|s| s.focus_visible = true);
+        }
+        actions::execute(hwnd, command, true);
+        return true;
+    }
+    if vk == VK_ESCAPE.0 {
+        escape(hwnd);
+        return true;
+    }
+    false
+}
+
+/// Settings broadcasts are rare, so the theme is simply read and applied again.
+unsafe fn retheme(hwnd: HWND) {
+    let theme = theme::apply(hwnd, theme::current());
+    let edits = with_state(|s| {
+        s.theme = theme;
+        s.sheet.as_ref().map(|x| x.fields.iter().map(|f| f.edit).collect::<Vec<_>>()).unwrap_or_default()
+    })
+    .unwrap_or_default();
+    for edit in edits {
+        let _ = InvalidateRect(Some(edit), None, true);
+    }
+    invalidate(hwnd);
+}
+
+unsafe fn drop_files(hwnd: HWND, wparam: WPARAM) {
+    let drop = HDROP(wparam.0 as *mut _);
+    let count = DragQueryFileW(drop, u32::MAX, None);
+    let mut paths = Vec::new();
+    for index in 0..count {
+        let length = DragQueryFileW(drop, index, None);
+        let mut path = vec![0u16; length as usize + 1];
+        DragQueryFileW(drop, index, Some(&mut path));
+        if length > 0 {
+            paths.push(PathBuf::from(String::from_utf16_lossy(&path[..length as usize])));
+        }
+    }
+    DragFinish(drop);
+    with_state(|s| add_tabs(s, &paths));
+    if let Some(path) = paths.into_iter().next() {
+        open(hwnd, path);
+    }
+}
+
+unsafe fn close(hwnd: HWND) {
+    if with_state(|s| s.sheet.is_some()).unwrap_or(false) {
+        // Closing while a sheet is open cancels the sheet first.
+        sheet::finish(None);
+        return;
+    }
+    let (dirty, saving) =
+        with_state(|s| (s.sessions.values().any(|e| e.dirty), s.exporting)).unwrap_or((false, false));
+    if saving {
+        sheet::alert(hwnd, "Saving", "Wait for the save to finish, then close Preview.");
+        return;
+    }
+    if dirty
+        && !sheet::confirm(
+            hwnd,
+            "Close Preview?",
+            "You have edits that are not saved. Your original files are unchanged.",
+            "Close without saving",
+        )
+    {
+        return;
+    }
+    let _ = DestroyWindow(hwnd);
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match message {
+        WM_NCCALCSIZE if wparam.0 != 0 => nc_calc_size(hwnd, lparam),
+        WM_NCHITTEST => nc_hit_test(hwnd, wparam, lparam),
+        WM_NCPOINTERUPDATE | WM_NCPOINTERDOWN | WM_NCPOINTERUP => {
+            // HIWORD(wParam) is the WM_NCHITTEST result for this point.
+            let code = ((wparam.0 >> 16) & 0xffff) as u32;
+            let phase = match message {
+                WM_NCPOINTERDOWN => Phase::Down,
+                WM_NCPOINTERUP => Phase::Up,
+                _ => Phase::Move,
+            };
+            if caption_input(hwnd, code, phase) {
+                return LRESULT(0);
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_NCMOUSEMOVE => {
+            caption_input(hwnd, wparam.0 as u32, Phase::Move);
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if caption_widget(wparam.0 as u32).is_some() => {
+            caption_input(hwnd, wparam.0 as u32, Phase::Down);
+            LRESULT(0)
+        }
+        WM_NCLBUTTONUP if caption_widget(wparam.0 as u32).is_some() => {
+            caption_input(hwnd, wparam.0 as u32, Phase::Up);
+            LRESULT(0)
+        }
+        WM_NCMOUSELEAVE => {
+            with_state(|s| {
+                s.caption_hover = None;
+                s.caption_pressed = None;
+            });
+            invalidate(hwnd);
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_ACTIVATE => {
+            with_state(|s| s.active = (wparam.0 & 0xffff) as u32 != WA_INACTIVE);
+            invalidate(hwnd);
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_SETFOCUS => {
+            a11y::focus_changed(true);
+            invalidate(hwnd);
+            LRESULT(0)
+        }
+        WM_KILLFOCUS => {
+            a11y::focus_changed(false);
+            with_state(|s| {
+                s.alt_armed = false;
+                s.keytips = None;
+            });
+            invalidate(hwnd);
+            LRESULT(0)
+        }
+        WM_GETOBJECT => a11y::get_object(wparam, lparam).unwrap_or_else(|| DefWindowProcW(hwnd, message, wparam, lparam)),
+        WM_SIZE => {
+            let (width, height) = ((lparam.0 & 0xffff) as f32, ((lparam.0 >> 16) & 0xffff) as f32);
+            with_state(|s| {
+                s.size = (width, height);
+                s.maximized = wparam.0 as u32 == SIZE_MAXIMIZED;
+                if let Some(renderer) = &s.renderer {
+                    if renderer.resize(width as u32, height as u32).is_err() {
+                        s.renderer = None;
+                    }
+                }
+                s.due = Some(Instant::now() + if s.frame.is_some() { Duration::from_millis(120) } else { Duration::ZERO });
+            });
+            sheet::position_fields(hwnd);
+            invalidate(hwnd);
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            let info = &mut *(lparam.0 as *mut MINMAXINFO);
+            let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+            info.ptMinTrackSize = POINT { x: (360.0 * scale) as i32, y: (320.0 * scale) as i32 };
             LRESULT(0)
         }
         WM_DPICHANGED => {
             let rect = &*(lparam.0 as *const RECT);
+            with_state(|s| s.scale = ((wparam.0 >> 16) & 0xffff) as f32 / 96.0);
             let _ = SetWindowPos(
                 hwnd,
                 None,
@@ -583,6 +753,120 @@ unsafe extern "system" fn wndproc(
                 rect.bottom - rect.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            sheet::position_fields(hwnd);
+            invalidate(hwnd);
+            LRESULT(0)
+        }
+        // Theme, contrast, and color changes arrive here; re-read and repaint.
+        // https://learn.microsoft.com/windows/apps/desktop/modernize/ui/apply-windows-themes
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+            retheme(hwnd);
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            BeginPaint(hwnd, &mut ps);
+            paint::paint(hwnd);
+            let _ = EndPaint(hwnd, &ps);
+            a11y::update();
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
+            match read_pointer(hwnd, message, wparam) {
+                Some((event, secondary_up)) => {
+                    pointer(hwnd, event, secondary_up);
+                    LRESULT(0)
+                }
+                None => DefWindowProcW(hwnd, message, wparam, lparam),
+            }
+        }
+        WM_POINTERLEAVE => {
+            if with_state(|s| s.set_hover(None)).unwrap_or(false) {
+                invalidate(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_POINTERWHEEL | WM_POINTERHWHEEL => {
+            wheel(hwnd, wparam, message == WM_POINTERHWHEEL);
+            LRESULT(0)
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if key_down(hwnd, wparam.0 as u16, message == WM_SYSKEYDOWN) {
+                LRESULT(0)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
+        WM_SYSKEYUP if wparam.0 as u16 == VK_MENU.0 => {
+            // A lone Alt press shows or hides keytips. Alt never enters the
+            // system menu here; Alt+Space and F10 still do.
+            if with_state(|s| std::mem::take(&mut s.alt_armed)).unwrap_or(false) {
+                with_state(|s| s.keytips = if s.keytips.is_some() { None } else { Some(Scope::Root) });
+                invalidate(hwnd);
+            }
+            LRESULT(0)
+        }
+        // Alt+letter is handled in WM_SYSKEYDOWN; only Alt+Space opens the
+        // system menu. Other WM_SYSCHAR messages would beep.
+        WM_SYSCHAR if wparam.0 != ' ' as usize => LRESULT(0),
+        WM_CONTEXTMENU => {
+            // The keyboard (Shift+F10 or the menu key) sends (-1, -1).
+            // https://learn.microsoft.com/windows/win32/menurc/wm-contextmenu
+            let mut point = lparam_point(lparam);
+            if (point.x, point.y) == (-1, -1) {
+                actions::context_menu(hwnd, None);
+            } else {
+                let _ = ScreenToClient(hwnd, &mut point);
+                actions::context_menu(hwnd, Some((point.x as f32, point.y as f32)));
+            }
+            LRESULT(0)
+        }
+        WM_CTLCOLOREDIT => {
+            let theme = with_state(|s| s.theme).unwrap_or_else(|| theme::palette(theme::Mode::Light));
+            sheet::color_edit(HDC(wparam.0 as *mut _), theme.text.colorref(), theme.field.colorref())
+        }
+        WM_COMMAND => {
+            // EN_SETFOCUS and EN_KILLFOCUS move the focus line on text boxes.
+            let code = ((wparam.0 >> 16) & 0xffff) as u32;
+            if code == EN_SETFOCUS {
+                if let Some(index) = sheet::field_index(HWND(lparam.0 as *mut _)) {
+                    with_state(|s| s.focus = Some(WidgetId::SheetField(index)));
+                }
+            }
+            if code == EN_SETFOCUS || code == EN_KILLFOCUS {
+                invalidate(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_DROPFILES => {
+            drop_files(hwnd, wparam);
+            LRESULT(0)
+        }
+        WM_TIMER | WM_APP_WAKE => {
+            tick(hwnd);
+            LRESULT(0)
+        }
+        a11y::WM_APP_A11Y => {
+            if let Some(id) = a11y::widget_for(lparam.0 as u64) {
+                if wparam.0 == 0 {
+                    activate(hwnd, id, true);
+                } else {
+                    with_state(|s| {
+                        s.focus = Some(id);
+                        s.focus_visible = true;
+                    });
+                    invalidate(hwnd);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_APP_TEXT_SCALE => {
+            text_scale_changed(hwnd);
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            close(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -590,123 +874,60 @@ unsafe extern "system" fn wndproc(
             PostQuitMessage(0);
             LRESULT(0)
         }
-        WM_CLOSE => {
-            let (dirty, saving) = STATE.with(|cell| {
-                cell.borrow().as_ref().map_or((false, false), |s| {
-                    (s.sessions.values().any(|e| e.dirty), s.exporting)
-                })
-            });
-            if saving {
-                MessageBoxW(
-                    Some(hwnd),
-                    w!("Wait for the save to finish before closing Preview."),
-                    w!("Saving"),
-                    MB_OK,
-                );
-                return LRESULT(0);
-            }
-            if dirty && MessageBoxW(Some(hwnd),w!("Close and discard unsaved edits? Your original files are unchanged. Choose No, then Save copy to keep your edits."),w!("Unsaved edits"),MB_YESNO|MB_ICONQUESTION)!=IDYES { return LRESULT(0); }
-            let _ = DestroyWindow(hwnd);
-            LRESULT(0)
-        }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
     }
 }
 
-pub(super) fn point(value: LPARAM) -> (f32, f32) {
-    (
-        (value.0 as u16 as i16) as f32,
-        ((value.0 >> 16) as u16 as i16) as f32,
-    )
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::commands::Ctx;
 
-impl Graphics {
-    pub(super) unsafe fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
-        let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let target = factory.CreateHwndRenderTarget(
-            &D2D1_RENDER_TARGET_PROPERTIES {
-                dpiX: 96.0,
-                dpiY: 96.0,
-                ..Default::default()
-            },
-            &D2D1_HWND_RENDER_TARGET_PROPERTIES {
-                hwnd,
-                pixelSize: D2D_SIZE_U { width, height },
-                ..Default::default()
-            },
-        )?;
-        let brush = target.CreateSolidColorBrush(
-            &D2D1_COLOR_F {
-                r: 0.24,
-                g: 0.25,
-                b: 0.28,
-                a: 1.0,
-            },
-            None,
-        )?;
-        let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-        let format = dwrite.CreateTextFormat(
-            w!("Segoe UI"),
-            None,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            14.0 * GetDpiForWindow(hwnd) as f32 / 96.0,
-            w!("en-us"),
-        )?;
-        Ok(Self {
-            target,
-            brush,
-            format,
-            bitmap: None,
+    fn layout(maximized: bool) -> Layout {
+        let tabs = vec!["a.pdf".to_string()];
+        widgets::layout(&widgets::Input {
+            width: 1000.0,
+            height: 700.0,
+            scale: 1.0,
+            text_scale: 1.0,
+            tabs: &tabs,
+            active_tab: Some(0),
+            maximized,
+            has_document: true,
+            title: "a.pdf",
+            sidebar_open: false,
+            sidebar_tab: 0,
+            markup_open: false,
+            ctx: Ctx { has_frame: true, tabs: 1, ..Default::default() },
+            sheet: None,
         })
     }
-}
 
-pub(super) unsafe fn paint(hwnd: HWND) {
-    STATE.with(|cell| { let Ok(mut value) = cell.try_borrow_mut() else { return; }; let Some(state) = value.as_mut() else { return; };
-        state.painted = true;
-        let mut rect = RECT::default(); if GetClientRect(hwnd, &mut rect).is_err() || rect.right <= 0 || rect.bottom <= 0 { return; }
-        let result = (|| -> Result<bool> {
-            if state.graphics.is_none() { state.graphics = Some(Graphics::new(hwnd, rect.right as u32, rect.bottom as u32)?); }
-            let Some(graphics) = state.graphics.as_mut() else { return Ok(false); };
-            if graphics.bitmap.is_none() { if let Some(frame) = state.frame.as_ref() {
-                graphics.bitmap = Some(graphics.target.CreateBitmap(D2D_SIZE_U { width: frame.width, height: frame.height }, Some(frame.pixels.as_ptr().cast()), frame.width * 4,
-                    &D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 })?);
-            }}
-            graphics.target.BeginDraw(); graphics.target.Clear(Some(&D2D1_COLOR_F { r: 0.94, g: 0.945, b: 0.95, a: 1.0 }));
-            let mut drew = false;
-            if let (Some(bitmap), Some(frame)) = (&graphics.bitmap, &state.frame) {
-                let scale = if state.zoom>1.0 { 1.0 } else { (rect.right as f32 / frame.width as f32).min((rect.bottom - 128).max(1) as f32 / frame.height as f32).min(1.0) };
-                let width = frame.width as f32 * scale; let height = frame.height as f32 * scale;
-                let left = (rect.right as f32 - width) / 2.0 + state.pan.0; let top = 80.0 + ((rect.bottom - 128) as f32 - height) / 2.0 + state.pan.1;
-                state.image_rect=D2D_RECT_F { left, top, right: left + width, bottom: top + height };
-                graphics.target.PushAxisAlignedClip(&D2D_RECT_F { left:0.0,top:80.0,right:rect.right as f32,bottom:(rect.bottom-48) as f32 },D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                graphics.target.DrawBitmap(bitmap, Some(&state.image_rect), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
-                if state.markup==Some(AnnotationKind::Ink) && state.signature.is_none() {
-                    for pair in state.ink.windows(2) { graphics.target.DrawLine(windows_numerics::Vector2{X:pair[0][0],Y:pair[0][1]},windows_numerics::Vector2{X:pair[1][0],Y:pair[1][1]},&graphics.brush,2.0,None); }
-                } else if let Some((x1,y1,x2,y2))=state.selection { graphics.target.DrawRectangle(&D2D_RECT_F { left:x1.min(x2),top:y1.min(y2),right:x1.max(x2),bottom:y1.max(y2) },&graphics.brush,2.0,None); }
-                graphics.target.PopAxisAlignedClip(); drew = true;
-            }
-            let text: Vec<u16> = state.status.encode_utf16().collect();
-            graphics.target.DrawText(&text, &graphics.format, &D2D_RECT_F { left: 18.0, top: (rect.bottom - 38).max(12) as f32, right: (rect.right - 18).max(1) as f32, bottom: rect.bottom as f32 }, &graphics.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
-            graphics.target.EndDraw(None, None)?;
-            Ok(drew)
-        })();
-        match result {
-            Ok(true) if !state.pending && !state.marked && !state.render_failed => {
-                if let (Some(path), Some(frame)) = (std::env::var_os("PFW_BENCH_OUT"), state.frame.as_ref()) {
-                    let mut counter = 0; let mut frequency = 0;
-                    if DwmFlush().is_ok() && QueryPerformanceCounter(&mut counter).is_ok() && QueryPerformanceFrequency(&mut frequency).is_ok() {
-                        let json = format!("{{\"first_content_qpc\":{counter},\"qpc_frequency\":{frequency},\"width\":{},\"height\":{},\"page_count\":{}}}", frame.width, frame.height, frame.page_count);
-                        if std::fs::write(path, json).is_ok() { state.marked = true;
-                            if std::env::var_os("PFW_BENCH_AUTOCLOSE").is_some_and(|v| v == "1") { let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)); }
-                        }
-                    }
-                }
-            }
-            Err(error) => { state.graphics = None; state.status = format!("Windows could not draw this view: {error}"); }
-            _ => {}
-        }
-    });
+    #[test]
+    fn hit_test_maps_caption_buttons_tabs_and_drag_space() {
+        let l = layout(false);
+        let max = l.widgets.iter().find(|w| w.id == WidgetId::Maximize).unwrap().rect;
+        assert_eq!(hit_code(&l, max.x0 + 5.0, 20.0, false, 8.0), HTMAXBUTTON);
+        assert_eq!(hit_code(&l, 995.0, 20.0, false, 8.0), HTCLOSE);
+        assert_eq!(hit_code(&l, max.x0 - 20.0, 20.0, false, 8.0), HTMINBUTTON);
+        assert_eq!(hit_code(&l, 30.0, 20.0, false, 8.0), HTCLIENT, "a tab");
+        assert_eq!(hit_code(&l, 600.0, 20.0, false, 8.0), HTCAPTION, "empty title bar drags");
+        assert_eq!(hit_code(&l, 600.0, 3.0, false, 8.0), HTTOP, "top resize border");
+        assert_eq!(hit_code(&l, 600.0, 3.0, true, 8.0), HTCAPTION, "no resize border when maximized");
+        assert_eq!(hit_code(&l, 500.0, 400.0, false, 8.0), HTCLIENT);
+    }
+
+    #[test]
+    fn signed_coordinates_survive_negative_positions() {
+        assert_eq!(lparam_point(LPARAM(((20u32 << 16) | (-12i16 as u16 as u32)) as isize)), POINT { x: -12, y: 20 });
+        assert_eq!(lparam_point(LPARAM(0xFFFF_FFFF)), POINT { x: -1, y: -1 });
+    }
+
+    #[test]
+    fn letters_and_digits_are_access_keys() {
+        assert_eq!(key_char(0x41), Some('A'));
+        assert_eq!(key_char(0x39), Some('9'));
+        assert_eq!(key_char(0x20), None);
+        assert_eq!(key_char(0x70), None);
+    }
 }

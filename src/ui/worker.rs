@@ -1,6 +1,50 @@
-use super::*;
+//! The document worker owns every PDFium call and the WIC viewing path. A
+//! second task worker runs jobs that never touch PDFium (OCR, background
+//! removal, image exports, and image batches), so they never delay page
+//! rendering. Both run the same `worker` loop; the PDFium engine guard in
+//! pdf.rs refuses a second engine, so the task worker cannot load PDFium.
+use crate::model::{Frame, ImageEdit, PdfEdit};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+};
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, WPARAM},
+    System::Com::*,
+    UI::WindowsAndMessaging::{PostMessageW, WM_APP},
+};
 
-#[derive(Clone, Default)]
+/// Posted after each worker event so results reach the window at once,
+/// not on the next timer tick.
+pub(super) const WM_APP_WAKE: u32 = WM_APP + 1;
+
+#[derive(Clone)]
+pub(super) struct Events {
+    sender: mpsc::Sender<Event>,
+    window: isize,
+}
+impl Events {
+    fn send(&self, event: Event) -> Result<(), mpsc::SendError<Event>> {
+        self.sender.send(event)?;
+        unsafe {
+            let _ = PostMessageW(Some(HWND(self.window as *mut _)), WM_APP_WAKE, WPARAM(0), LPARAM(0));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum SaveKind {
+    Copy,
+    ExtractPage,
+    Merge(PathBuf),
+}
+
+#[derive(Clone, Default, Debug)]
 pub(super) struct Edits {
     pub(super) image: Vec<ImageEdit>,
     pub(super) pdf: Vec<PdfEdit>,
@@ -18,7 +62,7 @@ pub(super) struct Request {
 }
 pub(super) enum Job {
     Render(Request),
-    Save(Request, PathBuf, usize, Option<PathBuf>),
+    Save(Request, PathBuf, SaveKind),
     Text(Request),
     Find(Request, String),
     Fields(Request),
@@ -93,7 +137,7 @@ pub(super) fn sibling(path: &Path, delta: i32) -> std::result::Result<PathBuf, S
         .ok_or("No more images in this direction.".into())
 }
 
-pub(super) fn worker(receiver: mpsc::Receiver<Job>, sender: mpsc::Sender<Event>) {
+fn worker(receiver: mpsc::Receiver<Job>, sender: Events) {
     unsafe {
         let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).ok();
         let mut engine = None;
@@ -123,7 +167,7 @@ pub(super) fn worker(receiver: mpsc::Receiver<Job>, sender: mpsc::Sender<Event>)
             };
             let mut request = match &job {
                 Job::Render(r)
-                | Job::Save(r, _, _, _)
+                | Job::Save(r, _, _)
                 | Job::Text(r)
                 | Job::Find(r, _)
                 | Job::Fields(r)
@@ -142,24 +186,21 @@ pub(super) fn worker(receiver: mpsc::Receiver<Job>, sender: mpsc::Sender<Event>)
                     engine = crate::pdf::PdfEngine::new().ok();
                 }
                 let event = match job {
-                    Job::Save(_, output, mode, other) => {
+                    Job::Save(_, output, kind) => {
                         let result = if is_pdf(&request.path) {
                             match engine.as_mut() {
                                 None => Err("PDF support could not load.".into()),
-                                Some(engine) => match mode {
-                                    EXTRACT => engine.extract_page(
+                                Some(engine) => match &kind {
+                                    SaveKind::ExtractPage => engine.extract_page(
                                         &request.path,
                                         &output,
                                         request.page,
                                         &edits.pdf,
                                     ),
-                                    MERGE => match other {
-                                        Some(other) => {
-                                            engine.merge(&request.path, &other, &output, &edits.pdf)
-                                        }
-                                        None => Err("Choose a PDF to combine.".into()),
-                                    },
-                                    _ => engine.save_copy(&request.path, &output, &edits.pdf),
+                                    SaveKind::Merge(other) => {
+                                        engine.merge(&request.path, other, &output, &edits.pdf)
+                                    }
+                                    SaveKind::Copy => engine.save_copy(&request.path, &output, &edits.pdf),
                                 },
                             }
                         } else if is_pdf(&output) {
@@ -182,7 +223,7 @@ pub(super) fn worker(receiver: mpsc::Receiver<Job>, sender: mpsc::Sender<Event>)
                         Event::Saved(
                             request.path,
                             edits,
-                            mode != EXTRACT,
+                            kind != SaveKind::ExtractPage,
                             result.map_err(|e| format!("Could not save {}: {e}", output.display())),
                         )
                     }
@@ -389,5 +430,100 @@ pub(super) fn worker(receiver: mpsc::Receiver<Job>, sender: mpsc::Sender<Event>)
         if initialized.is_ok() {
             CoUninitialize();
         }
+    }
+}
+
+/// Jobs that never touch PDFium go to the task worker.
+pub(super) fn runs_on_task_worker(job: &Job) -> bool {
+    match job {
+        Job::Text(request) => !is_pdf(&request.path),
+        Job::Background(..) => true,
+        Job::Batch(_, _, extension, _, _) => extension != "pdf",
+        Job::Save(request, output, SaveKind::Copy) => !is_pdf(&request.path) && !is_pdf(output),
+        _ => false,
+    }
+}
+
+pub(super) struct Workers {
+    document: mpsc::Sender<Job>,
+    task: Option<mpsc::Sender<Job>>,
+    events: Events,
+    pub(super) receiver: mpsc::Receiver<Event>,
+}
+
+fn spawn(name: &str, events: Events) -> std::io::Result<mpsc::Sender<Job>> {
+    let (send, receive) = mpsc::channel();
+    std::thread::Builder::new().name(name.into()).spawn(move || worker(receive, events))?;
+    Ok(send)
+}
+
+impl Workers {
+    pub(super) fn start(window: HWND) -> std::io::Result<Self> {
+        let (sender, receiver) = mpsc::channel();
+        let events = Events { sender, window: window.0 as isize };
+        Ok(Self { document: spawn("document-render", events.clone())?, task: None, events, receiver })
+    }
+    /// Returns false when the worker has stopped.
+    pub(super) fn send(&mut self, job: Job) -> bool {
+        if !runs_on_task_worker(&job) {
+            return self.document.send(job).is_ok();
+        }
+        if self.task.is_none() {
+            // Started on first use, so launch pays nothing for it.
+            self.task = spawn("task", self.events.clone()).ok();
+        }
+        self.task.as_ref().is_some_and(|task| task.send(job).is_ok())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pdf_extension_is_case_insensitive() {
+        assert!(is_pdf(Path::new("sample.PDF")));
+        assert!(!is_pdf(Path::new("sample.png")));
+    }
+
+    #[test]
+    fn sibling_navigation_filters_and_orders_images() {
+        let folder = std::env::temp_dir().join(format!(
+            "preview-shell-nav-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        for name in ["B.jpg", "a.PNG", "ignore.txt"] {
+            std::fs::write(folder.join(name), b"fixture").unwrap();
+        }
+        assert_eq!(sibling(&folder.join("a.PNG"), 1).unwrap(), folder.join("B.jpg"));
+        assert!(sibling(&folder.join("a.PNG"), -1).is_err());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn pdfium_jobs_stay_on_the_document_worker() {
+        let request = |path: &str| Request {
+            generation: 1,
+            path: PathBuf::from(path),
+            page: 0,
+            delta: 0,
+            width: 1,
+            height: 1,
+            sessions: HashMap::new(),
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(runs_on_task_worker(&Job::Text(request("a.png"))), "OCR");
+        assert!(!runs_on_task_worker(&Job::Text(request("a.pdf"))), "PDF text uses PDFium");
+        assert!(runs_on_task_worker(&Job::Background(request("a.png"), PathBuf::from("b.png"))));
+        assert!(runs_on_task_worker(&Job::Batch(request("a.png"), PathBuf::from("out"), "webp".into(), cancel.clone(), None)));
+        assert!(!runs_on_task_worker(&Job::Batch(request("a.png"), PathBuf::from("out"), "pdf".into(), cancel, None)));
+        assert!(runs_on_task_worker(&Job::Save(request("a.png"), PathBuf::from("b.jpg"), SaveKind::Copy)));
+        assert!(!runs_on_task_worker(&Job::Save(request("a.png"), PathBuf::from("b.pdf"), SaveKind::Copy)));
+        assert!(!runs_on_task_worker(&Job::Save(request("a.pdf"), PathBuf::from("b.pdf"), SaveKind::ExtractPage)));
+        assert!(!runs_on_task_worker(&Job::Render(request("a.png"))));
+        assert!(!runs_on_task_worker(&Job::Find(request("a.pdf"), "x".into())));
+        assert!(!runs_on_task_worker(&Job::Fields(request("a.pdf"))));
     }
 }

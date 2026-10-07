@@ -7,6 +7,8 @@ publish = false
 [dependencies]
 windows-numerics = "=0.3.1"
 image-webp = "=0.2.4"
+accesskit = "=0.25.1"
+accesskit_windows = "=0.35.1"
 
 [dependencies.ort]
 version = "=2.0.0-rc.13"
@@ -16,7 +18,7 @@ features = ["std", "load-dynamic", "directml", "api-24"]
 [dependencies.windows]
 version = "=0.62.2"
 features = [
-    "Foundation", "Globalization", "Media_Ocr", "Graphics_Imaging", "Storage_Streams",
+    "Foundation", "Globalization", "Media_Ocr", "Graphics_Imaging", "Storage_Streams", "UI_ViewManagement",
     "Win32_Foundation", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm", "Win32_Graphics_Imaging", "Win32_System_Com",
@@ -24,7 +26,8 @@ features = [
     "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant", "Win32_UI_Controls_Dialogs", "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging",
-    "Win32_Storage_FileSystem", "Win32_Storage_Xps", "Win32_System_Ole", "Win32_Security", "Win32_System_DataExchange"
+    "Win32_Storage_FileSystem", "Win32_Storage_Xps", "Win32_System_Ole", "Win32_Security", "Win32_System_DataExchange",
+    "Win32_UI_Controls", "Win32_UI_Input_Pointer", "Win32_UI_Accessibility", "Win32_System_Registry"
 ]
 
 [profile.release]

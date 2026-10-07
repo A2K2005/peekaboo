@@ -1,597 +1,629 @@
-use super::*;
+//! Every user command, its label, icon, shortcut, access key, and when it is
+//! available. The app menu, context menus, toolbar, markup bar, keyboard,
+//! and UI Automation all read this one table.
 
-pub(super) const OPEN: usize = 100;
-pub(super) const EXIT: usize = 101;
-pub(super) const PREVIOUS: usize = 102;
-pub(super) const NEXT: usize = 103;
-pub(super) const FIT: usize = 104;
-pub(super) const ZOOM_IN: usize = 105;
-pub(super) const ZOOM_OUT: usize = 106;
-pub(super) const ROTATE: usize = 107;
-pub(super) const CROP: usize = 108;
-pub(super) const SAVE: usize = 109;
-pub(super) const FLIP: usize = 110;
-pub(super) const UNDO: usize = 111;
-pub(super) const REVERT: usize = 112;
-pub(super) const RESIZE: usize = 113;
-pub(super) const TEXT: usize = 114;
-pub(super) const FIND: usize = 115;
-pub(super) const EXTRACT: usize = 116;
-pub(super) const MERGE: usize = 117;
-pub(super) const DELETE: usize = 118;
-pub(super) const FORM: usize = 119;
-pub(super) const BACKGROUND: usize = 120;
-pub(super) const PRINT: usize = 121;
-pub(super) const BATCH: usize = 122;
-pub(super) const SLIDESHOW: usize = 123;
-pub(super) const INFO: usize = 124;
-pub(super) const BATCH_SELECTED: usize = 125;
-pub(super) const MOVE: usize = 126;
-pub(super) const INSERT: usize = 127;
-pub(super) const TABS: usize = 300;
-pub(super) const SIGN_SAVE: usize = 219;
-pub(super) const SIGN_PLACE: usize = 220;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Command {
+    Open,
+    SaveCopy,
+    ExtractPage,
+    Combine,
+    Print,
+    BatchFolder,
+    BatchSelected,
+    FileInfo,
+    Share,
+    CloseTab,
+    Exit,
+    Undo,
+    Revert,
+    CopyText,
+    Find,
+    Rotate,
+    Flip,
+    Crop,
+    Resize,
+    RemoveBackground,
+    DeletePage,
+    MovePage,
+    InsertPage,
+    Previous,
+    Next,
+    ZoomIn,
+    ZoomOut,
+    Fit,
+    Slideshow,
+    ToggleSidebar,
+    ToggleMarkup,
+    NextTab,
+    PreviousTab,
+    /// Tabs 1 to 8; 8 means the last tab.
+    Tab(u8),
+    NextPane,
+    PreviousPane,
+    Draw,
+    Highlight,
+    Underline,
+    Strikethrough,
+    Note,
+    TextBox,
+    Rectangle,
+    Ellipse,
+    Arrow,
+    SaveSignature,
+    PlaceSignature,
+    FillForm,
+    ZoomMenu,
+    AppMenu,
+    MoreTools,
+}
+use Command::*;
 
-pub(super) unsafe fn command(hwnd: HWND, id: usize) {
-    if id == OPEN {
-        if let Some(paths) = choose_many(hwnd, false) {
-            add_tabs(hwnd, &paths);
-            if let Some(path) = paths.into_iter().next() {
-                open(hwnd, path);
-            }
-        }
-        return;
+pub(super) struct Info {
+    /// Accessible name and tooltip text.
+    pub(super) label: &'static str,
+    /// Menu text. `&` marks the access key.
+    pub(super) menu: &'static str,
+    pub(super) glyph: Option<u16>,
+    /// Access key on the toolbar (scope root) or markup bar (scope markup).
+    pub(super) key: Option<char>,
+}
+
+const fn i(label: &'static str, menu: &'static str, glyph: Option<u16>, key: Option<char>) -> Info {
+    Info { label, menu, glyph, key }
+}
+
+/// Glyphs exist in both Segoe MDL2 Assets and Segoe Fluent Icons.
+/// https://learn.microsoft.com/windows/apps/design/style/segoe-ui-symbol-font
+pub(super) mod glyph {
+    pub(in crate::ui) const OPEN_PANE: u16 = 0xE8A0;
+    pub(in crate::ui) const ZOOM: u16 = 0xE71E;
+    pub(in crate::ui) const EDIT: u16 = 0xE70F;
+    pub(in crate::ui) const ROTATE: u16 = 0xE7AD;
+    pub(in crate::ui) const SHARE: u16 = 0xE72D;
+    pub(in crate::ui) const SEARCH: u16 = 0xE721;
+    pub(in crate::ui) const MORE: u16 = 0xE712;
+    pub(in crate::ui) const HIGHLIGHT: u16 = 0xE7E6;
+    pub(in crate::ui) const UNDERLINE: u16 = 0xE8DC;
+    pub(in crate::ui) const STRIKETHROUGH: u16 = 0xEDE0;
+    pub(in crate::ui) const COMMENT: u16 = 0xE90A;
+    pub(in crate::ui) const INKING: u16 = 0xE76D;
+    pub(in crate::ui) const CROP: u16 = 0xE7A8;
+    pub(in crate::ui) const RESIZE: u16 = 0xE740;
+    pub(in crate::ui) const SIGNATURE: u16 = 0xEF3F;
+    pub(in crate::ui) const FONT_SIZE: u16 = 0xE8E9;
+    pub(in crate::ui) const SQUARE: u16 = 0xE739;
+    pub(in crate::ui) const CIRCLE: u16 = 0xEA3A;
+    pub(in crate::ui) const ARROW: u16 = 0xE72A;
+    pub(in crate::ui) const SAVE: u16 = 0xE74E;
+    pub(in crate::ui) const DOCUMENT: u16 = 0xE8A5;
+    pub(in crate::ui) const ERASE: u16 = 0xE75C;
+    pub(in crate::ui) const FLIP: u16 = 0xE8AB;
+    pub(in crate::ui) const FOLDER_OPEN: u16 = 0xE838;
+    pub(in crate::ui) const PRINT: u16 = 0xE749;
+    pub(in crate::ui) const CHECK: u16 = 0xE73E;
+    pub(in crate::ui) const CHEVRON_RIGHT: u16 = 0xE76C;
+    pub(in crate::ui) const MINIMIZE: u16 = 0xE921;
+    pub(in crate::ui) const MAXIMIZE: u16 = 0xE922;
+    pub(in crate::ui) const RESTORE: u16 = 0xE923;
+    pub(in crate::ui) const CLOSE: u16 = 0xE8BB;
+    pub(in crate::ui) const ADD: u16 = 0xE710;
+    pub(in crate::ui) const CANCEL: u16 = 0xE711;
+    #[cfg(test)]
+    pub(in crate::ui) const ALL: &[u16] = &[
+        OPEN_PANE, ZOOM, EDIT, ROTATE, SHARE, SEARCH, MORE, HIGHLIGHT, UNDERLINE, STRIKETHROUGH, COMMENT,
+        INKING, CROP, RESIZE, SIGNATURE, FONT_SIZE, SQUARE, CIRCLE, ARROW, SAVE, DOCUMENT, ERASE, FLIP,
+        FOLDER_OPEN, PRINT, CHECK, CHEVRON_RIGHT, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, ADD, CANCEL,
+    ];
+}
+
+pub(super) fn info(command: Command) -> Info {
+    use glyph::*;
+    match command {
+        Open => i("Open", "&Open...", Some(FOLDER_OPEN), Some('P')),
+        SaveCopy => i("Save a copy", "Save a &copy...", Some(SAVE), None),
+        ExtractPage => i("Extract this page", "Extract this pa&ge...", None, None),
+        Combine => i("Combine with another PDF", "Co&mbine with another PDF...", None, None),
+        Print => i("Print", "&Print...", Some(PRINT), None),
+        BatchFolder => i("Convert all images in this folder", "Convert &folder...", None, None),
+        BatchSelected => i("Convert selected images", "Convert &selected images...", None, None),
+        FileInfo => i("File information", "File &information", None, None),
+        Share => i("Share", "S&hare", Some(SHARE), Some('H')),
+        CloseTab => i("Close tab", "Close &tab", Some(CANCEL), None),
+        Exit => i("Exit", "E&xit", None, None),
+        Undo => i("Undo", "&Undo", None, None),
+        Revert => i("Revert to opened", "&Revert to opened", None, None),
+        CopyText => i("Copy text", "&Copy text", None, None),
+        Find => i("Search", "&Find...", Some(SEARCH), Some('F')),
+        Rotate => i("Rotate right", "Rotate righ&t", Some(ROTATE), Some('R')),
+        Flip => i("Flip horizontally", "F&lip horizontally", Some(FLIP), Some('L')),
+        Crop => i("Crop", "Cr&op", Some(CROP), Some('C')),
+        Resize => i("Resize", "Re&size...", Some(RESIZE), Some('Z')),
+        RemoveBackground => i("Remove background", "Remove &background...", Some(ERASE), Some('B')),
+        DeletePage => i("Delete page", "&Delete page...", None, None),
+        MovePage => i("Move page", "&Move page...", None, None),
+        InsertPage => i("Insert blank page", "&Insert blank page", None, None),
+        Previous => i("Previous", "&Previous", None, None),
+        Next => i("Next", "&Next", None, None),
+        ZoomIn => i("Zoom in", "Zoom &in", None, None),
+        ZoomOut => i("Zoom out", "Zoom &out", None, None),
+        Fit => i("Fit to window", "&Fit to window", None, None),
+        Slideshow => i("Slideshow", "Slide&show", None, None),
+        ToggleSidebar => i("Sidebar", "Si&debar", Some(OPEN_PANE), Some('S')),
+        ToggleMarkup => i("Markup", "&Markup bar", Some(EDIT), Some('M')),
+        NextTab => i("Next tab", "Next &tab", None, None),
+        PreviousTab => i("Previous tab", "Previous t&ab", None, None),
+        Tab(_) => i("Go to tab", "Go to tab", None, None),
+        NextPane => i("Next pane", "Next pane", None, None),
+        PreviousPane => i("Previous pane", "Previous pane", None, None),
+        Draw => i("Draw", "&Draw", Some(INKING), Some('D')),
+        Highlight => i("Highlight", "&Highlight", Some(HIGHLIGHT), Some('H')),
+        Underline => i("Underline", "&Underline", Some(UNDERLINE), Some('U')),
+        Strikethrough => i("Strikethrough", "Stri&kethrough", Some(STRIKETHROUGH), Some('K')),
+        Note => i("Note", "&Note...", Some(COMMENT), Some('N')),
+        TextBox => i("Text box", "&Text box...", Some(FONT_SIZE), Some('T')),
+        Rectangle => i("Rectangle", "&Rectangle", Some(SQUARE), Some('P')),
+        Ellipse => i("Ellipse", "&Ellipse", Some(CIRCLE), Some('E')),
+        Arrow => i("Arrow", "&Arrow", Some(ARROW), Some('A')),
+        SaveSignature => i("Save drawing as signature", "Sa&ve drawing as signature", Some(SAVE), Some('V')),
+        PlaceSignature => i("Sign", "Place &signature", Some(SIGNATURE), Some('G')),
+        FillForm => i("Fill a form field", "Fill a f&orm field...", Some(DOCUMENT), Some('F')),
+        ZoomMenu => i("Zoom", "&Zoom", Some(ZOOM), Some('Z')),
+        AppMenu => i("More", "More", Some(MORE), Some('O')),
+        MoreTools => i("More tools", "More tools", Some(MORE), Some('O')),
     }
-    if id == EXIT {
-        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-        return;
-    }
-    if id == PREVIOUS || id == NEXT {
-        navigate(hwnd, if id == PREVIOUS { -1 } else { 1 });
-        return;
-    }
-    let snapshot = STATE.with(|cell| {
-        cell.borrow().as_ref().and_then(|s| {
-            if s.pending || (s.render_failed && !matches!(id, UNDO | REVERT)) || s.frame.is_none() {
-                return None;
-            }
-            Some((
-                Request {
-                    generation: s.generation,
-                    path: s.path.clone()?,
-                    page: s.page,
-                    delta: 0,
-                    width: 1,
-                    height: 1,
-                    sessions: s.sessions.clone(),
-                },
-                s.frame.as_ref()?.source_width,
-                s.frame.as_ref()?.source_height,
-                s.frame.as_ref()?.page_count,
-            ))
-        })
-    });
-    let Some((request, width, height, count)) = snapshot else {
-        return;
+}
+
+/// Toolbar buttons, PRD order. Overflow hides them in `TOOLBAR_DROP` order.
+pub(super) const TOOLBAR: &[Command] = &[ZoomMenu, ToggleMarkup, Rotate, Share, Find];
+/// Overflow order from the UX spec: Share first, then Rotate.
+pub(super) const TOOLBAR_DROP: &[Command] = &[Share, Rotate, ZoomMenu, ToggleMarkup, Find];
+pub(super) const MARKUP_TOOLS: &[Command] = &[
+    Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow, PlaceSignature,
+    SaveSignature, FillForm, Crop, Resize, Flip, RemoveBackground,
+];
+
+pub(super) fn annotation(command: Command) -> Option<crate::model::AnnotationKind> {
+    use crate::model::AnnotationKind as K;
+    Some(match command {
+        Draw => K::Ink,
+        Highlight => K::Highlight,
+        Underline => K::Underline,
+        Strikethrough => K::Strikeout,
+        Note => K::Note,
+        TextBox => K::Text,
+        Rectangle => K::Rectangle,
+        Ellipse => K::Ellipse,
+        Arrow => K::Arrow,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Chord {
+    pub(super) key: u16,
+    pub(super) ctrl: bool,
+    pub(super) shift: bool,
+    pub(super) alt: bool,
+}
+const fn ctrl(key: u16) -> Chord {
+    Chord { key, ctrl: true, shift: false, alt: false }
+}
+const fn ctrl_shift(key: u16) -> Chord {
+    Chord { key, ctrl: true, shift: true, alt: false }
+}
+const fn plain(key: u16) -> Chord {
+    Chord { key, ctrl: false, shift: false, alt: false }
+}
+const fn shift(key: u16) -> Chord {
+    Chord { key, ctrl: false, shift: true, alt: false }
+}
+
+/// Keyboard shortcuts from docs/research/ux-teardown.md, "Consolidated
+/// keyboard shortcuts". The first chord per command is the one menus show.
+pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
+    (ctrl(0x4F), Open),
+    (ctrl(0x54), Open),
+    (ctrl(0x57), CloseTab),
+    (ctrl(0x73), CloseTab),
+    (ctrl(0x09), NextTab),
+    (ctrl_shift(0x09), PreviousTab),
+    (ctrl(0x31), Tab(0)),
+    (ctrl(0x32), Tab(1)),
+    (ctrl(0x33), Tab(2)),
+    (ctrl(0x34), Tab(3)),
+    (ctrl(0x35), Tab(4)),
+    (ctrl(0x36), Tab(5)),
+    (ctrl(0x37), Tab(6)),
+    (ctrl(0x38), Tab(7)),
+    (ctrl(0x39), Tab(8)),
+    (ctrl_shift(0x53), SaveCopy),
+    (ctrl(0x53), SaveCopy),
+    (ctrl(0x50), Print),
+    (ctrl(0x46), Find),
+    (ctrl(0x43), CopyText),
+    (ctrl_shift(0x43), CopyText),
+    (ctrl(0x5A), Undo),
+    (ctrl(0xBB), ZoomIn),
+    (ctrl(0x6B), ZoomIn),
+    (ctrl(0xBD), ZoomOut),
+    (ctrl(0x6D), ZoomOut),
+    (ctrl(0x30), Fit),
+    (ctrl(0x60), Fit),
+    (plain(0x74), Slideshow),
+    (ctrl_shift(0x42), ToggleSidebar),
+    (ctrl_shift(0x41), ToggleMarkup),
+    (ctrl(0x45), ToggleMarkup),
+    (plain(0x75), NextPane),
+    (shift(0x75), PreviousPane),
+    (ctrl_shift(0x48), Highlight),
+    (ctrl(0x55), Underline),
+    (ctrl(0x52), Rotate),
+    (ctrl(0xDD), Rotate),
+    (ctrl(0x4B), Crop),
+    (ctrl_shift(0x52), Resize),
+    (ctrl_shift(0x4B), RemoveBackground),
+    (plain(0x2E), DeletePage),
+    (ctrl_shift(0x4E), InsertPage),
+    (Chord { key: 0x0D, ctrl: false, shift: false, alt: true }, FileInfo),
+    (plain(0x25), Previous),
+    (plain(0x21), Previous),
+    (plain(0x27), Next),
+    (plain(0x22), Next),
+];
+
+pub(super) fn lookup(chord: Chord) -> Option<Command> {
+    SHORTCUTS.iter().find(|(c, _)| *c == chord).map(|(_, command)| *command)
+}
+
+pub(super) fn shortcut_text(command: Command) -> Option<String> {
+    let (chord, _) = SHORTCUTS.iter().find(|(_, c)| *c == command)?;
+    let key = match chord.key {
+        0x09 => "Tab".to_string(),
+        0x0D => "Enter".into(),
+        0x21 => "Page Up".into(),
+        0x22 => "Page Down".into(),
+        0x25 => "Left".into(),
+        0x27 => "Right".into(),
+        0x2E => "Delete".into(),
+        0x60 => "Num 0".into(),
+        0x6B => "Num +".into(),
+        0x6D => "Num -".into(),
+        0x70..=0x7B => format!("F{}", chord.key - 0x6F),
+        0xBB => "=".into(),
+        0xBD => "-".into(),
+        0xDD => "]".into(),
+        key => char::from(key as u8).to_string(),
     };
-    let pdf = is_pdf(&request.path);
-    if id == INFO {
-        let bytes = std::fs::metadata(&request.path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let text=wide(&format!("{}\n\nSource dimensions: {width} × {height}\nPages: {count}\nFile size: {bytes} bytes\n\nEdits are kept in memory until you save a new copy.",request.path.display()));
-        MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            w!("File information"),
-            MB_OK,
-        );
-        return;
-    }
-    if id == SLIDESHOW {
-        STATE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut() {
-                state.slideshow = if state.slideshow.is_some() {
-                    None
-                } else {
-                    Some(Instant::now() + Duration::from_secs(3))
-                };
-                state.status = "Slideshow advances every 3 seconds. Escape stops.".into();
-            }
-        });
-        return;
-    }
-    if id == PRINT {
-        match crate::printing::choose(hwnd, count) {
-            Ok(Some(job)) => {
-                let cancel = job.cancellation();
-                STATE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        if state.exporting {
-                            return;
-                        }
-                        state.exporting = true;
-                        state.cancel = Some(cancel);
-                        state.status = "Printing... Escape cancels.".into();
-                        if state.sender.send(Job::Print(request, job)).is_err() {
-                            state.exporting = false;
-                            state.status = "The print worker stopped.".into();
-                        }
-                    }
-                });
-            }
-            Ok(None) => {}
-            Err(error) => {
-                let text = wide(&error);
-                MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), w!("Print"), MB_OK);
-            }
-        }
-        let _ = InvalidateRect(Some(hwnd), None, false);
-        return;
-    }
-    if id == BATCH || id == BATCH_SELECTED {
-        let selected = if id == BATCH_SELECTED {
-            let Some(paths) = choose_many(hwnd, true) else {
-                return;
-            };
-            if paths.is_empty() {
-                return;
-            }
-            Some(paths)
-        } else {
-            None
-        };
-        if pdf {
-            return;
-        }
-        let Some(values) = input(
-            hwnd,
-            "Batch convert image folder",
-            &[(
-                "Output format: png, jpg, tif, bmp, pdf, or webp",
-                "png".into(),
-            )],
-        ) else {
-            return;
-        };
-        let extension = values
-            .first()
-            .map(|v| v.trim().to_lowercase())
-            .unwrap_or_default();
-        if !matches!(
-            extension.as_str(),
-            "png" | "jpg" | "tif" | "bmp" | "pdf" | "webp"
-        ) {
-            return;
-        }
-        let Some(output) = folder(hwnd) else {
-            return;
-        };
-        let question = wide(&if let Some(paths) = &selected {
-            format!("Apply the current image edits to {} selected images and save new copies? Existing files are not overwritten.",paths.len())
-        } else {
-            "Apply the current image edits to every supported image in this folder and save new copies? Existing files are not overwritten.".into()
-        });
-        if MessageBoxW(
-            Some(hwnd),
-            PCWSTR(question.as_ptr()),
-            w!("Batch convert"),
-            MB_YESNO | MB_ICONQUESTION,
-        ) != IDYES
-        {
-            return;
-        }
-        STATE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut() {
-                if state.exporting {
-                    return;
-                }
-                let cancel = Arc::new(AtomicBool::new(false));
-                state.cancel = Some(cancel.clone());
-                state.exporting = true;
-                state.status = "Starting batch conversion...".into();
-                if state
-                    .sender
-                    .send(Job::Batch(request, output, extension, cancel, selected))
-                    .is_err()
-                {
-                    state.exporting = false;
-                    state.status = "The processing worker stopped.".into();
-                }
-            }
-        });
-        let _ = InvalidateRect(Some(hwnd), None, false);
-        return;
-    }
-    if id == BACKGROUND {
-        if pdf {
-            return;
-        }
-        let Some(mut output) = destination(hwnd, false) else {
-            return;
-        };
-        output.set_extension("png");
-        STATE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut() {
-                if state.exporting {
-                    return;
-                }
-                state.exporting = true;
-                state.status = "Removing background on this PC...".into();
-                if state.sender.send(Job::Background(request, output)).is_err() {
-                    state.exporting = false;
-                    state.status = "The processing worker stopped.".into();
-                }
-            }
-        });
-        let _ = InvalidateRect(Some(hwnd), None, false);
-        return;
-    }
-    if (200..=208).contains(&id) || id == SIGN_SAVE || id == SIGN_PLACE {
-        if id == SIGN_SAVE {
-            save_signature(hwnd);
-            return;
-        }
-        let signature = if id == SIGN_PLACE {
-            match load_signature() {
-                Ok(points) => Some(points),
-                Err(error) => {
-                    let error = wide(&error);
-                    MessageBoxW(Some(hwnd), PCWSTR(error.as_ptr()), w!("Signature"), MB_OK);
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-        let kind = match id {
-            201 => AnnotationKind::Highlight,
-            202 => AnnotationKind::Underline,
-            203 => AnnotationKind::Strikeout,
-            204 => AnnotationKind::Note,
-            205 => AnnotationKind::Rectangle,
-            206 => AnnotationKind::Ellipse,
-            207 => AnnotationKind::Arrow,
-            208 => AnnotationKind::Text,
-            _ => AnnotationKind::Ink,
-        };
-        let text = if matches!(kind, AnnotationKind::Text | AnnotationKind::Note) {
-            let Some(values) = input(hwnd, "PDF annotation", &[("Text", String::new())]) else {
-                return;
-            };
-            values.first().cloned().unwrap_or_default()
-        } else {
-            String::new()
-        };
-        STATE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut() {
-                state.crop = false;
-                state.markup = Some(kind);
-                state.markup_text = text;
-                state.signature = signature;
-                state.status =
-                    "Drag on the PDF to place markup. Escape returns to navigation.".into();
-            }
-        });
-        let _ = InvalidateRect(Some(hwnd), None, false);
-        return;
-    }
-    if matches!(id, SAVE | EXTRACT | MERGE) {
-        if id != SAVE && !pdf {
-            return;
-        }
-        let other = if id == MERGE {
-            let Some(path) = choose(hwnd) else {
-                return;
-            };
-            Some(path)
-        } else {
-            None
-        };
-        let Some(output) = destination(hwnd, pdf) else {
-            return;
-        };
-        STATE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut() {
-                if state.exporting {
-                    return;
-                }
-                state.exporting = true;
-                state.status = "Saving a new copy...".into();
-                if state
-                    .sender
-                    .send(Job::Save(request, output, id, other))
-                    .is_err()
-                {
-                    state.exporting = false;
-                    state.status = "The save worker stopped.".into();
-                }
-            }
-        });
-        return;
-    }
-    if id == TEXT || id == FIND || id == FORM {
-        if !pdf && id != TEXT {
-            return;
-        }
-        let job = if id == FORM {
-            Job::Fields(request)
-        } else if id == TEXT {
-            Job::Text(request)
-        } else {
-            let Some(values) = input(hwnd, "Find text in PDF", &[("Text to find", String::new())])
-            else {
-                return;
-            };
-            let Some(query) = values.first().filter(|v| !v.trim().is_empty()) else {
-                return;
-            };
-            Job::Find(request, query.clone())
-        };
-        STATE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut() {
-                let _ = state.sender.send(job);
-                state.status = "Reading text on this PC...".into();
-            }
-        });
-        let _ = InvalidateRect(Some(hwnd), None, false);
-        return;
-    }
-    let mut resize = None;
-    let mut page_destination = None;
-    if id == MOVE {
-        if !pdf {
-            return;
-        }
-        let Some(values) = input(
-            hwnd,
-            "Move PDF page",
-            &[("New page number (1-based)", (request.page + 1).to_string())],
-        ) else {
-            return;
-        };
-        page_destination = values
-            .first()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|v| *v > 0 && *v <= count)
-            .map(|v| v - 1);
-        if page_destination.is_none() {
-            MessageBoxW(
-                Some(hwnd),
-                w!("Enter a page number within this document."),
-                w!("Invalid page number"),
-                MB_OK,
-            );
-            return;
+    let mut text = String::new();
+    for (on, name) in [(chord.ctrl, "Ctrl+"), (chord.shift, "Shift+"), (chord.alt, "Alt+")] {
+        if on {
+            text.push_str(name);
         }
     }
-    if id == RESIZE {
-        if pdf {
-            return;
+    Some(text + &key)
+}
+
+/// Snapshot of app state that decides which commands are available.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Ctx {
+    pub(super) has_frame: bool,
+    pub(super) pending: bool,
+    pub(super) failed: bool,
+    pub(super) pdf: bool,
+    pub(super) saving: bool,
+    pub(super) can_previous: bool,
+    pub(super) can_next: bool,
+    pub(super) tabs: usize,
+    pub(super) sidebar_open: bool,
+    pub(super) markup_open: bool,
+    pub(super) crop: bool,
+    pub(super) tool: Option<Command>,
+}
+
+/// Rules match the pre-split shell (`update_controls`), plus the new UI commands.
+pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
+    let ready = x.has_frame && !x.pending && !x.failed;
+    match command {
+        Open | Exit | ToggleSidebar | ToggleMarkup | AppMenu | MoreTools | NextPane | PreviousPane => true,
+        NextTab | PreviousTab => x.tabs > 1,
+        Tab(_) | CloseTab => x.tabs > 0,
+        Undo | Revert => x.has_frame && !x.pending,
+        // The Windows share sheet arrives with W1-D in wave 2.
+        Share => false,
+        _ if !ready => false,
+        Flip | Resize | RemoveBackground | BatchFolder | BatchSelected => !x.pdf,
+        Find | ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage => x.pdf,
+        Previous => x.can_previous,
+        Next => x.can_next,
+        SaveCopy | Print => !x.saving,
+        _ => true,
+    }
+}
+
+pub(super) fn checked(command: Command, x: &Ctx) -> Option<bool> {
+    match command {
+        ToggleSidebar => Some(x.sidebar_open),
+        ToggleMarkup => Some(x.markup_open),
+        Crop => Some(x.crop),
+        c if annotation(c).is_some() || c == PlaceSignature => Some(x.tool == Some(c)),
+        _ => None,
+    }
+}
+
+/// What a menu item returns: a command, or the index of a choice list.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Pick {
+    Command(Command),
+    Index(usize),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct MenuItem {
+    pub(super) label: String,
+    pub(super) shortcut: String,
+    pub(super) pick: Option<Pick>,
+    pub(super) enabled: bool,
+    pub(super) checked: Option<bool>,
+    pub(super) children: Vec<MenuItem>,
+}
+
+impl MenuItem {
+    pub(super) fn separator() -> Self {
+        Self { label: String::new(), shortcut: String::new(), pick: None, enabled: false, checked: None, children: Vec::new() }
+    }
+    pub(super) fn is_separator(&self) -> bool {
+        self.pick.is_none() && self.children.is_empty()
+    }
+    /// A plain choice. `label` is shown as is, so `&` is doubled.
+    pub(super) fn choice(label: &str, index: usize) -> Self {
+        Self {
+            label: label.replace('&', "&&"),
+            shortcut: String::new(),
+            pick: Some(Pick::Index(index)),
+            enabled: true,
+            checked: None,
+            children: Vec::new(),
         }
-        let Some(values) = input(
-            hwnd,
-            "Resize image",
+    }
+    fn for_command(command: Command, x: &Ctx) -> Self {
+        Self {
+            label: info(command).menu.into(),
+            shortcut: shortcut_text(command).unwrap_or_default(),
+            pick: Some(Pick::Command(command)),
+            enabled: enabled(command, x),
+            checked: checked(command, x),
+            children: Vec::new(),
+        }
+    }
+    fn submenu(label: &str, children: Vec<MenuItem>) -> Self {
+        Self { label: label.into(), shortcut: String::new(), pick: None, enabled: true, checked: None, children }
+    }
+}
+
+/// `None` in a list is a separator.
+fn items(list: &[Option<Command>], x: &Ctx) -> Vec<MenuItem> {
+    list.iter()
+        .map(|c| c.map_or_else(MenuItem::separator, |c| MenuItem::for_command(c, x)))
+        .collect()
+}
+
+/// The "More" menu exposes every command. Toolbar buttons hidden by
+/// overflow come first.
+pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
+    let mut menu = items(&overflow.iter().copied().map(Some).collect::<Vec<_>>(), x);
+    if !menu.is_empty() {
+        menu.push(MenuItem::separator());
+    }
+    menu.push(MenuItem::submenu(
+        "&File",
+        items(
             &[
-                ("Width in pixels", width.to_string()),
-                ("Height in pixels (blank keeps aspect ratio)", String::new()),
+                Some(Open), Some(SaveCopy), Some(ExtractPage), Some(Combine), None, Some(Print), Some(Share), None,
+                Some(BatchFolder), Some(BatchSelected), None, Some(FileInfo), Some(CloseTab), Some(Exit),
             ],
-        ) else {
-            return;
+            x,
+        ),
+    ));
+    menu.push(MenuItem::submenu(
+        "&Edit",
+        items(
+            &[
+                Some(Undo), Some(Revert), None, Some(CopyText), Some(Find), None, Some(Rotate), Some(Flip),
+                Some(Crop), Some(Resize), Some(RemoveBackground), None, Some(DeletePage), Some(MovePage),
+                Some(InsertPage),
+            ],
+            x,
+        ),
+    ));
+    menu.push(MenuItem::submenu(
+        "&View",
+        items(
+            &[
+                Some(Previous), Some(Next), None, Some(ZoomIn), Some(ZoomOut), Some(Fit), None, Some(ToggleSidebar),
+                Some(ToggleMarkup), Some(Slideshow), None, Some(NextTab), Some(PreviousTab),
+            ],
+            x,
+        ),
+    ));
+    menu.push(MenuItem::submenu(
+        "Mar&kup",
+        items(
+            &[
+                Some(Draw), Some(Highlight), Some(Underline), Some(Strikethrough), Some(Note), Some(TextBox),
+                Some(Rectangle), Some(Ellipse), Some(Arrow), None, Some(SaveSignature), Some(PlaceSignature),
+                Some(FillForm),
+            ],
+            x,
+        ),
+    ));
+    menu
+}
+
+/// Right-click on the document. Only commands that apply to this file show.
+pub(super) fn document_menu(x: &Ctx) -> Vec<MenuItem> {
+    let list = [
+        Some(CopyText), Some(Find), None, Some(Highlight), Some(Note), Some(TextBox), Some(PlaceSignature),
+        Some(FillForm), None, Some(Rotate), Some(Crop), Some(Flip), Some(Resize), Some(RemoveBackground), None,
+        Some(DeletePage), Some(InsertPage), Some(MovePage), None, Some(ZoomIn), Some(ZoomOut), Some(Fit), None,
+        Some(SaveCopy), Some(Print), Some(FileInfo),
+    ];
+    let mut menu: Vec<MenuItem> = Vec::new();
+    for item in items(&list, x) {
+        if item.is_separator() {
+            if menu.last().is_some_and(|m| !m.is_separator()) {
+                menu.push(item);
+            }
+        } else if item.enabled {
+            menu.push(item);
+        }
+    }
+    if menu.last().is_some_and(MenuItem::is_separator) {
+        menu.pop();
+    }
+    menu
+}
+
+pub(super) fn zoom_menu(x: &Ctx) -> Vec<MenuItem> {
+    items(&[Some(ZoomIn), Some(ZoomOut), Some(Fit)], x)
+}
+
+pub(super) fn tab_menu(x: &Ctx) -> Vec<MenuItem> {
+    items(&[Some(CloseTab), None, Some(NextTab), Some(PreviousTab)], x)
+}
+
+pub(super) fn markup_overflow_menu(overflow: &[Command], x: &Ctx) -> Vec<MenuItem> {
+    items(&overflow.iter().copied().map(Some).collect::<Vec<_>>(), x)
+}
+
+/// The access key marked with `&`, upper-cased.
+pub(super) fn access_key(label: &str) -> Option<char> {
+    let mut chars = label.chars();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            return chars.next().map(|c| c.to_ascii_uppercase());
+        }
+    }
+    None
+}
+
+pub(super) const ALL: &[Command] = &[
+    Open, SaveCopy, ExtractPage, Combine, Print, BatchFolder, BatchSelected, FileInfo, Share, CloseTab, Exit, Undo,
+    Revert, CopyText, Find, Rotate, Flip, Crop, Resize, RemoveBackground, DeletePage, MovePage, InsertPage,
+    Previous, Next, ZoomIn, ZoomOut, Fit, Slideshow, ToggleSidebar, ToggleMarkup, NextTab, PreviousTab, Tab(0),
+    NextPane, PreviousPane, Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow,
+    SaveSignature, PlaceSignature, FillForm, ZoomMenu, AppMenu, MoreTools,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flatten(menu: &[MenuItem]) -> Vec<Command> {
+        let command = |m: &MenuItem| match m.pick {
+            Some(Pick::Command(c)) => Some(c),
+            _ => None,
         };
-        let new_width = values.first().and_then(|v| v.trim().parse::<u32>().ok());
-        if let Some(new_width) = new_width.filter(|v| *v > 0 && *v <= 100000) {
-            let new_height = if values.get(1).is_none_or(|v| v.trim().is_empty()) {
-                ((height as u64 * new_width as u64 + width.max(1) as u64 / 2) / width.max(1) as u64)
-                    .max(1) as u32
-            } else {
-                values[1].trim().parse::<u32>().unwrap_or(0)
-            };
-            if new_height > 0 && (new_width as u64 * new_height as u64) <= 200_000_000 {
-                resize = Some(ImageEdit::Resize {
-                    width: new_width,
-                    height: new_height,
-                });
-            }
-        }
-        if resize.is_none() {
-            MessageBoxW(
-                Some(hwnd),
-                w!("Enter positive pixel dimensions within 200 million pixels."),
-                w!("Invalid size"),
-                MB_OK | MB_ICONERROR,
-            );
-            return;
-        }
+        menu.iter().flat_map(|m| command(m).into_iter().chain(flatten(&m.children))).collect()
     }
-    if id == DELETE && (!pdf || count <= 1 || MessageBoxW(Some(hwnd),w!("Delete this page from the working copy? The original stays unchanged until you save a new copy."),w!("Delete page"),MB_YESNO|MB_ICONQUESTION) != IDYES) { return; }
-    STATE.with(|cell| { let mut value = cell.borrow_mut(); let Some(state) = value.as_mut() else { return; };
-        if matches!(id,FIT|ZOOM_IN|ZOOM_OUT) { state.zoom = match id { FIT => 1.0, ZOOM_IN => (state.zoom * 1.4).min(8.0), _ => (state.zoom / 1.4).max(0.25) }; state.pan=(0.0,0.0); schedule(hwnd,state,0); return; }
-        if id == CROP {state.markup=None;state.crop = !state.crop; state.status = if pdf{"Drag a rectangle to crop the page view. This does not redact hidden content. Escape cancels.".into()}else{"Drag a rectangle over the image to crop. Escape cancels.".into()};let _ = InvalidateRect(Some(hwnd),None,false);return;}
-        let edits = state.sessions.entry(request.path).or_default();
-        match id {
-            ROTATE if pdf => edits.pdf.push(PdfEdit::RotateRight { page:state.page }),
-            ROTATE => edits.image.push(ImageEdit::RotateRight),
-            FLIP if !pdf => edits.image.push(ImageEdit::FlipHorizontal),
-            RESIZE => { if let Some(edit) = resize { edits.image.push(edit); } },
-            DELETE => { edits.pdf.push(PdfEdit::Delete { page:state.page }); state.page = state.page.min(count.saturating_sub(2)); },
-            MOVE=>{if let Some(to)=page_destination{edits.pdf.push(PdfEdit::Move{from:state.page,to});state.page=to;}},
-            INSERT if pdf=>{let at=state.page+1;edits.pdf.push(PdfEdit::InsertBlank{at});state.page=at;},
-            UNDO => { if pdf { edits.pdf.pop(); } else { edits.image.pop(); } },
-            REVERT => { edits.pdf.clear(); edits.image.clear(); state.page=0; },
-            _ => return,
-        }
-        edits.dirty = !edits.image.is_empty() || !edits.pdf.is_empty(); state.zoom=1.0; state.pan=(0.0,0.0); schedule(hwnd,state,0);
-    });
-}
 
-pub(super) unsafe fn update_controls(hwnd: HWND) {
-    let Some((ready, pdf, saving, previous, next)) = STATE.with(|cell| {
-        cell.borrow().as_ref().map(|s| {
-            let ready = s.frame.is_some() && !s.pending && !s.render_failed;
-            let pdf = s.path.as_ref().is_some_and(|p| is_pdf(p));
-            (
-                ready,
-                pdf,
-                s.exporting,
-                !pdf || s.page > 0,
-                !pdf || s.frame.as_ref().is_some_and(|f| s.page + 1 < f.page_count),
-            )
-        })
-    }) else {
-        return;
-    };
-    let current = (ready, pdf, saving, previous, next);
-    if CONTROL_STATE.with(|cell| {
-        let mut old = cell.borrow_mut();
-        if *old == Some(current) {
-            true
-        } else {
-            *old = Some(current);
-            false
+    #[test]
+    fn shortcuts_are_unique_and_avoid_windows_reserved_keys() {
+        for (index, (chord, _)) in SHORTCUTS.iter().enumerate() {
+            assert!(!SHORTCUTS[index + 1..].iter().any(|(c, _)| c == chord), "duplicate {chord:?}");
+            assert!(!(chord.ctrl && chord.alt), "Ctrl+Alt acts as AltGr: {chord:?}");
+            assert_ne!(chord.key, 0x79, "F10 belongs to Windows");
+            assert!(!(chord.alt && matches!(chord.key, 0x73 | 0x20 | 0x09)), "{chord:?}");
+            assert!(!(chord.ctrl && chord.key == 0x1B), "Ctrl+Esc belongs to Windows");
         }
-    }) {
-        return;
     }
-    let menu = GetMenu(hwnd);
-    for id in [
-        PREVIOUS,
-        NEXT,
-        FIT,
-        ZOOM_IN,
-        ZOOM_OUT,
-        ROTATE,
-        CROP,
-        SAVE,
-        FLIP,
-        RESIZE,
-        TEXT,
-        FIND,
-        EXTRACT,
-        MERGE,
-        DELETE,
-        FORM,
-        BACKGROUND,
-        PRINT,
-        BATCH,
-        BATCH_SELECTED,
-        MOVE,
-        INSERT,
-        SLIDESHOW,
-        INFO,
-        SIGN_SAVE,
-        SIGN_PLACE,
-        200,
-        201,
-        202,
-        203,
-        204,
-        205,
-        206,
-        207,
-        208,
-    ] {
-        let enabled = ready
-            && match id {
-                FLIP | RESIZE | BACKGROUND | BATCH | BATCH_SELECTED => !pdf,
-                FIND | EXTRACT | MERGE | DELETE | FORM | MOVE | INSERT => pdf,
-                PREVIOUS => previous,
-                NEXT => next,
-                SAVE | PRINT => !saving,
-                _ => true,
-            };
-        if let Ok(button) = GetDlgItem(Some(hwnd), id as i32) {
-            let _ = EnableWindow(button, enabled);
-        }
-        let _ = EnableMenuItem(
-            menu,
-            id as u32,
-            MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED },
-        );
-    }
-}
 
-pub(super) unsafe fn fill_field(hwnd: HWND, generation: u64, fields: Vec<crate::pdf::FormField>) {
-    let fields: Vec<_> = fields
-        .into_iter()
-        .filter(|f| !f.read_only && !matches!(f.kind, crate::pdf::FormFieldKind::Unsupported))
-        .collect();
-    if fields.is_empty() {
-        MessageBoxW(Some(hwnd),w!("No editable supported fields on this page. Use Markup > Text box for a non-form PDF."),w!("Fill a form"),MB_OK);
-        return;
+    #[test]
+    fn shortcut_table_matches_the_ux_spec() {
+        assert_eq!(lookup(ctrl_shift(0x41)), Some(ToggleMarkup));
+        assert_eq!(lookup(ctrl(0x45)), Some(ToggleMarkup));
+        assert_eq!(lookup(ctrl(0x57)), Some(CloseTab));
+        assert_eq!(lookup(ctrl(0x09)), Some(NextTab));
+        assert_eq!(lookup(ctrl(0x31)), Some(Tab(0)));
+        assert_eq!(lookup(ctrl(0x38)), Some(Tab(7)));
+        assert_eq!(lookup(ctrl(0x39)), Some(Tab(8)));
+        assert_eq!(lookup(ctrl_shift(0x42)), Some(ToggleSidebar));
+        assert_eq!(lookup(plain(0x25)), Some(Previous));
+        assert_eq!(lookup(ctrl(0x41)), None);
+        assert_eq!(shortcut_text(SaveCopy).as_deref(), Some("Ctrl+Shift+S"));
+        assert_eq!(shortcut_text(ZoomIn).as_deref(), Some("Ctrl+="));
+        assert_eq!(shortcut_text(Slideshow).as_deref(), Some("F5"));
+        assert_eq!(shortcut_text(FileInfo).as_deref(), Some("Alt+Enter"));
     }
-    let Ok(menu) = CreatePopupMenu() else {
-        return;
-    };
-    for (index, field) in fields.iter().enumerate() {
-        let text = wide(&format!(
-            "{}: {}",
-            if field.name.is_empty() {
-                "Unnamed field"
-            } else {
-                &field.name
-            },
-            field.value
-        ));
-        let _ = AppendMenuW(menu, MF_STRING, index + 1, PCWSTR(text.as_ptr()));
+
+    #[test]
+    fn app_menu_exposes_every_command() {
+        let everything = Ctx { has_frame: true, tabs: 2, ..Default::default() };
+        let listed = flatten(&app_menu(&everything, &[]));
+        // Chrome commands open menus or move focus; tab numbers are keyboard-only.
+        let not_listed = [ZoomMenu, AppMenu, MoreTools, NextPane, PreviousPane, Tab(0)];
+        for command in ALL {
+            assert!(listed.contains(command) || not_listed.contains(command), "{command:?} missing");
+        }
     }
-    let mut point = POINT::default();
-    let _ = GetCursorPos(&mut point);
-    let chosen = TrackPopupMenu(
-        menu,
-        TPM_RETURNCMD | TPM_NONOTIFY,
-        point.x,
-        point.y,
-        None,
-        hwnd,
-        None,
-    )
-    .0;
-    let _ = DestroyMenu(menu);
-    let Some(field) = fields
-        .get(chosen.saturating_sub(1) as usize)
-        .filter(|_| chosen > 0)
-    else {
-        return;
-    };
-    let label = if matches!(field.kind, crate::pdf::FormFieldKind::Checkbox) {
-        "Checked: true or false"
-    } else {
-        &field.name
-    };
-    let Some(values) = input(hwnd, "Fill PDF field", &[(label, field.value.clone())]) else {
-        return;
-    };
-    let Some(value) = values.first() else {
-        return;
-    };
-    if matches!(field.kind, crate::pdf::FormFieldKind::Checkbox)
-        && value != "true"
-        && value != "false"
-    {
-        MessageBoxW(
-            Some(hwnd),
-            w!("Enter true or false for this checkbox."),
-            w!("Invalid value"),
-            MB_OK,
-        );
-        return;
+
+    #[test]
+    fn every_command_has_a_keyboard_path() {
+        for command in ALL {
+            let i = info(*command);
+            let keyboard = shortcut_text(*command).is_some() || access_key(i.menu).is_some() || i.key.is_some();
+            assert!(keyboard, "{command:?} has no shortcut or access key");
+            assert!(!i.label.is_empty() && !i.label.contains('\u{2014}'));
+        }
     }
-    STATE.with(|cell| {
-        if let Some(state) = cell.borrow_mut().as_mut() {
-            if state.generation != generation {
-                return;
-            }
-            if let Some(path) = state.path.clone() {
-                let edits = state.sessions.entry(path).or_default();
-                edits.pdf.push(PdfEdit::FillField {
-                    page: field.page,
-                    annotation_index: field.annotation_index,
-                    value: value.clone(),
-                });
-                edits.dirty = true;
-                schedule(hwnd, state, 0);
+
+    #[test]
+    fn access_keys_are_unique_within_each_submenu() {
+        let x = Ctx::default();
+        for menu in app_menu(&x, &[]) {
+            let keys: Vec<_> = menu.children.iter().filter_map(|m| access_key(&m.label)).collect();
+            for (n, key) in keys.iter().enumerate() {
+                assert!(!keys[n + 1..].contains(key), "{} reuses {key}", menu.label);
             }
         }
-    });
+        let top: Vec<_> = app_menu(&x, &[]).iter().filter_map(|m| access_key(&m.label)).collect();
+        assert_eq!(top, vec!['F', 'E', 'V', 'K']);
+    }
+
+    #[test]
+    fn toolbar_and_markup_access_keys_do_not_collide_in_their_scope() {
+        let root: Vec<_> = [ToggleSidebar, AppMenu].iter().chain(TOOLBAR).filter_map(|c| info(*c).key).collect();
+        let markup: Vec<_> = MARKUP_TOOLS.iter().chain([&MoreTools]).filter_map(|c| info(*c).key).collect();
+        for keys in [root, markup] {
+            for (n, key) in keys.iter().enumerate() {
+                assert!(!keys[n + 1..].contains(key), "{key} repeats");
+            }
+        }
+    }
+
+    #[test]
+    fn availability_follows_document_type_and_state() {
+        let pdf = Ctx { has_frame: true, pdf: true, tabs: 1, can_next: true, ..Default::default() };
+        assert!(enabled(DeletePage, &pdf) && !enabled(Resize, &pdf) && enabled(Next, &pdf) && !enabled(Previous, &pdf));
+        let image = Ctx { pdf: false, ..pdf };
+        assert!(!enabled(DeletePage, &image) && enabled(Resize, &image));
+        let busy = Ctx { pending: true, ..pdf };
+        assert!(!enabled(Rotate, &busy) && !enabled(Undo, &busy) && enabled(Open, &busy));
+        let failed = Ctx { failed: true, ..pdf };
+        assert!(!enabled(Rotate, &failed) && enabled(Undo, &failed));
+        assert!(!enabled(NextTab, &pdf) && enabled(CloseTab, &pdf));
+        let empty = Ctx::default();
+        assert!(enabled(Open, &empty) && !enabled(SaveCopy, &empty) && !enabled(CloseTab, &empty));
+    }
+
+    #[test]
+    fn document_menu_lists_only_applicable_commands_without_stray_separators() {
+        let image = Ctx { has_frame: true, tabs: 1, ..Default::default() };
+        let menu = document_menu(&image);
+        let commands = flatten(&menu);
+        assert!(commands.contains(&Resize) && !commands.contains(&DeletePage));
+        assert!(!menu.first().unwrap().is_separator() && !menu.last().unwrap().is_separator());
+        assert!(menu.windows(2).all(|w| !(w[0].is_separator() && w[1].is_separator())));
+        assert!(document_menu(&Ctx::default()).is_empty());
+    }
 }

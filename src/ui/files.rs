@@ -1,4 +1,19 @@
-use super::*;
+//! Windows file dialogs, the clipboard, and the saved signature.
+use super::{app::with_state, sheet, worker::is_pdf};
+use crate::model::{AnnotationKind, ImageEdit, PdfEdit};
+use std::path::PathBuf;
+use windows::{
+    core::*,
+    Win32::{
+        Foundation::*,
+        System::Com::CoTaskMemFree,
+        UI::{Controls::Dialogs::*, Shell::*},
+    },
+};
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
 
 pub(super) unsafe fn choose(hwnd: HWND) -> Option<PathBuf> {
     choose_paths(hwnd, false, false).and_then(|paths| paths.into_iter().next())
@@ -87,7 +102,7 @@ pub(super) unsafe fn destination(hwnd: HWND, pdf: bool) -> Option<PathBuf> {
         });
     }
     if path.exists() {
-        MessageBoxW(Some(hwnd), w!("Choose a new file name. Preview saves a copy and does not overwrite an existing file."), w!("Save a copy"), MB_OK | MB_ICONINFORMATION);
+        sheet::alert(hwnd, "Choose a new name", "Preview saves a copy and never replaces an existing file.");
         None
     } else {
         Some(path)
@@ -128,7 +143,7 @@ pub(super) fn signature_path() -> std::result::Result<PathBuf, String> {
 }
 pub(super) fn load_signature() -> std::result::Result<Vec<[f32; 2]>, String> {
     let text = std::fs::read_to_string(signature_path()?).map_err(|_| {
-        "Draw a signature with Markup > Ink, then choose Save last ink as signature.".to_string()
+        "No saved signature yet. Draw it with the Draw tool, then choose Save drawing as signature.".to_string()
     })?;
     if text.len() > 300000 {
         return Err("The saved signature is invalid.".into());
@@ -159,14 +174,10 @@ pub(super) fn load_signature() -> std::result::Result<Vec<[f32; 2]>, String> {
     Ok(points)
 }
 pub(super) unsafe fn save_signature(hwnd: HWND) {
-    let points = STATE.with(|cell| {
-        cell.borrow()
+    let points = with_state(|s| {
+        s.path
             .as_ref()
-            .and_then(|s| {
-                s.path
-                    .as_ref()
-                    .and_then(|p| s.sessions.get(p).map(|e| (p, e)))
-            })
+            .and_then(|p| s.sessions.get(p).map(|e| (p, e)))
             .and_then(|(path, edits)| {
                 if is_pdf(path) {
                     edits.pdf.iter().rev().find_map(|e| match e {
@@ -188,9 +199,10 @@ pub(super) unsafe fn save_signature(hwnd: HWND) {
                     })
                 }
             })
-    });
+    })
+    .flatten();
     let result = (|| -> std::result::Result<(), String> {
-        let points = points.ok_or("Draw a signature with Markup > Ink first.")?;
+        let points = points.ok_or("Draw your signature with the Draw tool first.")?;
         let left = points.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
         let top = points.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
         let width = points
@@ -217,8 +229,11 @@ pub(super) unsafe fn save_signature(hwnd: HWND) {
         }
         std::fs::write(path, text).map_err(|e| e.to_string())
     })();
-    let text=wide(&match result {Ok(())=>"Signature saved on this PC. Use Markup > Place saved signature, then drag its size and position.".into(),Err(e)=>e});
-    MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), w!("Signature"), MB_OK);
+    let text = match result {
+        Ok(()) => "Your signature is saved on this PC. To place it, choose Sign, then drag where it goes.".into(),
+        Err(e) => e,
+    };
+    sheet::alert(hwnd, "Signature", &text);
 }
 
 pub(super) unsafe fn clipboard(hwnd: HWND, text: &str) -> std::result::Result<(), String> {
@@ -244,4 +259,19 @@ pub(super) unsafe fn clipboard(hwnd: HWND, text: &str) -> std::result::Result<()
     })();
     let _ = CloseClipboard();
     result.map_err(|e| format!("Could not copy text: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_picker_handles_single_and_multiple_files() {
+        assert_eq!(picker_paths(&wide(r"C:\photos\one.png")), vec![PathBuf::from(r"C:\photos\one.png")]);
+        let many: Vec<u16> = r"C:\photos|one.png|two.jpg|".encode_utf16().map(|c| if c == '|' as u16 { 0 } else { c }).collect();
+        assert_eq!(
+            picker_paths(&many),
+            vec![PathBuf::from(r"C:\photos").join("one.png"), PathBuf::from(r"C:\photos").join("two.jpg")]
+        );
+    }
 }
