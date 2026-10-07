@@ -36,6 +36,12 @@ const EMPTY: NodeId = NodeId(12);
 const EMPTY_HEADING: NodeId = NodeId(13);
 const RECENT: NodeId = NodeId(14);
 const FILE_TITLE: NodeId = NodeId(15);
+const SIDEBAR_MESSAGE: NodeId = NodeId(16);
+
+/// PDF pages in view, as children of the document.
+fn page_node(page: u32) -> NodeId {
+    NodeId(1_000_000 + page as u64)
+}
 
 pub(super) fn node_id(id: WidgetId) -> NodeId {
     NodeId(match id {
@@ -51,6 +57,7 @@ pub(super) fn node_id(id: WidgetId) -> NodeId {
         WidgetId::SheetButton(i) => 60_000 + i as u64,
         WidgetId::SheetField(i) => 61_000 + i as u64,
         WidgetId::Document => 70_000,
+        WidgetId::SidebarItem(i) => 2_000_000 + i as u64,
     })
 }
 
@@ -61,6 +68,7 @@ fn bounds(r: super::widgets::Rect) -> Rect {
 fn widget_node(w: &Widget) -> Node {
     let mut node = Node::new(match w.role {
         WidgetRole::Tab | WidgetRole::SidebarTab => Role::Tab,
+        WidgetRole::ListItem => Role::ListItem,
         WidgetRole::Document => Role::Document,
         WidgetRole::Field => Role::TextInput,
         WidgetRole::Button | WidgetRole::Caption => Role::Button,
@@ -79,7 +87,7 @@ fn widget_node(w: &Widget) -> Node {
         }
     }
     match (w.role, w.checked) {
-        (WidgetRole::Tab | WidgetRole::SidebarTab, Some(selected)) => node.set_selected(selected),
+        (WidgetRole::Tab | WidgetRole::SidebarTab | WidgetRole::ListItem, Some(selected)) => node.set_selected(selected),
         (_, Some(on)) => node.set_toggled(on.into()),
         _ => {}
     }
@@ -141,7 +149,14 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
     if let Some(side) = layout.sidebar {
         nodes.push((SIDEBAR_TABS, group(Role::TabList, "Sidebar views", side, ids(&|w| w.role == WidgetRole::SidebarTab))));
         let panel = super::widgets::SIDEBAR_TABS[s.sidebar_tab.min(2)];
-        nodes.push((SIDEBAR_PANEL, text(Role::TabPanel, panel, layout.sidebar_panel)));
+        let mut rows = ids(&|w| w.role == WidgetRole::ListItem);
+        if let super::widgets::SidebarList::Message(message) = s.sidebar_list() {
+            if !message.is_empty() {
+                nodes.push((SIDEBAR_MESSAGE, text(Role::Label, message, layout.sidebar_panel)));
+                rows.push(SIDEBAR_MESSAGE);
+            }
+        }
+        nodes.push((SIDEBAR_PANEL, group(Role::List, panel, layout.sidebar_panel, rows)));
         nodes.push((SIDEBAR, group(Role::Pane, "Sidebar", side, vec![SIDEBAR_TABS, SIDEBAR_PANEL])));
         root_children.push(SIDEBAR);
     }
@@ -155,6 +170,22 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
         root_children.push(EMPTY);
     } else {
         root_children.push(node_id(WidgetId::Document));
+        // Pages in view: "Page 3 of 20", with their screen bounds.
+        if let (Some(v), Some(g)) = (&s.pdf, super::document::geometry_in(s, layout.document)) {
+            let count = v.sizes.len();
+            let shown = super::view::visible(&g.layout, g.top, g.top + layout.document.height());
+            let mut pages = Vec::new();
+            for (page, r) in &g.layout.pages[shown] {
+                let x0 = layout.document.x0 + r.x0 - g.left;
+                let y0 = layout.document.y0 + r.y0 - g.top;
+                let bounds = super::widgets::Rect::new(x0, y0, r.width(), r.height());
+                nodes.push((page_node(*page), text(Role::Group, &format!("Page {} of {count}", page + 1), bounds)));
+                pages.push(page_node(*page));
+            }
+            if let Some((_, document)) = nodes.iter_mut().find(|(id, _)| *id == node_id(WidgetId::Document)) {
+                document.set_children(pages);
+            }
+        }
     }
     let mut status = text(Role::Status, &s.status, layout.status);
     status.set_live(Live::Polite);
@@ -280,7 +311,7 @@ mod tests {
     /// to artifacts/a11y, and fails on an unnamed interactive node.
     #[test]
     fn full_tree_names_every_interactive_node() {
-        use crate::{model::Frame, ui::worker::Workers};
+        use crate::ui::worker::Workers;
         use std::{collections::HashMap, path::PathBuf};
         let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/a11y");
         std::fs::create_dir_all(&out).unwrap();
@@ -290,7 +321,8 @@ mod tests {
             let workers = Workers::start(HWND::default()).unwrap();
             let mut s = State::new(workers, &paths, (1100.0, 760.0), 1.0, 1.0, super::super::theme::palette(super::super::theme::Mode::Dark));
             if !paths.is_empty() {
-                s.frame = Some(Frame { width: 1, height: 1, pixels: vec![255; 4], page_count: 20, source_width: 1, source_height: 1 });
+                let sizes = vec![[612.0, 792.0]; 20];
+                s.pdf = Some(crate::ui::document::PdfView::new(paths[0].clone(), sizes, Default::default(), 0));
                 s.sidebar_open = true;
                 s.animations = false;
                 s.set_markup(true);
@@ -328,7 +360,12 @@ mod tests {
             assert!(missing.is_empty(), "{scene}: unnamed {missing:?}");
             assert_eq!(nodes.len(), update.nodes.len(), "duplicate node ids");
             match scene {
-                "document" => assert!(text.contains("Document \"Quarterly report.pdf, page 1 of 20\"")),
+                "document" => {
+                    assert!(text.contains("Document \"Quarterly report.pdf, page 1 of 20\""));
+                    assert!(text.contains("Group \"Page 1 of 20\""), "pages in view are in the tree");
+                    assert!(text.contains("List \"Thumbnails\"") && text.contains("ListItem \"Thumbnail, page 1\""));
+                    assert!(!text.contains("Thumbnail, page 20"), "rows out of view are not");
+                }
                 "empty" => assert!(text.contains("Button \"Open\"")),
                 _ => {
                     assert!(text.contains("Dialog \"Delete this page?\""));
@@ -354,6 +391,9 @@ mod tests {
             title: "report.pdf, page 1 of 20",
             sidebar_open: true,
             sidebar_tab: 0,
+            sidebar_list: super::super::widgets::SidebarList::Thumbnails(&[[612.0, 792.0]; 4]),
+            sidebar_scroll: 0.0,
+            sidebar_active: 0,
             markup: 1.0,
             ctx: commands::Ctx { has_frame: true, pdf: true, tabs: 2, ..Default::default() },
             sheet: Some(SheetView { message_height: 0.0, fields: vec!["Text to find"], buttons: vec!["OK", "Cancel"] }),

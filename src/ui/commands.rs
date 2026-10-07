@@ -32,6 +32,12 @@ pub(super) enum Command {
     ZoomIn,
     ZoomOut,
     Fit,
+    FitWidth,
+    ActualSize,
+    ZoomToSelection,
+    ViewContinuous,
+    ViewSingle,
+    ViewTwoPages,
     Slideshow,
     ToggleSidebar,
     ToggleMarkup,
@@ -149,6 +155,12 @@ pub(super) fn info(command: Command) -> Info {
         ZoomIn => i("Zoom in", "Zoom &in", None, None),
         ZoomOut => i("Zoom out", "Zoom &out", None, None),
         Fit => i("Fit to window", "&Fit to window", None, None),
+        FitWidth => i("Fit width", "Fit &width", None, None),
+        ActualSize => i("Actual size", "Actual si&ze", None, None),
+        ZoomToSelection => i("Zoom to selection", "Zoom to se&lection", None, None),
+        ViewContinuous => i("Continuous scroll", "&Continuous scroll", None, None),
+        ViewSingle => i("Single page", "Single pa&ge", None, None),
+        ViewTwoPages => i("Two pages side by side", "Two pages side &by side", None, None),
         Slideshow => i("Slideshow", "Slide&show", None, None),
         ToggleSidebar => i("Sidebar", "Si&debar", Some(OPEN_PANE), Some('S')),
         ToggleMarkup => i("Markup", "&Markup bar", Some(EDIT), Some('M')),
@@ -251,6 +263,7 @@ pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
     (ctrl(0x6D), ZoomOut),
     (ctrl(0x30), Fit),
     (ctrl(0x60), Fit),
+    (ctrl(0xDC), FitWidth),
     (plain(0x74), Slideshow),
     (ctrl_shift(0x42), ToggleSidebar),
     (ctrl_shift(0x41), ToggleMarkup),
@@ -293,6 +306,7 @@ pub(super) fn shortcut_text(command: Command) -> Option<String> {
         0x70..=0x7B => format!("F{}", chord.key - 0x6F),
         0xBB => "=".into(),
         0xBD => "-".into(),
+        0xDC => "\\".into(),
         0xDD => "]".into(),
         key => char::from(key as u8).to_string(),
     };
@@ -320,6 +334,9 @@ pub(super) struct Ctx {
     pub(super) markup_open: bool,
     pub(super) crop: bool,
     pub(super) tool: Option<Command>,
+    pub(super) zoom: super::view::Zoom,
+    pub(super) view: super::view::ViewMode,
+    pub(super) zoom_select: bool,
 }
 
 /// Rules match the pre-split shell (`update_controls`), plus the new UI commands.
@@ -334,7 +351,8 @@ pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
         Share => false,
         _ if !ready => false,
         Flip | Resize | RemoveBackground | BatchFolder | BatchSelected => !x.pdf,
-        Find | ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage => x.pdf,
+        Find | ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | ViewContinuous | ViewSingle
+        | ViewTwoPages => x.pdf,
         Previous => x.can_previous,
         Next => x.can_next,
         SaveCopy | Print => !x.saving,
@@ -343,10 +361,18 @@ pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
 }
 
 pub(super) fn checked(command: Command, x: &Ctx) -> Option<bool> {
+    use super::view::{ViewMode, Zoom};
     match command {
         ToggleSidebar => Some(x.sidebar_open),
         ToggleMarkup => Some(x.markup_open),
         Crop => Some(x.crop),
+        ZoomToSelection => Some(x.zoom_select),
+        Fit => Some(x.zoom == Zoom::Fit),
+        FitWidth => Some(x.zoom == Zoom::FitWidth),
+        ActualSize => Some(x.zoom == Zoom::Ratio(1.0)),
+        ViewContinuous => Some(x.view == ViewMode::Continuous),
+        ViewSingle => Some(x.view == ViewMode::Single),
+        ViewTwoPages => Some(x.view == ViewMode::TwoPages),
         c if annotation(c).is_some() || c == PlaceSignature => Some(x.tool == Some(c)),
         _ => None,
     }
@@ -441,8 +467,9 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
         "&View",
         items(
             &[
-                Some(Previous), Some(Next), None, Some(ZoomIn), Some(ZoomOut), Some(Fit), None, Some(ToggleSidebar),
-                Some(ToggleMarkup), Some(Slideshow), None, Some(NextTab), Some(PreviousTab),
+                Some(Previous), Some(Next), None, Some(ZoomIn), Some(ZoomOut), Some(ActualSize), Some(Fit),
+                Some(FitWidth), Some(ZoomToSelection), None, Some(ViewContinuous), Some(ViewSingle), Some(ViewTwoPages),
+                None, Some(ToggleSidebar), Some(ToggleMarkup), Some(Slideshow), None, Some(NextTab), Some(PreviousTab),
             ],
             x,
         ),
@@ -466,7 +493,8 @@ pub(super) fn document_menu(x: &Ctx) -> Vec<MenuItem> {
     let list = [
         Some(CopyText), Some(Find), None, Some(Highlight), Some(Note), Some(TextBox), Some(PlaceSignature),
         Some(FillForm), None, Some(Rotate), Some(Crop), Some(Flip), Some(Resize), Some(RemoveBackground), None,
-        Some(DeletePage), Some(InsertPage), Some(MovePage), None, Some(ZoomIn), Some(ZoomOut), Some(Fit), None,
+        Some(DeletePage), Some(InsertPage), Some(MovePage), None, Some(ZoomIn), Some(ZoomOut), Some(Fit),
+        Some(ZoomToSelection), None,
         Some(SaveCopy), Some(Print), Some(FileInfo),
     ];
     let mut menu: Vec<MenuItem> = Vec::new();
@@ -486,7 +514,11 @@ pub(super) fn document_menu(x: &Ctx) -> Vec<MenuItem> {
 }
 
 pub(super) fn zoom_menu(x: &Ctx) -> Vec<MenuItem> {
-    items(&[Some(ZoomIn), Some(ZoomOut), Some(Fit)], x)
+    let mut list = vec![Some(ZoomIn), Some(ZoomOut), None, Some(ActualSize), Some(Fit), Some(FitWidth), Some(ZoomToSelection)];
+    if x.pdf {
+        list.extend([None, Some(ViewContinuous), Some(ViewSingle), Some(ViewTwoPages)]);
+    }
+    items(&list, x)
 }
 
 pub(super) fn tab_menu(x: &Ctx) -> Vec<MenuItem> {
@@ -511,7 +543,8 @@ pub(super) fn access_key(label: &str) -> Option<char> {
 pub(super) const ALL: &[Command] = &[
     Open, SaveCopy, ExtractPage, Combine, Print, BatchFolder, BatchSelected, FileInfo, Share, CloseTab, Exit, Undo,
     Revert, CopyText, Find, Rotate, Flip, Crop, Resize, RemoveBackground, DeletePage, MovePage, InsertPage,
-    Previous, Next, ZoomIn, ZoomOut, Fit, Slideshow, ToggleSidebar, ToggleMarkup, NextTab, PreviousTab, Tab(0),
+    Previous, Next, ZoomIn, ZoomOut, Fit, FitWidth, ActualSize, ZoomToSelection, ViewContinuous, ViewSingle,
+    ViewTwoPages, Slideshow, ToggleSidebar, ToggleMarkup, NextTab, PreviousTab, Tab(0),
     NextPane, PreviousPane, Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow,
     SaveSignature, PlaceSignature, FillForm, ZoomMenu, AppMenu, MoreTools,
 ];
@@ -555,6 +588,32 @@ mod tests {
         assert_eq!(shortcut_text(ZoomIn).as_deref(), Some("Ctrl+="));
         assert_eq!(shortcut_text(Slideshow).as_deref(), Some("F5"));
         assert_eq!(shortcut_text(FileInfo).as_deref(), Some("Alt+Enter"));
+        assert_eq!(lookup(ctrl(0xDC)), Some(FitWidth));
+        assert_eq!(shortcut_text(FitWidth).as_deref(), Some("Ctrl+\\"));
+    }
+
+    #[test]
+    fn zoom_menu_marks_the_current_zoom_and_view() {
+        use super::super::view::{ViewMode, Zoom};
+        let pdf = Ctx { has_frame: true, pdf: true, tabs: 1, zoom: Zoom::FitWidth, view: ViewMode::TwoPages, ..Default::default() };
+        let menu = zoom_menu(&pdf);
+        let checked: Vec<Command> = menu
+            .iter()
+            .filter(|m| m.checked == Some(true))
+            .filter_map(|m| match m.pick {
+                Some(Pick::Command(c)) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checked, vec![FitWidth, ViewTwoPages]);
+        let image = Ctx { pdf: false, zoom: Zoom::Ratio(1.0), ..pdf };
+        let menu = zoom_menu(&image);
+        assert!(!flatten(&menu).contains(&ViewSingle), "view modes are for PDFs");
+        assert!(menu.iter().any(|m| m.pick == Some(Pick::Command(ActualSize)) && m.checked == Some(true)));
+        let keys: Vec<char> = zoom_menu(&pdf).iter().filter_map(|m| access_key(&m.label)).collect();
+        for (n, key) in keys.iter().enumerate() {
+            assert!(!keys[n + 1..].contains(key), "zoom menu reuses {key}");
+        }
     }
 
     #[test]

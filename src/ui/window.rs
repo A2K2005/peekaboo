@@ -5,7 +5,7 @@ use super::{
     app::{add_tabs, close_tab, install, invalidate, open, select_tab, tick, uninstall, with_state, State},
     commands::{self, Chord, Command},
     document::{self, Phase, PointerEvent, PointerKind},
-    paint, sheet, theme,
+    paint, sheet, sidebar, theme,
     widgets::{self, Layout, Scope, WidgetId},
     worker::{Workers, WM_APP_WAKE},
 };
@@ -84,7 +84,7 @@ pub fn run() -> Result<()> {
         let workers = Workers::start(hwnd).map_err(|_| Error::from_thread())?;
         let mut client = RECT::default();
         let _ = GetClientRect(hwnd, &mut client);
-        let state = State::new(
+        let mut state = State::new(
             workers,
             &paths,
             (client.right as f32, client.bottom as f32),
@@ -92,6 +92,7 @@ pub fn run() -> Result<()> {
             theme::text_scale_from_registry(),
             theme::apply(hwnd, theme::current()),
         );
+        state.bench = super::bench::Bench::from_env();
         install(state);
         // Apply WM_NCCALCSIZE now that the state exists, so the caption goes.
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -142,7 +143,7 @@ unsafe fn text_scale_changed(hwnd: HWND) {
         let changed = (s.text_scale - scale).abs() > f32::EPSILON;
         if changed {
             s.text_scale = scale;
-            if s.frame.is_some() {
+            if s.frame.is_some() || s.pdf.is_some() {
                 s.due = Some(Instant::now() + Duration::from_millis(120));
             }
         }
@@ -280,7 +281,13 @@ pub(super) unsafe fn activate(hwnd: HWND, id: WidgetId, keyboard: bool) {
         WidgetId::Command(command) => actions::execute(hwnd, command, keyboard),
         WidgetId::Minimize | WidgetId::Maximize | WidgetId::Close => caption_command(hwnd, id),
         WidgetId::SidebarTab(index) => {
-            with_state(|s| s.sidebar_tab = index);
+            with_state(|s| {
+                s.sidebar_tab = index;
+                sidebar::follow_page(s);
+            });
+        }
+        WidgetId::SidebarItem(index) => {
+            with_state(|s| sidebar::activate(s, index));
         }
         WidgetId::SheetButton(index) => sheet::finish(Some(index)),
         WidgetId::SheetField(index) => {
@@ -413,17 +420,23 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
     }
 }
 
-unsafe fn wheel(hwnd: HWND, wparam: WPARAM, horizontal: bool) {
+/// The wheel scrolls the sidebar list or the document under the pointer;
+/// Ctrl+wheel zooms around the pointer.
+unsafe fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM, horizontal: bool) {
     let delta = ((wparam.0 >> 16) as u16 as i16) as f32;
-    if !horizontal && GetKeyState(VK_CONTROL.0 as i32) < 0 {
-        actions::execute(hwnd, if delta > 0.0 { Command::ZoomIn } else { Command::ZoomOut }, false);
-        return;
-    }
+    let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+    let mut point = lparam_point(lparam);
+    let _ = ScreenToClient(hwnd, &mut point);
+    let at = (point.x as f32, point.y as f32);
     with_state(|s| {
-        if horizontal {
-            s.pan.0 -= delta;
+        if s.sheet.is_some() {
+            return;
+        }
+        let layout = s.layout();
+        if !ctrl && !horizontal && layout.sidebar.is_some_and(|r| r.contains(at.0, at.1)) {
+            sidebar::wheel(s, delta, &layout);
         } else {
-            s.pan.1 += delta;
+            document::wheel(s, delta, horizontal, ctrl, at);
         }
     });
     invalidate(hwnd);
@@ -437,6 +450,7 @@ fn key_char(vk: u16) -> Option<char> {
 unsafe fn escape(hwnd: HWND) {
     with_state(|s| {
         s.crop = false;
+        s.zoom_select = false;
         s.slideshow = None;
         if let Some(cancel) = &s.cancel {
             cancel.store(true, std::sync::atomic::Ordering::Release);
@@ -531,6 +545,18 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
         let focus = with_state(|s| s.focus.filter(|f| *f != WidgetId::Document && s.focus_visible)).flatten();
         if let Some(id) = focus {
             activate(hwnd, id, true);
+            return true;
+        }
+    }
+    // Scroll keys go to the focused sidebar list or the document.
+    if !ctrl && !alt {
+        let handled = with_state(|s| match s.focus {
+            Some(WidgetId::SidebarItem(index)) => sidebar::key(s, vk, index),
+            Some(WidgetId::Document) | None => document::key(s, vk, shift),
+            _ => false,
+        });
+        if handled == Some(true) {
+            invalidate(hwnd);
             return true;
         }
     }
@@ -674,7 +700,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
                         s.renderer = None;
                     }
                 }
-                s.due = Some(Instant::now() + if s.frame.is_some() { Duration::from_millis(120) } else { Duration::ZERO });
+                let shown = s.frame.is_some() || s.pdf.is_some();
+                s.due = Some(Instant::now() + if shown { document::SETTLE } else { Duration::ZERO });
             });
             sheet::position_fields(hwnd);
             invalidate(hwnd);
@@ -733,7 +760,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_POINTERWHEEL | WM_POINTERHWHEEL => {
-            wheel(hwnd, wparam, message == WM_POINTERHWHEEL);
+            wheel(hwnd, wparam, lparam, message == WM_POINTERHWHEEL);
             LRESULT(0)
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
@@ -842,6 +869,9 @@ mod tests {
             title: "a.pdf",
             sidebar_open: false,
             sidebar_tab: 0,
+            sidebar_list: widgets::SidebarList::Message(""),
+            sidebar_scroll: 0.0,
+            sidebar_active: 0,
             markup: 0.0,
             ctx: Ctx { has_frame: true, tabs: 1, ..Default::default() },
             sheet: None,
