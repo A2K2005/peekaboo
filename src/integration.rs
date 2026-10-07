@@ -101,6 +101,21 @@ pub fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Command {
     command
 }
 
+/// Explorer can start one process per selected file for a verb, and each one
+/// forwards its part. The shell collects same-action commands for a moment
+/// and then runs one job. Returns false, and changes nothing, when the actions differ.
+pub fn merge(pending: &mut Command, next: Command) -> bool {
+    if pending.action != next.action {
+        return false;
+    }
+    for path in next.paths {
+        if !pending.paths.contains(&path) {
+            pending.paths.push(path);
+        }
+    }
+    true
+}
+
 /// Payload format: UTF-16 strings, each ending in NUL. The first is the action flag.
 pub fn encode(command: &Command) -> Vec<u16> {
     let mut data: Vec<u16> = command.action.flag().encode_utf16().chain([0]).collect();

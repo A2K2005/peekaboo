@@ -121,6 +121,17 @@ fn parse_args_reads_verb_and_absolute_paths() {
 }
 
 #[test]
+fn merge_collects_one_action_without_duplicates() {
+    let a = PathBuf::from(r"C:\a.jpg");
+    let b = PathBuf::from(r"C:\b.jpg");
+    let mut pending = Command { action: Action::Convert, paths: vec![a.clone()] };
+    assert!(integration::merge(&mut pending, Command { action: Action::Convert, paths: vec![b.clone(), a.clone()] }));
+    assert_eq!(pending.paths, vec![a.clone(), b.clone()]);
+    assert!(!integration::merge(&mut pending, Command { action: Action::Resize, paths: vec![PathBuf::from(r"C:\c.jpg")] }));
+    assert_eq!(pending.paths, vec![a, b]);
+}
+
+#[test]
 fn decode_accepts_only_tagged_absolute_paths() {
     let command = Command {
         action: Action::Resize,
