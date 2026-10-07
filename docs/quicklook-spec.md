@@ -155,3 +155,54 @@ Durations follow Fluent's 83, 167, and 250 ms set and its enter and exit curves 
 6. **Tokens, motion, and gate.** Colors and sizes in `src/ui/theme.rs`. Add a Space-to-first-frame benchmark to `src/ui/bench.rs`, with p95 under 100 ms warm, and record it in `docs/benchmarks.md`.
 
 QuickLook ([GPL-3.0](https://github.com/QL-Win/QuickLook)) was read for its key map only. No code was copied.
+
+## 7. Reference frames: gaps to close
+
+Source: owner's screen recordings, read as frames on Oct 8, 2026. Sizes are at the 1280 by 720 frame scale. Frame rate is unknown, so durations are unverified. "Ours" is from screenshots of the current build. Changes use our own icons and wording.
+
+### 7.1 Quick Look in the frames
+
+- **Header.** One bar, about 26 px tall. Left: close and full screen as small gray circled glyphs, then the bold file name, left-aligned. Right: share, then a pill text button naming the app that opens the file.
+- **Material.** The bar is translucent (frame 004). Bar and thumbnail rail share one tint from the desktop color. The bar never hides in a window.
+- **Content.** The page starts below the bar, inset about 5 px, with its own rounded corners. Window corners about 10 px; soft dark shadow.
+- **Rail.** A deck gets a left rail of thumbnails, about 90 px wide. The current one has a 2 px accent outline; click jumps. Text documents have no rail and show a thin scroll bar only while scrolling (frame 077).
+- **Motion.** The icon grows into the window (frame 061) and the window shrinks back to it on close (frames 089, 110), in 1 to 2 frames.
+- **Navigation.** Arrows swap the file in place; the file list selection follows (frames 012, 013).
+- **Pointer.** I-beam over text; drag selects; right-click offers Copy (frame 144). The window stays open when another app takes focus; its selection turns gray (frame 152).
+- **Size.** Centered on screen. A deck takes about 75% of the width, a portrait page about 85% of the height.
+
+### 7.2 Preview tips
+
+| Tip | Feature | Reached by | Looks like |
+| --- | --- | --- | --- |
+| 1 | Export | File > Export | Sheet: name, location, format, live file size |
+| 2 | Rotate | Toolbar button, Cmd-R | "Edited" appears under the file name |
+| 3 | Transform | Tools menu | Rotate Left and Right, Flip Horizontal and Vertical, Crop (Cmd-K, needs a selection), Remove Background (Shift-Cmd-K) |
+| 4 | Loupe | Shapes menu | Magnifying circle; blue handle sets size, green handle sets power |
+| 5 | Mask | Shapes menu | Rectangle with 8 handles; outside dims |
+| 6 | Selection | First markup menu, wand button | Rectangular, elliptical, lasso, smart lasso. Wand drag paints similar colors red, then selects them |
+| 7 | Sketch, draw | Pen buttons | Freehand stroke |
+| 8 | Text style | Text button, Aa and color menus | Font, size, color, bold, underline, 4 alignments; swatch grid |
+| 9 | Signature | Sign menu | Saved signatures and a create button; capture by trackpad, camera, or phone |
+| 10 | Adjust size | Tools menu | Fit-into preset, width, height, units, resolution, keep proportions, new and old size |
+| 11 | Clipboard, image text | Cmd-N; drag over image text | "Untitled" window; image text selects and copies |
+
+Markup bar order: selection, wand, sketch, draw, shapes, text, sign, adjust color, adjust size, then shape style, border color, fill color, text style, note.
+
+### 7.3 Gaps, ranked by impact on "instant, no barrier"
+
+| # | Mac | Ours today | Change | Files in `src/ui` |
+| --- | --- | --- | --- | --- |
+| 1 | Icon grows into the window and shrinks back | 120 ms centered fade and scale | Zoom from and to the item's rectangle when Explorer reports it; fade as fallback | `quickview.rs` (`begin_show`, `dismiss`, `tick`) |
+| 2 | Header always visible above the page | 40 px strip covers the page top and fades after 1.5 s (p01, p04, owner screenshot) | Reserve the bar above the document; auto-hide only in full screen. Update sections 1 and 5 | `quickview.rs` (`layout`, `strip_alpha`, `content_size`), `paint.rs` |
+| 3 | Rounded, tinted, translucent window with shadow | Square corners on Windows 10 (DWM rounding is Windows 11 only); opaque margin | Mica on 11, solid tint on 10, DWM shadow. Rounding on 10 needs a composition surface (cost unverified) | `quickview.rs` (`set_style`), `window.rs`, `theme.rs` |
+| 4 | Thumbnail rail for multi-page files | No Quick view sidebar (`layout.sidebar = None`), p03 | 90 px rail for PDFs of 2 or more pages, reusing editor thumbnails (Mac PDF behavior unverified) | `quickview.rs`, `sidebar.rs` |
+| 5 | Left-aligned name; one button names the target app | Centered name; 6 buttons; **Open** says no destination | Left-align the name. Label "Open in *app*" when another app is the default | `quickview.rs` (`layout`, `paint`) |
+| 6 | I-beam over text; right-click Copy | Pointer input reaches the document; Quick view menu unverified | Verify; add a Copy and Open menu | `actions.rs` (`context_menu`), `quickview.rs` |
+| 7 | "Edited" under the file name | Page count only (q01) | Show "Edited" after a change; it confirms autosave (D22) | `widgets.rs`, `paint.rs`, `app.rs` |
+| 8 | Markup bar shows its tools | Empty markup bar (q03) | Check for a mid-slide capture or a layout bug | `widgets.rs`, `paint.rs` |
+| 9 | Shape style, border, fill, and text style menus | No width, color, or font controls in `MARKUP_TOOLS` | Add 4 menu buttons after the tools | `commands.rs`, `menu.rs`, `actions.rs` |
+| 10 | 8 shapes, plus loupe and mask | Rectangle, ellipse, arrow | Add line, rounded rectangle, bubble, star, polygon; then loupe and mask (PDF save unverified) | `commands.rs` (`tool_group`), `document.rs` |
+| 11 | Rectangular, elliptical, lasso, and wand selection | Text select, remove background | Rectangular and elliptical selection feeding Crop and Delete; lasso later | `commands.rs`, `document.rs`, `imagetools.rs` |
+| 12 | Flip horizontal and vertical | Horizontal only | Add Flip vertically | `commands.rs`, `actions.rs` |
+| 13 | Saved signatures list; camera capture | Draw, then Sign | List saved signatures in the Sign menu | `commands.rs`, `menu.rs` |
