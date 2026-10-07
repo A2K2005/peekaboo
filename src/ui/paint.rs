@@ -497,6 +497,27 @@ mod tests {
         (a.0 - b.0).abs() < 0.02 && (a.1 - b.1).abs() < 0.02 && (a.2 - b.2).abs() < 0.02
     }
 
+    /// Times the first chrome draw in a fresh process (font loading, text
+    /// layout, glyph rasterization) on a software WIC target. Run alone:
+    /// cargo test --release --bin preview-for-windows first_frame_cost -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing probe; run alone in a fresh process"]
+    fn first_frame_cost() {
+        let t = std::time::Instant::now();
+        let fonts = fonts(1.0, 1.0).unwrap();
+        let formats = t.elapsed();
+        let t = std::time::Instant::now();
+        let _ = measure("Quarterly report.pdf", &fonts.body, 1000.0);
+        let body = t.elapsed();
+        let t = std::time::Instant::now();
+        let _ = measure("Quarterly report.pdf", &fonts.strong, 1000.0);
+        let strong = t.elapsed();
+        let t = std::time::Instant::now();
+        let _ = measure("\u{E8A3}\u{E70F}\u{E7AD}", &fonts.icon, 1000.0);
+        let icons = t.elapsed();
+        println!("text formats {formats:?}; first Segoe UI layout {body:?}; first semibold layout {strong:?}; first icon font layout {icons:?}");
+    }
+
     /// Headless screenshots of every theme, written to artifacts/screenshots.
     /// The pixel checks prove each theme reaches the chrome and the canvas.
     #[test]
