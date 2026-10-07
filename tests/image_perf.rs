@@ -216,12 +216,34 @@ fn hevc_mft_experiment() {
     com();
     unsafe {
         for (label, category, subtype, decoder) in [
-            ("HEVC decoders", MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_HEVC, true),
-            ("HEVC encoders", MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_HEVC, false),
-            ("AV1 decoders", MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_AV1, true),
+            (
+                "HEVC decoders",
+                MFT_CATEGORY_VIDEO_DECODER,
+                MFVideoFormat_HEVC,
+                true,
+            ),
+            (
+                "HEVC encoders",
+                MFT_CATEGORY_VIDEO_ENCODER,
+                MFVideoFormat_HEVC,
+                false,
+            ),
+            (
+                "AV1 decoders",
+                MFT_CATEGORY_VIDEO_DECODER,
+                MFVideoFormat_AV1,
+                true,
+            ),
         ] {
-            let info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype };
-            let (i, o) = if decoder { (Some(&info as *const _), None) } else { (None, Some(&info as *const _)) };
+            let info = MFT_REGISTER_TYPE_INFO {
+                guidMajorType: MFMediaType_Video,
+                guidSubtype: subtype,
+            };
+            let (i, o) = if decoder {
+                (Some(&info as *const _), None)
+            } else {
+                (None, Some(&info as *const _))
+            };
             let (mut list, mut count) = (std::ptr::null_mut(), 0u32);
             MFTEnumEx(category, MFT_ENUM_FLAG_ALL, i, o, &mut list, &mut count).unwrap();
             let mut names = Vec::new();
@@ -229,13 +251,49 @@ fn hevc_mft_experiment() {
                 let a = (*list.add(k)).take().unwrap();
                 let mut p = windows::core::PWSTR::null();
                 let mut n = 0;
-                if a.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut p, &mut n).is_ok() {
+                if a.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut p, &mut n)
+                    .is_ok()
+                {
                     names.push(p.to_string().unwrap());
                 }
             }
             println!("{label}: {count} {names:?}");
         }
     }
-    println!("heic decode available: {}", imaging::heic_decode_available());
-    println!("heic encode available: {}", imaging::heic_encode_available());
+    println!(
+        "heic decode available: {}",
+        imaging::heic_decode_available()
+    );
+    println!(
+        "heic encode available: {}",
+        imaging::heic_encode_available()
+    );
+}
+
+/// 100 JPEGs of 12 MP (the 12 photos repeated), resized to 50% as JPEG.
+#[test]
+#[ignore = "Timing run"]
+fn batch_100_photos() {
+    use model::{BatchJob, BatchResize};
+    use std::sync::atomic::AtomicBool;
+    com();
+    let photos: Vec<PathBuf> = photo_list()
+        .into_iter()
+        .filter(|p| !p.ends_with("24mp_landscape.jpg"))
+        .collect();
+    let inputs: Vec<PathBuf> = photos.iter().cycle().take(100).cloned().collect();
+    let job = BatchJob {
+        quarter_turns: 0,
+        resize: Some(BatchResize::Percent(50.0)),
+        options: None,
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/batch-perf");
+    let mut run = 0;
+    times("batch 100 x 12 MP JPEG resize 50%", 5, || {
+        run += 1;
+        let out = root.join(format!("{}-{run}", std::process::id()));
+        let results = imaging::batch(&inputs, &out, &job, &|_, _| {}, &AtomicBool::new(false));
+        assert!(results.iter().all(|r| r.output.is_ok()));
+        std::fs::remove_dir_all(&out).unwrap();
+    });
 }

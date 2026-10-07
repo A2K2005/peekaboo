@@ -1,10 +1,14 @@
 use crate::model::{
-    fit_size, frame_bytes, AnnotationKind, ExportOptions, Frame, ImageEdit, ImageFormat,
+    fit_size, frame_bytes, AnnotationKind, BatchJob, BatchResize, BatchResult, ExportOptions,
+    Frame, ImageEdit, ImageFormat,
 };
 use std::{
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Mutex,
+    },
 };
 use windows::{
     core::{w, Interface, PCWSTR, PWSTR},
@@ -21,9 +25,9 @@ use windows::{
         Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS},
         System::{
             Com::{
-                CoCreateInstance, CoTaskMemFree, IStream,
+                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IStream,
                 StructuredStorage::{PropVariantClear, PropVariantToUInt16, PROPBAG2, PROPVARIANT},
-                CLSCTX_INPROC_SERVER, STREAM_SEEK_END, STREAM_SEEK_SET,
+                CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STREAM_SEEK_END, STREAM_SEEK_SET,
             },
             DataExchange::{
                 CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
@@ -1260,6 +1264,157 @@ pub fn encode_clipboard(frame: &Frame) -> Result<(Vec<u8>, Vec<u8>), String> {
     }
     Ok((dib, png))
 }
+/// Apply one job to many files and write each result as a new file in
+/// `output_dir`. Never overwrites: a taken name gets " (2)", " (3)", and so on.
+/// Up to 4 files run at once. `progress(done, total)` runs after each file,
+/// from a worker thread. Setting `cancel` skips the files not yet started.
+/// Returns one result per input, in input order.
+#[allow(dead_code)] // The shell calls this in wave 2.
+pub fn batch(
+    inputs: &[PathBuf],
+    output_dir: &Path,
+    job: &BatchJob,
+    progress: &(dyn Fn(usize, usize) + Sync),
+    cancel: &AtomicBool,
+) -> Vec<BatchResult> {
+    let total = inputs.len();
+    if let Err(e) = std::fs::create_dir_all(output_dir) {
+        let output = Err(format!("Could not use the output folder. {e}"));
+        return inputs
+            .iter()
+            .map(|input| BatchResult {
+                input: input.clone(),
+                output: output.clone(),
+            })
+            .collect();
+    }
+    let mut taken = std::collections::HashSet::new();
+    let plans: Vec<_> = inputs
+        .iter()
+        .map(|input| batch_plan(input, output_dir, job, &mut taken))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let results = Mutex::new(vec![None; total]);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 4)
+        .min(total);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= total {
+                        break;
+                    }
+                    let (output, options) = &plans[i];
+                    let result = if cancel.load(Ordering::Relaxed) {
+                        Err("Canceled.".to_string())
+                    } else {
+                        unsafe { batch_one(&inputs[i], output, job, options) }
+                            .map(|_| output.clone())
+                    };
+                    if let Ok(mut results) = results.lock() {
+                        results[i] = Some(result);
+                    }
+                    progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+                }
+                if com.is_ok() {
+                    unsafe { CoUninitialize() };
+                }
+            });
+        }
+    });
+    let results = results.into_inner().unwrap_or_default();
+    inputs
+        .iter()
+        .zip(results)
+        .map(|(input, output)| BatchResult {
+            input: input.clone(),
+            output: output.unwrap_or_else(|| Err("Not processed.".into())),
+        })
+        .collect()
+}
+/// Pick the output format and a free output name for one batch input.
+fn batch_plan(
+    input: &Path,
+    output_dir: &Path,
+    job: &BatchJob,
+    taken: &mut std::collections::HashSet<PathBuf>,
+) -> (PathBuf, ExportOptions) {
+    let own = format_for(input);
+    let options = job.options.unwrap_or(ExportOptions {
+        format: own.unwrap_or(ImageFormat::Png),
+        quality: 0.92,
+        lossless: true,
+    });
+    let extension = match options.format {
+        _ if own == Some(options.format) => input
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        ImageFormat::Jpeg => "jpg".into(),
+        ImageFormat::Png => "png".into(),
+        ImageFormat::WebP => "webp".into(),
+        ImageFormat::Tiff => "tif".into(),
+        ImageFormat::Heic => "heic".into(),
+        ImageFormat::Bmp => "bmp".into(),
+    };
+    let stem = input
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".into());
+    let mut output = output_dir.join(format!("{stem}.{extension}"));
+    let mut n = 2;
+    while output.exists() || taken.contains(&output) {
+        output = output_dir.join(format!("{stem} ({n}).{extension}"));
+        n += 1;
+    }
+    taken.insert(output.clone());
+    (output, options)
+}
+unsafe fn batch_one(
+    input: &Path,
+    output: &Path,
+    job: &BatchJob,
+    options: &ExportOptions,
+) -> Result<u64, String> {
+    let factory = factory()?;
+    let turns = vec![ImageEdit::RotateRight; (job.quarter_turns % 4) as usize];
+    let (mut source, (width, height)) = edited_source(&factory, input, &turns, None)?;
+    if let Some(resize) = job.resize {
+        let (w, h) = resize_target(width, height, resize)?;
+        if (w, h) != (width, height) {
+            let scaler = factory.CreateBitmapScaler().map_err(err)?;
+            scaler
+                .Initialize(&source, w, h, WICBitmapInterpolationModeFant)
+                .map_err(err)?;
+            source = scaler.cast().map_err(err)?;
+        }
+    }
+    write_source(&factory, &source, output, options)
+}
+/// The size a batch resize gives a `width` x `height` image.
+fn resize_target(width: u32, height: u32, resize: BatchResize) -> Result<(u32, u32), String> {
+    let scaled = |scale: f64| {
+        (
+            ((width as f64 * scale).round() as u32).max(1),
+            ((height as f64 * scale).round() as u32).max(1),
+        )
+    };
+    let size = match resize {
+        BatchResize::Pixels { width, height } => (width, height),
+        BatchResize::Percent(p) if p.is_finite() && p > 0.0 => scaled(p as f64 / 100.0),
+        BatchResize::MaxEdge(edge) if edge > 0 => {
+            scaled((edge as f64 / width.max(height) as f64).min(1.0))
+        }
+        _ => return Err("Enter a size greater than 0.".into()),
+    };
+    validate_dimensions(size.0, size.1)?;
+    Ok(size)
+}
 unsafe fn read_orientation(frame: &IWICBitmapFrameDecode) -> u16 {
     let Ok(reader) = frame.GetMetadataQueryReader() else {
         return 1;
@@ -1289,5 +1444,21 @@ mod tests {
         assert!(crop_rect(100, 100, f32::NAN, 0.0, 1.0, 1.0).is_err());
         assert!(crop_rect(100, 100, 0.8, 0.0, 0.2, 1.0).is_err());
         assert!(crop_rect(100, 100, -0.1, 0.0, 1.0, 1.0).is_err());
+    }
+    #[test]
+    fn batch_resize_sizes() {
+        use BatchResize::*;
+        assert_eq!(resize_target(4000, 3000, Percent(50.0)), Ok((2000, 1500)));
+        assert_eq!(resize_target(3000, 4000, MaxEdge(1000)), Ok((750, 1000)));
+        assert_eq!(resize_target(800, 600, MaxEdge(1000)), Ok((800, 600)));
+        let exact = Pixels {
+            width: 10,
+            height: 20,
+        };
+        assert_eq!(resize_target(800, 600, exact), Ok((10, 20)));
+        assert_eq!(resize_target(3, 1, Percent(10.0)), Ok((1, 1)));
+        for bad in [Percent(0.0), Percent(f32::NAN), MaxEdge(0), Percent(1e9)] {
+            assert!(resize_target(800, 600, bad).is_err());
+        }
     }
 }
