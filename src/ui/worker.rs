@@ -173,7 +173,7 @@ pub(super) enum Job {
     Autosave(AutosaveRequest),
     Layer(Request),
     Text(Request, Option<Selection>),
-    Find(Request, String),
+    Find(Request, super::findbar::Query),
     Fields(Request),
     Background(Request, PathBuf),
     Print(Request, crate::printing::PrintJob),
@@ -191,7 +191,7 @@ pub(super) enum Event {
     Autosaved(Autosaved),
     Layer(u64, PathBuf, u32, std::result::Result<TextLayer, String>),
     Text(u64, PathBuf, std::result::Result<String, String>),
-    Found(u64, PathBuf, String, std::result::Result<Vec<SearchHit>, String>),
+    Found(u64, PathBuf, std::result::Result<Vec<SearchHit>, String>),
     Fields(u64, std::result::Result<Vec<crate::pdf::FormField>, String>),
     Background(PathBuf, std::result::Result<String, String>),
     Finished(std::result::Result<String, String>),
@@ -813,18 +813,17 @@ impl Worker {
             Job::Find(_, query) => Event::Found(
                 request.generation,
                 request.path.clone(),
-                query.clone(),
                 if is_pdf(&request.path) {
                     match self.engine.as_mut() {
                         Some(e) => {
                             e.alias_password(&request.path, &source);
-                            e.search(&source, &query, false, &AtomicBool::new(false), &edits.pdf)
+                            e.search(&source, &query.text, query.match_case, &query.cancel, &edits.pdf)
                         }
                         None => Err("Open a PDF first.".into()),
                     }
                 } else {
                     crate::ocr::recognize_layer(&source, &edits.image)
-                        .map(|layer| super::text::find(&layer, 0, &query, false))
+                        .map(|layer| super::text::find(&layer, 0, &query.text, query.match_case))
                 },
             ),
             Job::Fields(_) => Event::Fields(

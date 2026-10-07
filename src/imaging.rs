@@ -1081,7 +1081,6 @@ unsafe fn webp_bytes(
 }
 /// Read an image from the clipboard. PNG comes first because it keeps alpha
 /// reliably, then CF_DIBV5, then CF_DIB.
-#[allow(dead_code)] // The shell calls this in wave 2.
 pub fn clipboard_image() -> Result<Frame, String> {
     unsafe {
         OpenClipboard(None).map_err(|_| "Another app is using the clipboard. Try again.")?;

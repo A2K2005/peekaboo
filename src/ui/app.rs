@@ -282,6 +282,10 @@ pub(super) struct State {
     pub(super) sheet: Option<Sheet>,
     /// Accessibility and UISettings start after first content (see tick).
     pub(super) started: bool,
+    pub(super) find: super::findbar::FindBar,
+    pub(super) messages: super::infobar::Messages,
+    /// Recent files for the empty window, newest first.
+    pub(super) recent: Vec<PathBuf>,
 }
 
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
@@ -389,6 +393,9 @@ impl State {
             pinch: None,
             sheet: None,
             started: false,
+            find: Default::default(),
+            messages: Default::default(),
+            recent: if paths.is_empty() { super::empty::load() } else { Vec::new() },
         };
         add_tabs(&mut state, paths);
         state
@@ -430,6 +437,7 @@ impl State {
                 SaveStatus::Clean => self.status.clone(),
             };
         }
+        super::infobar::save_problem(self, &event.path);
         true
     }
     pub(super) fn is_pdf(&self) -> bool {
@@ -611,7 +619,7 @@ impl State {
                 buttons: sheet.buttons.iter().map(String::as_str).collect(),
             }
         });
-        widgets::layout(&widgets::Input {
+        let mut layout = widgets::layout(&widgets::Input {
             width: self.size.0,
             height: self.size.1,
             scale: self.scale,
@@ -629,7 +637,11 @@ impl State {
             markup: ease(self.markup_progress()),
             ctx: self.ctx(),
             sheet,
-        })
+        });
+        super::empty::add(self, &mut layout);
+        super::infobar::add(self, &mut layout);
+        super::findbar::add(self, &mut layout);
+        layout
     }
     pub(super) fn send(&mut self, job: Job) -> bool {
         self.workers.send(job)
@@ -859,6 +871,7 @@ pub(super) unsafe fn close_tab(hwnd: HWND, index: usize) {
             s.selection = None;
             s.focus = None;
             s.status = EMPTY_STATUS.into();
+            s.recent = super::empty::load();
             if let Some(r) = s.renderer.as_mut() {
                 r.bitmap = None;
             }
@@ -889,7 +902,6 @@ pub(super) unsafe fn tick(hwnd: HWND) {
     let mut start_services = false;
     let mut title = None;
     let mut info_to_show = None;
-    let mut conflict_to_show = None;
     with_state(|state| {
         while let Ok(event) = state.workers.receiver.try_recv() {
             let completed = match event {
@@ -948,25 +960,20 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                 }
                 Event::Saved(path, edits, whole_document, result) => {
                     state.exporting = false;
-                    state.status = match result {
-                        Ok(()) => {
-                            let autosave_managed = state.saves.get(&path).is_some_and(|save| save.target.is_some());
-                            if let Some(current) = state.sessions.get_mut(&path) {
-                                if !autosave_managed && whole_document && current.image == edits.image && current.pdf == edits.pdf {
-                                    current.dirty = false;
-                                }
+                    let result = result.map(|()| {
+                        let autosave_managed = state.saves.get(&path).is_some_and(|save| save.target.is_some());
+                        if let Some(current) = state.sessions.get_mut(&path) {
+                            if !autosave_managed && whole_document && current.image == edits.image && current.pdf == edits.pdf {
+                                current.dirty = false;
                             }
-                            "Saved a new copy. The original file is unchanged.".into()
                         }
-                        Err(error) => error,
-                    };
+                        "Saved a new copy. The original file is unchanged.".to_string()
+                    });
+                    super::infobar::report(state, result);
                     invalidate(hwnd);
                     continue;
                 }
                 Event::Autosaved(saved) => {
-                    if matches!(saved.result, Err(super::disk::Failure::Changed)) {
-                        conflict_to_show = Some(saved.path.clone());
-                    }
                     if state.autosaved(saved) {
                         invalidate(hwnd);
                     }
@@ -986,40 +993,18 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                     if !current_text_result(state.generation, state.path.as_deref(), generation, &path) || state.pending {
                         continue;
                     }
-                    state.status = match result {
-                        Ok(text) if text.is_empty() => "No text found.".into(),
-                        Ok(text) => match super::files::clipboard(hwnd, &super::text::clipboard_text(&text)) {
-                            Ok(()) => "Text copied. Check recognition and reading order before pasting.".into(),
-                            Err(error) => error,
-                        },
-                        Err(error) => error,
+                    let result = match result {
+                        Ok(text) if text.is_empty() => Ok("No text found.".to_string()),
+                        Ok(text) => super::files::clipboard(hwnd, &super::text::clipboard_text(&text))
+                            .map(|()| "Text copied. Check recognition and reading order before pasting.".to_string()),
+                        Err(error) => Err(error),
                     };
+                    super::infobar::report(state, result);
                     invalidate(hwnd);
                     continue;
                 }
-                Event::Found(generation, path, query, result) => {
-                    if current_text_result(state.generation, state.path.as_deref(), generation, &path) {
-                        match result {
-                            Ok(hits) if !hits.is_empty() => {
-                                state.find_query = query;
-                                state.find_hits = hits;
-                                state.find_index = 0;
-                                let page = state.find_hits[0].page;
-                                if state.pdf.is_some() {
-                                    document::go_to_page(state, page, true);
-                                } else {
-                                    state.page = page;
-                                }
-                                state.status = format!("Match 1 of {}", state.find_hits.len());
-                            }
-                            Ok(_) => {
-                                state.find_query = query;
-                                state.find_hits.clear();
-                                state.find_index = 0;
-                                state.status = "No matching text found.".into();
-                            }
-                            Err(error) => state.status = error,
-                        };
+                Event::Found(generation, path, result) => {
+                    if super::findbar::found(state, generation, path, result) {
                         invalidate(hwnd);
                     }
                     continue;
@@ -1036,23 +1021,17 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                 }
                 Event::Background(output, result) => {
                     state.exporting = false;
-                    match result {
-                        Ok(detail) => {
-                            state.status = detail;
-                            output_to_open = Some(output);
-                        }
-                        Err(error) => state.status = error,
+                    if result.is_ok() {
+                        output_to_open = Some(output);
                     }
+                    super::infobar::report(state, result);
                     invalidate(hwnd);
                     continue;
                 }
                 Event::Finished(result) => {
                     state.exporting = false;
                     state.cancel = None;
-                    state.status = match result {
-                        Ok(detail) => detail,
-                        Err(error) => error,
-                    };
+                    super::infobar::report(state, result);
                     invalidate(hwnd);
                     continue;
                 }
@@ -1144,6 +1123,12 @@ pub(super) unsafe fn tick(hwnd: HWND) {
             state.tooltip = state.hover;
             invalidate(hwnd);
         }
+        if super::findbar::tick(state) {
+            invalidate(hwnd);
+        }
+        if super::infobar::tick(state) {
+            invalidate(hwnd);
+        }
         // Accessibility (UI Automation load) and UISettings (12 to 23 ms to
         // create on this PC) wait until the first content is on screen, so
         // they never delay it.
@@ -1157,9 +1142,12 @@ pub(super) unsafe fn tick(hwnd: HWND) {
         let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         let _ = SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
     }
+    super::findbar::place(hwnd);
     if start_services {
         super::a11y::start(hwnd);
         super::window::watch_text_scale(hwnd);
+        super::empty::prune(hwnd);
+        super::infobar::after_launch(hwnd);
     }
     if let Some((generation, fields)) = fields_to_show {
         super::actions::fill_field(hwnd, generation, fields);
@@ -1173,9 +1161,6 @@ pub(super) unsafe fn tick(hwnd: HWND) {
     }
     if let Some((generation, path, page)) = password_to_show {
         password_prompt(hwnd, generation, path, page);
-    }
-    if let Some(path) = conflict_to_show {
-        super::actions::resolve_save_conflict(hwnd, path);
     }
     if advance {
         navigate(hwnd, 1);
@@ -1196,6 +1181,9 @@ fn shown(state: &mut State, path: PathBuf, page: u32, navigation: bool) -> Strin
         }
     }
     state.password_attempts.remove(&path);
+    if !navigation && previous.as_ref() != Some(&path) {
+        super::empty::note(&path);
+    }
     state.displayed = Some((path.clone(), page));
     if navigation && !previous_dirty && !state.tabs.contains(&path) {
         if let Some(index) = previous.and_then(|p| state.tabs.iter().position(|t| *t == p)) {
@@ -1216,6 +1204,9 @@ fn shown(state: &mut State, path: PathBuf, page: u32, navigation: bool) -> Strin
 /// prompt to show, if the PDF needs one.
 fn failed(state: &mut State, error: String, generation: u64, path: PathBuf, page: u32) -> Option<(u64, PathBuf, u32)> {
     state.render_failed = error != "No more images in this direction.";
+    if state.render_failed && error != crate::pdf::PASSWORD_REQUIRED {
+        super::infobar::error(state, format!("Could not open {}. {error}", file_name(&path)));
+    }
     state.status = format!("{error} Previous view retained.");
     state.slideshow = None;
     let prompt = (error == crate::pdf::PASSWORD_REQUIRED).then(|| {

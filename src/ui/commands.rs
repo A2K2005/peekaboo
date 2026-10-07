@@ -5,6 +5,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Command {
     Open,
+    NewFromClipboard,
     SaveCopy,
     ExtractPage,
     Combine,
@@ -130,6 +131,7 @@ pub(super) fn info(command: Command) -> Info {
     use glyph::*;
     match command {
         Open => i("Open", "&Open...", Some(FOLDER_OPEN), Some('P')),
+        NewFromClipboard => i("New from clipboard", "New from clip&board", None, None),
         SaveCopy => i("Save a copy", "Save a &copy...", Some(SAVE), None),
         ExtractPage => i("Extract this page", "Extract this pa&ge...", None, None),
         Combine => i("Combine with another PDF", "Co&mbine with another PDF...", None, None),
@@ -290,6 +292,20 @@ pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
     (plain(0x21), Previous),
     (plain(0x27), Next),
     (plain(0x22), Next),
+    (ctrl(0x4E), NewFromClipboard),
+    // Single-letter tool keys reuse each tool's markup bar key. Text boxes
+    // are EDIT children, which take their own keys, so typing never picks a tool.
+    (plain(0x44), Draw),
+    (plain(0x48), Highlight),
+    (plain(0x55), Underline),
+    (plain(0x4B), Strikethrough),
+    (plain(0x4E), Note),
+    (plain(0x54), TextBox),
+    (plain(0x50), Rectangle),
+    (plain(0x45), Ellipse),
+    (plain(0x41), Arrow),
+    (plain(0x47), PlaceSignature),
+    (plain(0x43), Crop),
 ];
 
 pub(super) fn lookup(chord: Chord) -> Option<Command> {
@@ -349,7 +365,7 @@ pub(super) struct Ctx {
 pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
     let ready = x.has_frame && !x.pending && !x.failed;
     match command {
-        Open | Exit | ToggleSidebar | ToggleMarkup | AppMenu | MoreTools | NextPane | PreviousPane => true,
+        Open | NewFromClipboard | Exit | ToggleSidebar | ToggleMarkup | AppMenu | MoreTools | NextPane | PreviousPane => true,
         NextTab | PreviousTab => x.tabs > 1,
         Tab(_) | CloseTab => x.tabs > 0,
         Undo | Revert => x.has_frame && !x.pending,
@@ -451,7 +467,7 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
         "&File",
         items(
             &[
-                Some(Open), Some(SaveCopy), Some(ExtractPage), Some(Combine), None, Some(Print), Some(Share), None,
+                Some(Open), Some(NewFromClipboard), Some(SaveCopy), Some(ExtractPage), Some(Combine), None, Some(Print), Some(Share), None,
                 Some(BatchFolder), Some(BatchSelected), None, Some(FileInfo), Some(CloseTab), Some(Exit),
             ],
             x,
@@ -546,7 +562,7 @@ pub(super) fn access_key(label: &str) -> Option<char> {
 }
 
 pub(super) const ALL: &[Command] = &[
-    Open, SaveCopy, ExtractPage, Combine, Print, BatchFolder, BatchSelected, FileInfo, Share, CloseTab, Exit, Undo,
+    Open, NewFromClipboard, SaveCopy, ExtractPage, Combine, Print, BatchFolder, BatchSelected, FileInfo, Share, CloseTab, Exit, Undo,
     Revert, CopyText, Find, FindNext, FindPrevious, Rotate, Flip, Crop, Resize, RemoveBackground, DeletePage, MovePage, InsertPage,
     Previous, Next, ZoomIn, ZoomOut, Fit, FitWidth, ActualSize, ZoomToSelection, ViewContinuous, ViewSingle,
     ViewTwoPages, Slideshow, ToggleSidebar, ToggleMarkup, NextTab, PreviousTab, Tab(0),

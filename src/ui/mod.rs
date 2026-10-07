@@ -22,6 +22,10 @@
 //! | a11y | UI Automation through AccessKit |
 //! | files | File dialogs, clipboard, saved signature |
 //! | text | Text selection, copy, and image search over text layers |
+//! | findbar | Find bar with live search |
+//! | infobar | Info bar and toasts, the live regions for messages |
+//! | empty | Empty window: New from clipboard and recent files |
+//! | pan | Space+drag panning |
 mod a11y;
 mod actions;
 mod app;
@@ -30,9 +34,13 @@ mod cache;
 mod commands;
 mod disk;
 mod document;
+mod empty;
 mod files;
+mod findbar;
+mod infobar;
 mod menu;
 mod paint;
+mod pan;
 mod render;
 mod sheet;
 mod sidebar;

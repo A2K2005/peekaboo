@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use windows::core::{w, AgileReference, Interface, HSTRING};
+use windows::core::{w, AgileReference, Interface, HSTRING, PCWSTR, PWSTR};
 use windows::ApplicationModel::DataTransfer::{DataRequestedEventArgs, DataTransferManager};
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::{IStorageItem, StorageFile};
@@ -26,6 +26,7 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{
+    AssocQueryStringW, ASSOCF_NONE, ASSOCSTR, ASSOCSTR_EXECUTABLE, ASSOCSTR_PROGID,
     BHID_DataObject, IDataTransferManagerInterop, ILCreateFromPathW, ILFree, SHAddToRecentDocs,
     SHChangeNotify, SHCreateShellItemArrayFromIDLists, SHDoDragDrop, ShellExecuteW, SHARD_PATHW,
     SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
@@ -636,6 +637,47 @@ pub fn open_default_apps() -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// True when Windows opens `extension` (".pdf") with this app, by its ProgID
+/// or by this program's path ("Open with" choices use the path).
+pub fn is_default_for(extension: &str) -> bool {
+    let extension = HSTRING::from(extension);
+    let query = |what: ASSOCSTR| -> Option<String> {
+        let mut buffer = [0u16; 1024];
+        let mut length = buffer.len() as u32;
+        unsafe {
+            AssocQueryStringW(
+                ASSOCF_NONE,
+                what,
+                &extension,
+                PCWSTR::null(),
+                Some(PWSTR(buffer.as_mut_ptr())),
+                &mut length,
+            )
+        }
+        .ok()
+        .ok()?;
+        Some(String::from_utf16_lossy(
+            &buffer[..(length as usize).saturating_sub(1).min(buffer.len())],
+        ))
+    };
+    if query(ASSOCSTR_PROGID).is_some_and(|progid| progid.starts_with("PreviewForWindows.")) {
+        return true;
+    }
+    let exe = std::env::current_exe().ok();
+    match (query(ASSOCSTR_EXECUTABLE), exe.as_deref().and_then(Path::to_str)) {
+        (Some(found), Some(exe)) => found.eq_ignore_ascii_case(exe),
+        _ => false,
+    }
+}
+
+/// True when this user's Default apps list has the app.
+pub fn is_registered() -> bool {
+    matches!(
+        get(HKEY_CURRENT_USER, "Software\\RegisteredApplications", APP_NAME),
+        Ok(Some(_))
+    )
 }
 
 pub fn windows_build() -> u32 {

@@ -2,6 +2,9 @@
 
 mod background;
 mod imaging;
+// The integration tests cover the whole module; the app calls only part of it.
+#[allow(dead_code)]
+mod integration;
 mod model;
 mod ocr;
 mod pdf;

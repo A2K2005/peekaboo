@@ -109,6 +109,9 @@ pub fn run() -> Result<()> {
             if result == 0 {
                 break;
             }
+            if super::findbar::pre_dispatch(hwnd, &message) {
+                continue;
+            }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -299,6 +302,9 @@ pub(super) unsafe fn activate(hwnd: HWND, id: WidgetId, keyboard: bool) {
         WidgetId::Document => {
             with_state(|s| s.focus = Some(WidgetId::Document));
         }
+        WidgetId::FindField | WidgetId::FindCase | WidgetId::FindClose => super::findbar::activate(hwnd, id),
+        WidgetId::InfoButton(_) | WidgetId::InfoClose => super::infobar::activate(hwnd, id),
+        WidgetId::Recent(index) => super::empty::open_recent(hwnd, index),
     }
     invalidate(hwnd);
 }
@@ -413,7 +419,7 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
     });
     if to_document && e.phase == Phase::Down {
         let edit_path = with_state(|s| {
-            (s.crop || s.markup.is_some()).then(|| s.path.clone()).flatten()
+            ((s.crop || s.markup.is_some()) && !super::pan::held()).then(|| s.path.clone()).flatten()
         })
         .flatten();
         if let Some(path) = edit_path {
@@ -551,6 +557,7 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
             s.focus = widgets::next_focus(&layout.widgets, s.focus, shift);
             s.focus_visible = true;
         });
+        super::findbar::follow_focus();
         invalidate(hwnd);
         return true;
     }
@@ -575,10 +582,14 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
             return true;
         }
     }
+    if vk == VK_SPACE.0 && !ctrl && !alt && with_state(|s| super::pan::press(s)) == Some(true) {
+        return true;
+    }
     // Scroll keys go to the focused sidebar list or the document.
     if !ctrl && !alt {
         let handled = with_state(|s| match s.focus {
             Some(WidgetId::SidebarItem(index)) => sidebar::key(s, vk, index),
+            Some(WidgetId::Recent(index)) => super::empty::key(s, vk, index),
             Some(WidgetId::Document) | None => document::text_key(s, vk, shift) || document::key(s, vk, shift),
             _ => false,
         });
@@ -788,6 +799,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_SETCURSOR if (lparam.0 as u16) as i32 == HTCLIENT as i32 => {
+            if super::pan::held() {
+                let _ = SetCursor(Some(LoadCursorW(None, IDC_HAND).unwrap_or_default()));
+                return LRESULT(1);
+            }
             let mut point = POINT::default();
             let text = GetCursorPos(&mut point).is_ok() && ScreenToClient(hwnd, &mut point).as_bool() && with_state(|s| {
                 document::text_point(s, point.x as f32, point.y as f32).is_some_and(|(page, at, size)| {
@@ -802,6 +817,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             }
         }
         WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
+            if message == WM_POINTERDOWN {
+                let mut point = lparam_point(lparam);
+                let _ = ScreenToClient(hwnd, &mut point);
+                super::findbar::blur(hwnd, point.x as f32, point.y as f32);
+            }
             match read_pointer(hwnd, message, wparam) {
                 Some((event, secondary_up)) => {
                     pointer(hwnd, event, secondary_up);
@@ -826,6 +846,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             } else {
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
+        }
+        WM_KEYUP if wparam.0 as u16 == VK_SPACE.0 => {
+            if super::pan::release() {
+                let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+                with_state(|s| document::key(s, VK_SPACE.0, shift));
+                invalidate(hwnd);
+            }
+            LRESULT(0)
         }
         WM_SYSKEYUP if wparam.0 as u16 == VK_MENU.0 => {
             // A lone Alt press shows or hides keytips. Alt never enters the
@@ -858,6 +886,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
         WM_COMMAND => {
             // EN_SETFOCUS and EN_KILLFOCUS move the focus line on text boxes.
             let code = ((wparam.0 >> 16) & 0xffff) as u32;
+            if super::findbar::command(hwnd, code, HWND(lparam.0 as *mut _)) {
+                return LRESULT(0);
+            }
             if code == EN_SETFOCUS {
                 if let Some(index) = sheet::field_index(HWND(lparam.0 as *mut _)) {
                     with_state(|s| s.focus = Some(WidgetId::SheetField(index)));
@@ -892,6 +923,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
         }
         WM_APP_TEXT_SCALE => {
             text_scale_changed(hwnd);
+            LRESULT(0)
+        }
+        super::infobar::WM_APP_OFFER => {
+            super::infobar::offer(hwnd);
+            LRESULT(0)
+        }
+        super::empty::WM_APP_RECENT => {
+            super::empty::reload(hwnd);
             LRESULT(0)
         }
         WM_CLOSE => {
