@@ -98,8 +98,18 @@ unsafe fn rotated(
     source: &IWICBitmapSource,
     transform: WICBitmapTransformOptions,
 ) -> Result<IWICBitmapSource, String> {
+    // A rotator reads its source column by column. On a streaming decoder that
+    // decodes again and again: a 24 MP JPEG rotated export ran over 10 minutes.
+    let cached: IWICBitmapSource = match source.cast::<IWICBitmap>() {
+        Ok(bitmap) => bitmap.cast().map_err(err)?,
+        Err(_) => factory
+            .CreateBitmapFromSource(source, WICBitmapCacheOnLoad)
+            .map_err(err)?
+            .cast()
+            .map_err(err)?,
+    };
     let rotator = factory.CreateBitmapFlipRotator().map_err(err)?;
-    rotator.Initialize(source, transform).map_err(err)?;
+    rotator.Initialize(&cached, transform).map_err(err)?;
     rotator.cast().map_err(err)
 }
 unsafe fn edited_source(
