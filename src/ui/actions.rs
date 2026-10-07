@@ -4,7 +4,7 @@ use super::{
     app::{add_tabs, close_tab, invalidate, navigate, open, schedule, select_tab, with_state, SaveStatus},
     commands::{self, Command, MenuItem, Pick},
     document,
-    files::{choose, choose_many, destination, folder, load_signature, save_signature},
+    files::{choose, choose_many, destination, folder},
     disk::{self, Choice}, menu, sheet,
     view::{ViewMode, Zoom},
     widgets::{self, WidgetId},
@@ -242,7 +242,8 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             output.set_extension("png");
             start_export(hwnd, Job::Background(request, output), "Removing background on this PC...");
         }
-        SaveSignature => save_signature(hwnd),
+        SaveSignature => super::forms::new_signature(hwnd),
+        FillForm => super::forms::start_form(hwnd),
         PlaceSignature | Draw | Highlight | Underline | Strikethrough | Note | TextBox | Rectangle | Ellipse | Arrow => {
             choose_tool(hwnd, command)
         }
@@ -281,9 +282,8 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             });
             invalidate(hwnd);
         }
-        CopyText | Find | FillForm => {
+        CopyText | Find => {
             let job = match command {
-                FillForm => Job::Fields(request),
                 CopyText => Job::Text(request, text_selection.filter(|selection| !selection.is_empty())),
                 _ => {
                     let Some(values) = sheet::input(hwnd, "Find", &[("Text to find", String::new())]) else {
@@ -596,7 +596,7 @@ pub(super) unsafe fn resolve_save_conflict(hwnd: HWND, path: std::path::PathBuf)
 }
 
 /// Applies one recipe change to the open file and renders again.
-unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
+pub(super) unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
     let Some(path) = with_state(|s| s.path.clone()).flatten() else {
         return;
     };
@@ -705,21 +705,12 @@ unsafe fn choose_tool(hwnd: HWND, command: Command) {
         invalidate(hwnd);
         return;
     }
-    let signature = if command == Command::PlaceSignature {
-        match load_signature() {
-            Ok(points) => Some(points),
-            Err(error) => {
-                sheet::alert(hwnd, "Signature", &error);
-                return;
-            }
-        }
-    } else {
-        None
-    };
+    if super::forms::tool(hwnd, command) {
+        return;
+    }
     let kind = commands::annotation(command).unwrap_or(AnnotationKind::Ink);
-    let text = if matches!(kind, AnnotationKind::Text | AnnotationKind::Note) {
-        let title = if kind == AnnotationKind::Note { "Add a note" } else { "Add a text box" };
-        let Some(values) = sheet::input(hwnd, title, &[("Text", String::new())]) else {
+    let text = if kind == AnnotationKind::Note {
+        let Some(values) = sheet::input(hwnd, "Add a note", &[("Text", String::new())]) else {
             return;
         };
         values.into_iter().next().unwrap_or_default()
@@ -731,9 +722,14 @@ unsafe fn choose_tool(hwnd: HWND, command: Command) {
         s.zoom_select = false;
         s.markup = Some(kind);
         s.markup_text = text;
-        s.signature = signature;
+        s.signature = None;
         s.set_markup(true);
-        s.status = "Drag on the page to place the mark. Escape returns to navigation.".into();
+        s.status = if kind == AnnotationKind::Text {
+            "Click where the text goes, or click a text box to change it. Escape returns to navigation."
+        } else {
+            "Drag on the page to place the mark. Escape returns to navigation."
+        }
+        .into();
     });
     invalidate(hwnd);
 }
@@ -862,49 +858,6 @@ pub(super) unsafe fn pdf_info(hwnd: HWND, result: Result<PdfMetadata, String>) {
     match result {
         Ok(metadata) => sheet::alert(hwnd, "File information", &pdf_text(&path, &metadata, page)),
         Err(error) => sheet::alert(hwnd, "File information", &error),
-    }
-}
-
-/// Lists the editable form fields on this page, then asks for a value.
-pub(super) unsafe fn fill_field(hwnd: HWND, generation: u64, fields: Vec<crate::pdf::FormField>) {
-    let fields: Vec<_> = fields
-        .into_iter()
-        .filter(|f| !f.read_only && !matches!(f.kind, crate::pdf::FormFieldKind::Unsupported))
-        .collect();
-    if fields.is_empty() {
-        sheet::alert(hwnd, "Fill a form", "This page has no fields Preview can fill. For a PDF without a form, use Text box.");
-        return;
-    }
-    let items = fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let name = if field.name.is_empty() { "Unnamed field" } else { &field.name };
-            MenuItem::choice(&format!("{name}: {}", field.value), index)
-        })
-        .collect();
-    let Some(Pick::Index(chosen)) = popup(hwnd, items, None, None, true) else {
-        return;
-    };
-    let Some(field) = fields.get(chosen) else {
-        return;
-    };
-    let checkbox = matches!(field.kind, crate::pdf::FormFieldKind::Checkbox);
-    let label = if checkbox { "Checked: true or false" } else { field.name.as_str() };
-    let Some(values) = sheet::input(hwnd, "Fill a form field", &[(label, field.value.clone())]) else {
-        return;
-    };
-    let Some(value) = values.into_iter().next() else {
-        return;
-    };
-    if checkbox && value != "true" && value != "false" {
-        sheet::alert(hwnd, "Fill a form field", "Enter true or false for this checkbox.");
-        return;
-    }
-    if with_state(|s| s.generation == generation) == Some(true) {
-        edit(hwnd, |_, edits| {
-            edits.pdf.push(PdfEdit::FillField { page: field.page, annotation_index: field.annotation_index, value });
-        });
     }
 }
 

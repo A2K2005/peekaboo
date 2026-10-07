@@ -240,7 +240,8 @@ pub(super) struct State {
     pub(super) markup: Option<AnnotationKind>,
     pub(super) ink: Vec<[f32; 2]>,
     pub(super) markup_text: String,
-    pub(super) signature: Option<Vec<[f32; 2]>>,
+    pub(super) signature: Option<super::files::Signature>,
+    pub(super) forms: super::forms::Forms,
     pub(super) cancel: Option<Arc<AtomicBool>>,
     pub(super) slideshow: Option<Instant>,
     pub(super) tabs: Vec<PathBuf>,
@@ -356,6 +357,7 @@ impl State {
             ink: Vec::new(),
             markup_text: String::new(),
             signature: None,
+            forms: Default::default(),
             cancel: None,
             slideshow: None,
             tabs: Vec::new(),
@@ -516,14 +518,16 @@ impl State {
         let save = self.saves.get(path);
         (
             self.sessions.get(path).is_some_and(|edits| edits.dirty)
-                || save.is_some_and(|save| save.revision != save.saved_revision),
+                || save.is_some_and(|save| save.revision != save.saved_revision)
+                || self.forms.unsaved(Some(path.as_path())),
             save.is_some_and(|save| save.in_flight.is_some()) || self.workers.reads_snapshot(path),
         )
     }
     pub(super) fn window_close_state(&self) -> (bool, bool) {
         (
             self.sessions.values().any(|edits| edits.dirty)
-                || self.saves.values().any(|save| save.revision != save.saved_revision),
+                || self.saves.values().any(|save| save.revision != save.saved_revision)
+                || self.forms.unsaved(None),
             self.exporting
                 || self.saves.values().any(|save| save.in_flight.is_some())
                 || self.workers.reads_any_snapshot(),
@@ -882,7 +886,6 @@ fn current_text_result(current_generation: u64, current_path: Option<&std::path:
 /// Drains worker results and runs timed work. Runs on WM_TIMER and on the
 /// worker's wake message.
 pub(super) unsafe fn tick(hwnd: HWND) {
-    let mut fields_to_show = None;
     let mut output_to_open = None;
     let mut advance = false;
     let mut password_to_show = None;
@@ -1024,14 +1027,9 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                     }
                     continue;
                 }
-                Event::Fields(generation, result) => {
-                    if generation == state.generation {
-                        match result {
-                            Ok(fields) => fields_to_show = Some((generation, fields)),
-                            Err(error) => state.status = error,
-                        }
-                        invalidate(hwnd);
-                    }
+                Event::Forms(generation, path, reply) => {
+                    super::forms::received(state, generation, path, reply);
+                    invalidate(hwnd);
                     continue;
                 }
                 Event::Background(output, result) => {
@@ -1160,9 +1158,6 @@ pub(super) unsafe fn tick(hwnd: HWND) {
     if start_services {
         super::a11y::start(hwnd);
         super::window::watch_text_scale(hwnd);
-    }
-    if let Some((generation, fields)) = fields_to_show {
-        super::actions::fill_field(hwnd, generation, fields);
     }
     if let Some(result) = info_to_show {
         super::actions::pdf_info(hwnd, result);

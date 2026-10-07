@@ -21,6 +21,7 @@
 //! | sheet | In-window dialogs with EDIT text fields |
 //! | a11y | UI Automation through AccessKit |
 //! | files | File dialogs, clipboard, saved signature |
+//! | forms | Form fields, signature pad and placement, text markup, text boxes |
 //! | text | Text selection, copy, and image search over text layers |
 mod a11y;
 mod actions;
@@ -31,6 +32,7 @@ mod commands;
 mod disk;
 mod document;
 mod files;
+mod forms;
 mod menu;
 mod paint;
 mod render;

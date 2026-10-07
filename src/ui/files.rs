@@ -1,6 +1,5 @@
 //! Windows file dialogs, the clipboard, and the saved signature.
-use super::{app::with_state, sheet, worker::is_pdf};
-use crate::model::{AnnotationKind, ImageEdit, PdfEdit};
+use super::sheet;
 use std::path::PathBuf;
 use windows::{
     core::*,
@@ -141,99 +140,113 @@ pub(super) fn signature_path() -> std::result::Result<PathBuf, String> {
         })
         .ok_or("Windows local app storage is unavailable.".into())
 }
-pub(super) fn load_signature() -> std::result::Result<Vec<[f32; 2]>, String> {
-    let text = std::fs::read_to_string(signature_path()?).map_err(|_| {
-        "No saved signature yet. Draw it with the Draw tool, then choose Save drawing as signature.".to_string()
-    })?;
-    if text.len() > 300000 {
-        return Err("The saved signature is invalid.".into());
-    }
-    let mut points = Vec::new();
-    for line in text.lines() {
-        let Some((x, y)) = line.split_once(',') else {
-            return Err("The saved signature is invalid.".into());
-        };
-        let x = x
-            .parse::<f32>()
-            .map_err(|_| "The saved signature is invalid.")?;
-        let y = y
-            .parse::<f32>()
-            .map_err(|_| "The saved signature is invalid.")?;
-        if !x.is_finite()
-            || !y.is_finite()
-            || !(0.0..=1.0).contains(&x)
-            || !(0.0..=1.0).contains(&y)
-        {
-            return Err("The saved signature is invalid.".into());
-        }
-        points.push([x, y]);
-    }
-    if points.len() < 2 {
-        return Err("The saved signature is empty.".into());
-    }
-    Ok(points)
+/// A saved signature: strokes of `[x, y, pressure]` in 0..1 of its bounding
+/// box, and the box height divided by its width.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Signature {
+    pub(super) strokes: Vec<Vec<[f32; 3]>>,
+    pub(super) aspect: f32,
 }
-pub(super) unsafe fn save_signature(hwnd: HWND) {
-    let points = with_state(|s| {
-        s.path
-            .as_ref()
-            .and_then(|p| s.sessions.get(p).map(|e| (p, e)))
-            .and_then(|(path, edits)| {
-                if is_pdf(path) {
-                    edits.pdf.iter().rev().find_map(|e| match e {
-                        PdfEdit::Annotate {
-                            kind: AnnotationKind::Ink,
-                            points,
-                            ..
-                        } => Some(points.clone()),
-                        _ => None,
-                    })
-                } else {
-                    edits.image.iter().rev().find_map(|e| match e {
-                        ImageEdit::Annotate {
-                            kind: AnnotationKind::Ink,
-                            points,
-                            ..
-                        } => Some(points.clone()),
-                        _ => None,
-                    })
-                }
-            })
-    })
-    .flatten();
-    let result = (|| -> std::result::Result<(), String> {
-        let points = points.ok_or("Draw your signature with the Draw tool first.")?;
-        let left = points.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
-        let top = points.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
-        let width = points
-            .iter()
-            .map(|p| p[0])
-            .fold(f32::NEG_INFINITY, f32::max)
-            - left;
-        let height = points
-            .iter()
-            .map(|p| p[1])
-            .fold(f32::NEG_INFINITY, f32::max)
-            - top;
-        if width <= 0.0 || height <= 0.0 {
-            return Err("Draw a signature with both width and height.".into());
+
+const SIGNATURE_HEADER: &str = "signature 2 ";
+
+/// None when no signature is saved yet.
+pub(super) fn load_signature() -> Option<std::result::Result<Signature, String>> {
+    let text = std::fs::read_to_string(signature_path().ok()?).ok()?;
+    Some(parse_signature(&text).ok_or_else(|| "The saved signature cannot be read. Draw a new one.".to_string()))
+}
+
+/// Version 2 starts with a header and separates strokes with blank lines.
+/// The first version was one stroke of "x,y" lines with no shape stored.
+fn parse_signature(text: &str) -> Option<Signature> {
+    if text.len() > 4_000_000 {
+        return None;
+    }
+    let mut lines = text.lines().peekable();
+    let aspect = match lines.peek()?.strip_prefix(SIGNATURE_HEADER) {
+        Some(value) => {
+            let aspect = value.trim().parse::<f32>().ok().filter(|a| a.is_finite() && (0.01..=100.0).contains(a))?;
+            lines.next();
+            aspect
         }
-        let text = points
-            .iter()
-            .map(|p| format!("{},{}", (p[0] - left) / width, (p[1] - top) / height))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let path = signature_path()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(path, text).map_err(|e| e.to_string())
-    })();
-    let text = match result {
-        Ok(()) => "Your signature is saved on this PC. To place it, choose Sign, then drag where it goes.".into(),
-        Err(e) => e,
+        None => 0.35,
     };
-    sheet::alert(hwnd, "Signature", &text);
+    let valid = |n: &f32| n.is_finite() && (0.0..=1.0).contains(n);
+    let mut strokes: Vec<Vec<[f32; 3]>> = vec![Vec::new()];
+    for line in lines {
+        if line.trim().is_empty() {
+            if strokes.last().is_some_and(|s| !s.is_empty()) {
+                strokes.push(Vec::new());
+            }
+            continue;
+        }
+        let values: Vec<f32> = line.split(',').map(|v| v.trim().parse::<f32>().ok()).collect::<Option<_>>()?;
+        let point = match values[..] {
+            [x, y] => [x, y, 0.5],
+            [x, y, p] => [x, y, p],
+            _ => return None,
+        };
+        if !point.iter().all(valid) {
+            return None;
+        }
+        strokes.last_mut()?.push(point);
+    }
+    strokes.retain(|s| !s.is_empty());
+    (strokes.iter().map(Vec::len).sum::<usize>() >= 2).then_some(Signature { strokes, aspect })
+}
+
+/// Saves strokes drawn in any units, fitted to their bounding box.
+pub(super) fn store_signature(strokes: &[Vec<[f32; 3]>]) -> std::result::Result<Signature, String> {
+    let points = || strokes.iter().flatten();
+    if points().count() < 2 {
+        return Err("Draw your signature first.".into());
+    }
+    let left = points().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+    let top = points().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+    let width = (points().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max) - left).max(1e-4);
+    let height = (points().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max) - top).max(1e-4);
+    let signature = Signature {
+        strokes: strokes
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.iter().map(|p| [(p[0] - left) / width, (p[1] - top) / height, p[2].clamp(0.0, 1.0)]).collect())
+            .collect(),
+        aspect: (height / width).clamp(0.01, 100.0),
+    };
+    let mut text = format!("{SIGNATURE_HEADER}{}\n", signature.aspect);
+    let body: Vec<String> = signature
+        .strokes
+        .iter()
+        .map(|s| s.iter().map(|p| format!("{},{},{}", p[0], p[1], p[2])).collect::<Vec<_>>().join("\n"))
+        .collect();
+    text.push_str(&body.join("\n\n"));
+    let path = signature_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Cannot save the signature: {e}"))?;
+    }
+    let staged = path.with_extension("tmp");
+    std::fs::write(&staged, text)
+        .and_then(|_| std::fs::rename(&staged, &path))
+        .map_err(|e| format!("Cannot save the signature: {e}"))?;
+    Ok(signature)
+}
+pub(super) unsafe fn read_clipboard(hwnd: HWND) -> Option<String> {
+    use windows::Win32::System::{DataExchange::*, Memory::*};
+    OpenClipboard(Some(hwnd)).ok()?;
+    let text = (|| {
+        let memory = HGLOBAL(GetClipboardData(13).ok()?.0);
+        let pointer = GlobalLock(memory) as *const u16;
+        if pointer.is_null() {
+            return None;
+        }
+        let units = std::slice::from_raw_parts(pointer, GlobalSize(memory) / 2);
+        let length = units.iter().position(|c| *c == 0).unwrap_or(units.len());
+        let text = String::from_utf16_lossy(&units[..length]);
+        let _ = GlobalUnlock(memory);
+        Some(text)
+    })();
+    let _ = CloseClipboard();
+    text
 }
 
 pub(super) unsafe fn clipboard(hwnd: HWND, text: &str) -> std::result::Result<(), String> {
