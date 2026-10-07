@@ -253,6 +253,7 @@ struct Api {
     init: unsafe extern "system" fn(),
     destroy: unsafe extern "system" fn(),
     load: unsafe extern "system" fn(*mut FileAccess, *const u8) -> Handle,
+    load_memory: unsafe extern "system" fn(*const u8, i32, *const u8) -> Handle,
     close_doc: unsafe extern "system" fn(Handle),
     count: unsafe extern "system" fn(Handle) -> i32,
     load_page: unsafe extern "system" fn(Handle, i32) -> Handle,
@@ -581,6 +582,7 @@ impl PdfEngine {
                 init: symbol!("FPDF_InitLibrary"),
                 destroy: symbol!("FPDF_DestroyLibrary"),
                 load: symbol!("FPDF_LoadCustomDocument"),
+                load_memory: symbol!("FPDF_LoadMemDocument"),
                 close_doc: symbol!("FPDF_CloseDocument"),
                 count: symbol!("FPDF_GetPageCount"),
                 load_page: symbol!("FPDF_LoadPage"),
@@ -816,7 +818,9 @@ impl PdfEngine {
                     }
                     from
                 }
-                PdfEdit::InsertBlank { at } | PdfEdit::InsertImage { at, .. } => {
+                PdfEdit::InsertBlank { at }
+                | PdfEdit::InsertImage { at, .. }
+                | PdfEdit::InsertPdf { at, .. } => {
                     if at > count as u32 {
                         return Err("Choose an insertion position within this PDF.".into());
                     }
@@ -856,6 +860,14 @@ impl PdfEngine {
                     ref bytes,
                 } => {
                     self.insert_image(handle, at, bytes, pages::ImageFit::Neighbor)
+                        .map_err(|e| format!("{e} ({name})"))?;
+                }
+                PdfEdit::InsertPdf {
+                    at,
+                    ref name,
+                    ref bytes,
+                } => {
+                    self.insert_pdf(handle, at, bytes)
                         .map_err(|e| format!("{e} ({name})"))?;
                 }
                 PdfEdit::Crop {

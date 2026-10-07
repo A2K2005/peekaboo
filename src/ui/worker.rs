@@ -54,6 +54,8 @@ pub(super) enum SaveKind {
     Copy,
     ExtractPage,
     Merge(PathBuf),
+    /// Extracts the page to a temporary file to drag out to Explorer.
+    DragOut,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -188,6 +190,8 @@ pub(super) enum Event {
     Done(Item, Outcome),
     Metadata(u64, std::result::Result<PdfMetadata, String>),
     Saved(PathBuf, Edits, bool, std::result::Result<(), String>),
+    /// The temporary file for a page drag out, or why it failed.
+    DragOut(PathBuf, std::result::Result<(), String>),
     Autosaved(Autosaved),
     Layer(u64, PathBuf, u32, std::result::Result<TextLayer, String>),
     Text(u64, PathBuf, std::result::Result<String, String>),
@@ -743,7 +747,9 @@ impl Worker {
                         Some(engine) => {
                             engine.alias_password(&request.path, &source);
                             match &kind {
-                                SaveKind::ExtractPage => engine.extract_page(&source, &output, request.page, &edits.pdf),
+                                SaveKind::ExtractPage | SaveKind::DragOut => {
+                                    engine.extract_page(&source, &output, request.page, &edits.pdf)
+                                }
                                 SaveKind::Merge(other) => engine.merge(&source, other, &output, &edits.pdf),
                                 SaveKind::Copy => engine.save_copy(&source, &output, &edits.pdf),
                             }
@@ -757,12 +763,16 @@ impl Worker {
                 } else {
                     crate::imaging::export(&source, &output, &edits.image)
                 };
-                Event::Saved(
-                    request.path,
-                    edits,
-                    kind != SaveKind::ExtractPage,
-                    result.map_err(|e| format!("Could not save {}: {e}", output.display())),
-                )
+                if kind == SaveKind::DragOut {
+                    Event::DragOut(output, result.map_err(|e| format!("Could not drag this page out: {e}")))
+                } else {
+                    Event::Saved(
+                        request.path,
+                        edits,
+                        kind != SaveKind::ExtractPage,
+                        result.map_err(|e| format!("Could not save {}: {e}", output.display())),
+                    )
+                }
             }
             Job::Layer(_) => Event::Layer(
                 request.generation,

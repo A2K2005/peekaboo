@@ -2,6 +2,9 @@
 
 mod background;
 mod imaging;
+// The shell uses only drag out so far.
+#[allow(dead_code)]
+mod integration;
 mod model;
 mod ocr;
 mod pdf;

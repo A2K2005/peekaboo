@@ -259,6 +259,7 @@ pub(super) struct State {
     /// Scroll offset and last used row of each sidebar tab.
     pub(super) sidebar_scroll: [f32; 3],
     pub(super) sidebar_rows: [usize; 3],
+    pub(super) organize: super::organize::Organize,
     pub(super) markup_open: bool,
     /// Markup bar slide: when it started and the progress it started from.
     pub(super) markup_since: Option<Instant>,
@@ -372,6 +373,7 @@ impl State {
             sidebar_tab: 0,
             sidebar_scroll: [0.0; 3],
             sidebar_rows: [0; 3],
+            organize: Default::default(),
             markup_open: false,
             markup_since: None,
             markup_from: 0.0,
@@ -963,6 +965,10 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                     invalidate(hwnd);
                     continue;
                 }
+                Event::DragOut(output, result) => {
+                    super::organize::extracted(state, output, result);
+                    continue;
+                }
                 Event::Autosaved(saved) => {
                     if matches!(saved.result, Err(super::disk::Failure::Changed)) {
                         conflict_to_show = Some(saved.path.clone());
@@ -1139,6 +1145,9 @@ pub(super) unsafe fn tick(hwnd: HWND) {
             }
             invalidate(hwnd);
         }
+        if super::organize::autoscroll(state) {
+            invalidate(hwnd);
+        }
         if state.tooltip.is_none() && state.hover_since.is_some_and(|t| t.elapsed() >= TOOLTIP_DELAY) {
             state.hover_since = None;
             state.tooltip = state.hover;
@@ -1168,6 +1177,7 @@ pub(super) unsafe fn tick(hwnd: HWND) {
         super::actions::pdf_info(hwnd, result);
     }
     super::bench::tick(hwnd);
+    super::organize::after_tick(hwnd);
     if let Some(output) = output_to_open {
         open(hwnd, output);
     }

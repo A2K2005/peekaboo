@@ -2,7 +2,7 @@
 //! pointer and keyboard input, and live theme, DPI, and text-size changes.
 use super::{
     a11y, actions,
-    app::{add_tabs, close_tab, install, invalidate, open, select_tab, tick, uninstall, with_state, State},
+    app::{close_tab, install, invalidate, select_tab, tick, uninstall, with_state, State},
     commands::{self, Chord, Command},
     document::{self, Phase, PointerEvent, PointerKind},
     paint, sheet, sidebar, theme,
@@ -25,7 +25,7 @@ use windows::{
         UI::{
             HiDpi::*,
             Input::{KeyboardAndMouse::*, Pointer::*},
-            Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP},
+            Shell::{DragFinish, HDROP},
             WindowsAndMessaging::*,
         },
     },
@@ -96,7 +96,7 @@ pub fn run() -> Result<()> {
         install(state);
         // Apply WM_NCCALCSIZE now that the state exists, so the caption goes.
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        DragAcceptFiles(hwnd, true);
+        super::drop::register(hwnd);
         SetTimer(Some(hwnd), 1, 10, None);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
@@ -353,6 +353,9 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
         actions::context_menu(hwnd, Some((e.x, e.y)));
         return;
     }
+    if super::organize::pointer(hwnd, &e) {
+        return;
+    }
     let mut activate_id = None;
     let mut to_document = false;
     let mut repaint = false;
@@ -473,6 +476,7 @@ unsafe fn escape(hwnd: HWND) {
         s.signature = None;
         s.selection = None;
         s.drag = None;
+        s.organize.cancel();
         s.tooltip = None;
     });
     let _ = ReleaseCapture();
@@ -622,21 +626,9 @@ unsafe fn retheme(hwnd: HWND) {
 
 unsafe fn drop_files(hwnd: HWND, wparam: WPARAM) {
     let drop = HDROP(wparam.0 as *mut _);
-    let count = DragQueryFileW(drop, u32::MAX, None);
-    let mut paths = Vec::new();
-    for index in 0..count {
-        let length = DragQueryFileW(drop, index, None);
-        let mut path = vec![0u16; length as usize + 1];
-        DragQueryFileW(drop, index, Some(&mut path));
-        if length > 0 {
-            paths.push(PathBuf::from(String::from_utf16_lossy(&path[..length as usize])));
-        }
-    }
+    let paths = super::drop::hdrop_paths(drop);
     DragFinish(drop);
-    with_state(|s| add_tabs(s, &paths));
-    if let Some(path) = paths.into_iter().next() {
-        open(hwnd, path);
-    }
+    super::drop::finish(hwnd, paths, None);
 }
 
 unsafe fn close(hwnd: HWND) {
@@ -911,6 +903,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_DESTROY => {
+            super::drop::revoke(hwnd);
             let _ = KillTimer(Some(hwnd), 1);
             PostQuitMessage(0);
             LRESULT(0)

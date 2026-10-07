@@ -25,8 +25,8 @@ Updated 2026-10-07 for the handoff commit. The PRD remains the release contract.
    - Add selection-based highlighting and a visible retry path for failed saves.
 
 3. **Finish page organization**
-   - Add thumbnail drag reorder, insertion feedback, image-page insertion UI, file drop into the sidebar, and drag-out to Explorer.
-   - Validate form-preserving merge/import behavior and large-document operations.
+   - Thumbnail drag reorder with an insertion line and edge autoscroll, Ctrl+Shift+Up and Down, a thumbnail context menu, Insert image as page, OLE file drop (PDFs and images insert at the line in the sidebar; other drops open tabs), and drag-out of one page to Explorer are implemented but have not run live. Verify them, including drag-out with `EnableMouseInPointer`.
+   - Dropped PDFs with form fields are refused (`PdfEdit::InsertPdf`). Validate form-preserving merge/import behavior and large-document operations.
 
 4. **Finish image workflows**
    - Add percent resize, explicit aspect lock, quality controls, and encoded size estimates before save.

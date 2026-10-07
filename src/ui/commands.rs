@@ -28,7 +28,10 @@ pub(super) enum Command {
     RemoveBackground,
     DeletePage,
     MovePage,
+    MovePageUp,
+    MovePageDown,
     InsertPage,
+    InsertImagePage,
     Previous,
     Next,
     ZoomIn,
@@ -153,7 +156,10 @@ pub(super) fn info(command: Command) -> Info {
         RemoveBackground => i("Remove background", "Remove &background...", Some(ERASE), Some('B')),
         DeletePage => i("Delete page", "&Delete page...", None, None),
         MovePage => i("Move page", "&Move page...", None, None),
+        MovePageUp => i("Move page up", "Move page u&p", None, None),
+        MovePageDown => i("Move page down", "Move page do&wn", None, None),
         InsertPage => i("Insert blank page", "&Insert blank page", None, None),
+        InsertImagePage => i("Insert image as page", "Insert image as pag&e...", None, None),
         Previous => i("Previous", "&Previous", None, None),
         Next => i("Next", "&Next", None, None),
         ZoomIn => i("Zoom in", "Zoom &in", None, None),
@@ -285,6 +291,8 @@ pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
     (ctrl_shift(0x4B), RemoveBackground),
     (plain(0x2E), DeletePage),
     (ctrl_shift(0x4E), InsertPage),
+    (ctrl_shift(0x26), MovePageUp),
+    (ctrl_shift(0x28), MovePageDown),
     (Chord { key: 0x0D, ctrl: false, shift: false, alt: true }, FileInfo),
     (plain(0x25), Previous),
     (plain(0x21), Previous),
@@ -304,7 +312,9 @@ pub(super) fn shortcut_text(command: Command) -> Option<String> {
         0x21 => "Page Up".into(),
         0x22 => "Page Down".into(),
         0x25 => "Left".into(),
+        0x26 => "Up".into(),
         0x27 => "Right".into(),
+        0x28 => "Down".into(),
         0x2E => "Delete".into(),
         0x60 => "Num 0".into(),
         0x6B => "Num +".into(),
@@ -357,7 +367,9 @@ pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
         Share => false,
         _ if !ready => false,
         Flip | Resize | RemoveBackground | BatchFolder | BatchSelected => !x.pdf,
-        ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | ViewContinuous | ViewSingle | ViewTwoPages => x.pdf,
+        ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | InsertImagePage | ViewContinuous | ViewSingle | ViewTwoPages => x.pdf,
+        MovePageUp => x.pdf && x.can_previous,
+        MovePageDown => x.pdf && x.can_next,
         Previous => x.can_previous,
         Next => x.can_next,
         SaveCopy | Print => !x.saving,
@@ -463,7 +475,7 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
             &[
                 Some(Undo), Some(Revert), None, Some(CopyText), Some(Find), Some(FindNext), Some(FindPrevious), None, Some(Rotate), Some(Flip),
                 Some(Crop), Some(Resize), Some(RemoveBackground), None, Some(DeletePage), Some(MovePage),
-                Some(InsertPage),
+                Some(MovePageUp), Some(MovePageDown), Some(InsertPage), Some(InsertImagePage),
             ],
             x,
         ),
@@ -526,6 +538,17 @@ pub(super) fn zoom_menu(x: &Ctx) -> Vec<MenuItem> {
     items(&list, x)
 }
 
+/// Right-click on a page thumbnail.
+pub(super) fn page_menu(x: &Ctx) -> Vec<MenuItem> {
+    items(
+        &[
+            Some(MovePageUp), Some(MovePageDown), Some(MovePage), None, Some(Rotate), Some(DeletePage), None,
+            Some(InsertPage), Some(InsertImagePage), None, Some(ExtractPage),
+        ],
+        x,
+    )
+}
+
 pub(super) fn tab_menu(x: &Ctx) -> Vec<MenuItem> {
     items(&[Some(CloseTab), None, Some(NextTab), Some(PreviousTab)], x)
 }
@@ -547,8 +570,8 @@ pub(super) fn access_key(label: &str) -> Option<char> {
 
 pub(super) const ALL: &[Command] = &[
     Open, SaveCopy, ExtractPage, Combine, Print, BatchFolder, BatchSelected, FileInfo, Share, CloseTab, Exit, Undo,
-    Revert, CopyText, Find, FindNext, FindPrevious, Rotate, Flip, Crop, Resize, RemoveBackground, DeletePage, MovePage, InsertPage,
-    Previous, Next, ZoomIn, ZoomOut, Fit, FitWidth, ActualSize, ZoomToSelection, ViewContinuous, ViewSingle,
+    Revert, CopyText, Find, FindNext, FindPrevious, Rotate, Flip, Crop, Resize, RemoveBackground, DeletePage, MovePage, MovePageUp,
+    MovePageDown, InsertPage, InsertImagePage, Previous, Next, ZoomIn, ZoomOut, Fit, FitWidth, ActualSize, ZoomToSelection, ViewContinuous, ViewSingle,
     ViewTwoPages, Slideshow, ToggleSidebar, ToggleMarkup, NextTab, PreviousTab, Tab(0),
     NextPane, PreviousPane, Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow,
     SaveSignature, PlaceSignature, FillForm, ZoomMenu, AppMenu, MoreTools,

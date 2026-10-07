@@ -265,6 +265,7 @@ dependencies = [
  "ort",
  "windows",
  "windows-collections",
+ "windows-core",
  "windows-numerics",
 ]
 
