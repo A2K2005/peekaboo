@@ -92,7 +92,7 @@ pub fn run() -> Result<()> {
             page: 0,
             generation: 0,
             frame: None,
-            status: app::EMPTY_STATUS.into(),
+            status: if paths.is_empty() { app::EMPTY_STATUS.into() } else { "Opening...".into() },
             pending: false,
             painted: false,
             due: Some(Instant::now()),

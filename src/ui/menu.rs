@@ -176,9 +176,8 @@ unsafe fn register() -> PCWSTR {
 
 /// Opens a popup for `items` with its top-left at `anchor` (screen pixels).
 /// `flip_x` is where the right edge goes when the popup flips left.
-unsafe fn open_level(items: Vec<MenuItem>, anchor: (f32, f32), flip_x: f32, select_first: bool) {
-    let Some((owner, scale, text_scale, theme)) =
-        with(|t| (t.levels.last().map_or(t.owner, |l| l.hwnd), t.scale, t.text_scale, t.theme))
+unsafe fn open_level(items: Vec<MenuItem>, anchor: (f32, f32), flip_x: f32, select_first: bool, take_focus: bool) {
+    let Some((owner, scale, text_scale)) = with(|t| (t.levels.last().map_or(t.owner, |l| l.hwnd), t.scale, t.text_scale))
     else {
         return;
     };
@@ -216,12 +215,11 @@ unsafe fn open_level(items: Vec<MenuItem>, anchor: (f32, f32), flip_x: f32, sele
     let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as _, 4);
     let selected = if select_first { step_selection(&items, None, true) } else { None };
     with(|t| t.levels.push(Level { hwnd, items, selected, rows, open_child: None }));
-    let adapter = accesskit_windows::Adapter::new(hwnd, true, Invoker(hwnd.0 as isize));
+    let adapter = accesskit_windows::Adapter::new(hwnd, take_focus, Invoker(hwnd.0 as isize));
     ADAPTERS.with(|a| a.borrow_mut().push((hwnd.0 as isize, adapter)));
-    let _ = theme;
-    // The popup takes activation so keyboard input and UI Automation focus
-    // follow the selected item.
-    let _ = ShowWindow(hwnd, SW_SHOW);
+    // An active popup gets keyboard input, and UI Automation focus follows
+    // its selected item.
+    let _ = ShowWindow(hwnd, if take_focus { SW_SHOW } else { SW_SHOWNOACTIVATE });
 }
 
 /// Destroys every level deeper than `keep`.
@@ -252,7 +250,7 @@ unsafe fn invalidate(hwnd: HWND) {
 }
 
 /// Activates an item: a command closes the menu; a submenu opens.
-unsafe fn activate(level: usize, index: usize) {
+unsafe fn activate(level: usize, index: usize, keyboard: bool) {
     let Some(action) = with(|t| {
         let l = t.levels.get_mut(level)?;
         let item = l.items.get(index)?;
@@ -279,9 +277,9 @@ unsafe fn activate(level: usize, index: usize) {
         Ok(command) => finish(command),
         Err((children, anchor, flip_x, already_open)) => {
             if already_open {
-                // Move into the open submenu.
+                // The keyboard moves into an open submenu; the mouse leaves it open.
                 let child = with(|t| t.levels.get(level + 1).map(|l| l.hwnd)).flatten();
-                if let Some(child) = child {
+                if let (Some(child), true) = (child, keyboard) {
                     let _ = SetActiveWindow(child);
                     select(level + 1, None, true);
                 }
@@ -289,7 +287,8 @@ unsafe fn activate(level: usize, index: usize) {
             }
             close_after(level);
             with(|t| t.levels[level].open_child = Some(index));
-            open_level(children, anchor, flip_x, true);
+            // A submenu opened by hovering does not take the keyboard, as in Win32 menus.
+            open_level(children, anchor, flip_x, keyboard, keyboard);
         }
     }
 }
@@ -324,7 +323,7 @@ pub(super) unsafe fn track(
         *m.borrow_mut() =
             Some(Tracker { owner, levels: Vec::new(), done: None, theme, scale, text_scale, painter: None })
     });
-    open_level(items, anchor, anchor.0, keyboard);
+    open_level(items, anchor, anchor.0, keyboard, true);
     let mut message = MSG::default();
     while with(|t| t.done.is_none() && !t.levels.is_empty()).unwrap_or(false) {
         let result = GetMessageW(&mut message, None, 0, 0).0;
@@ -440,7 +439,7 @@ unsafe extern "system" fn menu_proc(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 })
                 .unwrap_or(false);
                 if submenu {
-                    activate(level, index);
+                    activate(level, index, false);
                 } else {
                     close_after(level);
                 }
@@ -450,13 +449,18 @@ unsafe extern "system" fn menu_proc(hwnd: HWND, message: u32, wparam: WPARAM, lp
         (WM_LBUTTONUP, Some(level)) => {
             let y = ((lparam.0 >> 16) as u16 as i16) as f32;
             if let Some(index) = with(|t| item_at(t, level, y)).flatten() {
-                activate(level, index);
+                activate(level, index, false);
             }
             LRESULT(0)
         }
         (WM_KEYDOWN, Some(level)) => {
             let selected = with(|t| t.levels[level].selected).flatten();
-            match VIRTUAL_KEY(wparam.0 as u16) {
+            let key = VIRTUAL_KEY(wparam.0 as u16);
+            if matches!(key, VK_DOWN | VK_UP | VK_HOME | VK_END) {
+                // Moving the selection closes a submenu opened by hovering.
+                close_after(level);
+            }
+            match key {
                 VK_DOWN => select(level, None, true),
                 VK_UP => select(level, None, false),
                 VK_HOME => {
@@ -469,13 +473,13 @@ unsafe extern "system" fn menu_proc(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 }
                 VK_RETURN | VK_SPACE => {
                     if let Some(index) = selected {
-                        activate(level, index);
+                        activate(level, index, true);
                     }
                 }
                 VK_RIGHT => {
                     let submenu = selected.is_some_and(|i| with(|t| !t.levels[level].items[i].children.is_empty()).unwrap_or(false));
                     if submenu {
-                        activate(level, selected.unwrap());
+                        activate(level, selected.unwrap(), true);
                     }
                 }
                 VK_LEFT | VK_ESCAPE if level > 0 => close_after(level - 1),
@@ -488,7 +492,7 @@ unsafe extern "system" fn menu_proc(hwnd: HWND, message: u32, wparam: WPARAM, lp
             if let Some(key) = char::from_u32(wparam.0 as u32) {
                 let result = with(|t| access(&t.levels[level].items, t.levels[level].selected, key));
                 match result {
-                    Some(KeyResult::Activate(index)) => activate(level, index),
+                    Some(KeyResult::Activate(index)) => activate(level, index, true),
                     Some(KeyResult::Select(index)) => select(level, Some(index), true),
                     _ => {}
                 }
@@ -523,7 +527,7 @@ unsafe extern "system" fn menu_proc(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         (WM_APP_INVOKE, Some(level)) => {
-            activate(level, wparam.0);
+            activate(level, wparam.0, true);
             LRESULT(0)
         }
         (WM_APP_SELECT, Some(level)) => {
