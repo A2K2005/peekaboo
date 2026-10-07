@@ -365,14 +365,25 @@ fn reading_order(runs: &[Run]) -> Vec<usize> {
     // ponytail: pairwise ordering is cubic in the block count; pages with
     // more blocks fall back to rows. Add spatial indexing if that bites.
     let order = if blocks.len() > 400 {
+        // "Same row" is not transitive, so it cannot drive a sort. Number
+        // the rows first: top to bottom, a block starts a new row unless it
+        // shares a line with the row's first block. Then sort by (row, left).
         let mut order: Vec<usize> = (0..blocks.len()).collect();
-        order.sort_by(|&a, &b| {
-            let (a, b) = (&blocks[a], &blocks[b]);
-            if same_row(a, b) {
-                a.l.total_cmp(&b.l)
+        order.sort_by(|&a, &b| blocks[a].center().total_cmp(&blocks[b].center()));
+        let mut row = vec![0usize; blocks.len()];
+        let mut first = order[0];
+        for &i in &order {
+            if !same_row(&blocks[first], &blocks[i]) {
+                row[i] = row[first] + 1;
+                first = i;
             } else {
-                a.center().total_cmp(&b.center())
+                row[i] = row[first];
             }
+        }
+        order.sort_by(|&a, &b| {
+            row[a]
+                .cmp(&row[b])
+                .then(blocks[a].l.total_cmp(&blocks[b].l))
         });
         order
     } else {
@@ -668,6 +679,29 @@ mod tests {
             line("October 7", 450.0, 40.0),
         ];
         assert_eq!(text_of(&lines), "October 7\nDear reader,");
+    }
+
+    #[test]
+    fn a_dense_page_with_staggered_rows_reads_row_by_row() {
+        // 600 one-letter blocks, each 4 points lower and 25 points further
+        // left than the one before. Neighbors share a line, but blocks two
+        // apart do not, so "same row, then left edge" is not a total order.
+        let n = 600;
+        let glyphs: Vec<Glyph> = (0..n)
+            .map(|i| {
+                let (x, y) = ((n - i) as f32 * 25.0, i as f32 * 4.0);
+                Glyph {
+                    ch: char::from(b'a' + (i % 26) as u8),
+                    rect: Some([x, y, x + 5.0, y + 10.0]),
+                }
+            })
+            .collect();
+        let layer = layout(&glyphs, 20_000.0, 3_000.0);
+        assert_eq!(layer.boxes.len(), layer.text.chars().count());
+        // Rows pair up blocks (0, 1), (2, 3), ...; each row reads left to right.
+        let lines: Vec<&str> = layer.text.lines().collect();
+        assert_eq!(lines.len(), n / 2);
+        assert_eq!(&lines[..3], ["b a", "d c", "f e"]);
     }
 
     #[test]
