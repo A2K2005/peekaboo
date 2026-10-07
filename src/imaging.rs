@@ -9,7 +9,10 @@ use std::{
 use windows::{
     core::{w, Interface, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{GENERIC_READ, GENERIC_WRITE, VARIANT_TRUE},
+        Foundation::{
+            GlobalFree, GENERIC_READ, GENERIC_WRITE, HANDLE, HGLOBAL, HWND, VARIANT_TRUE,
+        },
+        Graphics::Gdi::{BITMAPV5HEADER, BI_BITFIELDS, LCS_GM_IMAGES},
         Graphics::Imaging::*,
         Media::MediaFoundation::{
             MFMediaType_Video, MFTEnumEx, MFVideoFormat_HEVC, MFT_CATEGORY_VIDEO_DECODER,
@@ -20,8 +23,14 @@ use windows::{
             Com::{
                 CoCreateInstance, CoTaskMemFree, IStream,
                 StructuredStorage::{PropVariantClear, PropVariantToUInt16, PROPBAG2, PROPVARIANT},
-                CLSCTX_INPROC_SERVER, STREAM_SEEK_END,
+                CLSCTX_INPROC_SERVER, STREAM_SEEK_END, STREAM_SEEK_SET,
             },
+            DataExchange::{
+                CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+                OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+            },
+            Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
+            Ole::{CF_DIB, CF_DIBV5},
             Variant::{VARIANT, VT_BOOL, VT_R4},
         },
         UI::Shell::SHCreateMemStream,
@@ -1024,6 +1033,232 @@ unsafe fn webp_bytes(
     let bytes = std::slice::from_raw_parts(output, written).to_vec();
     libwebp_sys::WebPFree(output.cast());
     Ok(bytes)
+}
+/// Read an image from the clipboard. PNG comes first because it keeps alpha
+/// reliably, then CF_DIBV5, then CF_DIB.
+#[allow(dead_code)] // The shell calls this in wave 2.
+pub fn clipboard_image() -> Result<Frame, String> {
+    unsafe {
+        OpenClipboard(None).map_err(|_| "Another app is using the clipboard. Try again.")?;
+        let read = || -> Result<(Vec<u8>, bool), String> {
+            let png = RegisterClipboardFormatW(w!("PNG"));
+            for (format, dib) in [
+                (png, false),
+                (CF_DIBV5.0 as u32, true),
+                (CF_DIB.0 as u32, true),
+            ] {
+                if format != 0 && IsClipboardFormatAvailable(format).is_ok() {
+                    let handle = GetClipboardData(format).map_err(err)?;
+                    return Ok((global_bytes(HGLOBAL(handle.0))?, dib));
+                }
+            }
+            Err("The clipboard has no image. Copy an image, then try again.".into())
+        };
+        let data = read();
+        let _ = CloseClipboard();
+        let (bytes, dib) = data?;
+        decode_clipboard(&bytes, dib)
+    }
+}
+/// Put `frame` on the clipboard as CF_DIBV5 and PNG, both with alpha.
+/// `owner` is the app window: SetClipboardData fails when no window owns the clipboard.
+#[allow(dead_code)] // The shell calls this in wave 2.
+pub fn copy_image(owner: HWND, frame: &Frame) -> Result<(), String> {
+    let (dib, png) = encode_clipboard(frame)?;
+    unsafe {
+        OpenClipboard(Some(owner)).map_err(|_| "Another app is using the clipboard. Try again.")?;
+        let write = || -> Result<(), String> {
+            EmptyClipboard().map_err(err)?;
+            set_global(CF_DIBV5.0 as u32, &dib)?;
+            set_global(RegisterClipboardFormatW(w!("PNG")), &png)
+        };
+        let result = write();
+        let _ = CloseClipboard();
+        result
+    }
+}
+unsafe fn global_bytes(handle: HGLOBAL) -> Result<Vec<u8>, String> {
+    let data = GlobalLock(handle) as *const u8;
+    if data.is_null() {
+        return Err("Could not read the clipboard image.".into());
+    }
+    let bytes = std::slice::from_raw_parts(data, GlobalSize(handle)).to_vec();
+    let _ = GlobalUnlock(handle);
+    Ok(bytes)
+}
+unsafe fn set_global(format: u32, bytes: &[u8]) -> Result<(), String> {
+    let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(err)?;
+    let data = GlobalLock(handle) as *mut u8;
+    if data.is_null() {
+        let _ = GlobalFree(Some(handle));
+        return Err("Not enough memory to copy the image.".into());
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+    let _ = GlobalUnlock(handle);
+    // After a successful SetClipboardData, the system owns the memory.
+    if let Err(e) = SetClipboardData(format, Some(HANDLE(handle.0))) {
+        let _ = GlobalFree(Some(handle));
+        return Err(err(e));
+    }
+    Ok(())
+}
+/// Decode clipboard bytes: a PNG, or a packed DIB (`dib`) from CF_DIB or CF_DIBV5.
+pub fn decode_clipboard(bytes: &[u8], dib: bool) -> Result<Frame, String> {
+    if !dib {
+        return unsafe { decode_memory(bytes) };
+    }
+    let file = bmp_file(bytes)?;
+    let frame = unsafe { decode_memory(&file) }?;
+    // Many apps write 32-bit DIBs with every alpha byte 0. Treat those as opaque.
+    if frame.pixels.chunks_exact(4).all(|p| p[3] == 0) {
+        return unsafe { decode_memory(&opaque_bmp(file)) };
+    }
+    Ok(frame)
+}
+/// A packed DIB with the 14-byte BITMAPFILEHEADER in front, as WIC expects.
+/// https://learn.microsoft.com/windows/win32/gdi/bitmap-storage
+fn bmp_file(dib: &[u8]) -> Result<Vec<u8>, String> {
+    let read = |at: usize, n: usize| -> Option<u32> {
+        let bytes = dib.get(at..at + n)?;
+        Some(bytes.iter().rev().fold(0, |v, &b| v << 8 | b as u32))
+    };
+    let damaged = || "The clipboard image is damaged.".to_string();
+    let header = read(0, 4).ok_or_else(damaged)? as usize;
+    let (bits, compression, used, entry) = if header == 12 {
+        (read(10, 2).ok_or_else(damaged)?, 0, 0, 3)
+    } else if header >= 40 {
+        let bits = read(14, 2).ok_or_else(damaged)?;
+        let compression = read(16, 4).ok_or_else(damaged)?;
+        (bits, compression, read(32, 4).ok_or_else(damaged)?, 4)
+    } else {
+        return Err(damaged());
+    };
+    let colors = match (used, bits) {
+        (0, 1..=8) => 1 << bits,
+        (n, _) => n as usize,
+    };
+    // BI_BITFIELDS (3) and BI_ALPHABITFIELDS (6) put masks after a 40-byte header.
+    let masks = match (header, compression) {
+        (40, 3) => 12,
+        (40, 6) => 16,
+        _ => 0,
+    };
+    let offset = 14 + header + masks + colors * entry;
+    if colors > 256 || offset > 14 + dib.len() {
+        return Err(damaged());
+    }
+    let size = u32::try_from(14 + dib.len()).map_err(|_| damaged())?;
+    let mut file = Vec::with_capacity(14 + dib.len());
+    file.extend_from_slice(b"BM");
+    file.extend_from_slice(&size.to_le_bytes());
+    file.extend_from_slice(&[0; 4]);
+    file.extend_from_slice(&(offset as u32).to_le_bytes());
+    file.extend_from_slice(dib);
+    Ok(file)
+}
+/// The same BMP read as BI_RGB with a BITMAPINFOHEADER, so WIC ignores alpha.
+/// The file header still points at the pixels, so the shorter header is safe.
+fn opaque_bmp(mut file: Vec<u8>) -> Vec<u8> {
+    file[14..18].copy_from_slice(&40u32.to_le_bytes());
+    file[30..34].copy_from_slice(&0u32.to_le_bytes());
+    file
+}
+unsafe fn decode_memory(bytes: &[u8]) -> Result<Frame, String> {
+    let factory = factory()?;
+    let stream = factory.CreateStream().map_err(err)?;
+    stream.InitializeFromMemory(bytes).map_err(err)?;
+    let frame = factory
+        .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnLoad)
+        .and_then(|decoder| decoder.GetFrame(0))
+        .map_err(|e| format!("Could not read the clipboard image. {e}"))?;
+    let (width, height) = size(&frame)?;
+    let mut pixels = vec![0; frame_bytes(width, height)?];
+    let converter = factory.CreateFormatConverter().map_err(err)?;
+    converter
+        .Initialize(
+            &frame,
+            &GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone,
+            None,
+            0.0,
+            WICBitmapPaletteTypeCustom,
+        )
+        .map_err(err)?;
+    converter
+        .CopyPixels(std::ptr::null(), width * 4, &mut pixels)
+        .map_err(err)?;
+    Ok(Frame {
+        width,
+        height,
+        pixels,
+        page_count: 1,
+        source_width: width,
+        source_height: height,
+    })
+}
+/// Clipboard bytes for `frame`: a CF_DIBV5 (bottom-up, straight alpha) and a PNG.
+pub fn encode_clipboard(frame: &Frame) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let png = unsafe {
+        let factory = factory()?;
+        let bitmap = frame_bitmap(&factory, frame)?;
+        let stream = SHCreateMemStream(None).ok_or("Not enough memory to copy the image.")?;
+        let options = ExportOptions {
+            format: ImageFormat::Png,
+            quality: 1.0,
+            lossless: true,
+        };
+        encode(&factory, &bitmap, &stream, &options)?;
+        let mut length = 0;
+        stream
+            .Seek(0, STREAM_SEEK_END, Some(&mut length))
+            .map_err(err)?;
+        stream.Seek(0, STREAM_SEEK_SET, None).map_err(err)?;
+        let mut png = vec![0u8; length as usize];
+        let mut read = 0;
+        stream
+            .Read(png.as_mut_ptr().cast(), png.len() as u32, Some(&mut read))
+            .ok()
+            .map_err(err)?;
+        if read as usize != png.len() {
+            return Err("Could not copy the image.".into());
+        }
+        png
+    };
+    // https://learn.microsoft.com/windows/win32/api/wingdi/ns-wingdi-bitmapv5header
+    let header = BITMAPV5HEADER {
+        bV5Size: std::mem::size_of::<BITMAPV5HEADER>() as u32,
+        bV5Width: frame.width as i32,
+        bV5Height: frame.height as i32,
+        bV5Planes: 1,
+        bV5BitCount: 32,
+        bV5Compression: BI_BITFIELDS,
+        bV5SizeImage: frame.pixels.len() as u32,
+        bV5RedMask: 0x00ff_0000,
+        bV5GreenMask: 0x0000_ff00,
+        bV5BlueMask: 0x0000_00ff,
+        bV5AlphaMask: 0xff00_0000,
+        bV5CSType: 0x7352_4742, // LCS_sRGB
+        bV5Intent: LCS_GM_IMAGES as u32,
+        ..Default::default()
+    };
+    let mut dib = Vec::with_capacity(header.bV5Size as usize + frame.pixels.len());
+    dib.extend_from_slice(unsafe {
+        std::slice::from_raw_parts(
+            (&header as *const BITMAPV5HEADER).cast::<u8>(),
+            header.bV5Size as usize,
+        )
+    });
+    for row in frame.pixels.chunks_exact(frame.width as usize * 4).rev() {
+        for p in row.chunks_exact(4) {
+            let a = p[3] as u32;
+            let straight = |c: u8| match a {
+                0 => 0,
+                _ => ((c as u32 * 255 + a / 2) / a).min(255) as u8,
+            };
+            dib.extend_from_slice(&[straight(p[0]), straight(p[1]), straight(p[2]), p[3]]);
+        }
+    }
+    Ok((dib, png))
 }
 unsafe fn read_orientation(frame: &IWICBitmapFrameDecode) -> u16 {
     let Ok(reader) = frame.GetMetadataQueryReader() else {
