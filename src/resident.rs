@@ -63,6 +63,10 @@ pub fn run() -> Result<()> {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return Ok(());
         }
+        // Holding the editor's instance mutex makes `integration::hand_off`
+        // in a double-click launch forward its files to this process's
+        // hidden main window, which `standby` recreates after each release.
+        let _instance = CreateMutexW(None, false, &HSTRING::from(format!("Local\\{}", integration::WINDOW_CLASS)))?;
         crate::ui::prepare()?;
         let instance = GetModuleHandleW(None)?;
         let class = HSTRING::from(CLASS);

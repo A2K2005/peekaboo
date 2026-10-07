@@ -709,8 +709,9 @@ pub(super) unsafe fn key(hwnd: HWND, vk: u16, repeat: bool) -> bool {
     }
     let down = |key: VIRTUAL_KEY| GetKeyState(key.0 as i32) < 0;
     let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
+    // Other Alt keys fall through to the editor; its Alt+Up and Alt+Down page shortcuts must not.
     if alt {
-        return false;
+        return matches!(VIRTUAL_KEY(vk), VK_UP | VK_DOWN);
     }
     match VIRTUAL_KEY(vk) {
         VK_SPACE if !ctrl => {
