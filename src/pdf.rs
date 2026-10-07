@@ -554,20 +554,7 @@ impl PdfEngine {
         let directory = executable
             .parent()
             .ok_or("Cannot locate the app directory.")?;
-        let mut candidates = vec![directory.join("pdfium.dll")];
-        // Test binaries run from target/<profile>/deps.
-        let profile = if directory.file_name().is_some_and(|name| name == "deps") {
-            directory.parent()
-        } else {
-            Some(directory)
-        };
-        if let Some(profile) = profile {
-            candidates.push(profile.join("pdfium.dll"));
-            if let Some(project) = profile.parent().and_then(Path::parent) {
-                candidates.push(project.join("runtime/pdfium.dll"));
-            }
-        }
-        let path = candidates
+        let path = pdfium_candidates(directory)
             .into_iter()
             .find(|p| p.is_file())
             .ok_or("PDF support is missing. Run tools/fetch-pdfium.ps1 and restart the app.")?;
@@ -1653,6 +1640,18 @@ impl PdfEngine {
     }
 }
 
+/// Where pdfium.dll may load from: the app folder only, because a folder
+/// outside it may be writable by other users. Test binaries run from
+/// target/<profile>/deps, so tests also look in the profile folder.
+/// build.rs copies runtime/pdfium.dll into the profile folder.
+fn pdfium_candidates(directory: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![directory.join("pdfium.dll")];
+    if cfg!(test) && directory.file_name().is_some_and(|name| name == "deps") {
+        candidates.extend(directory.parent().map(|profile| profile.join("pdfium.dll")));
+    }
+    candidates
+}
+
 // FPDF_SaveAsCopy flags (fpdf_save.h).
 const INCREMENTAL_SAVE: u32 = 1;
 const FULL_SAVE: u32 = 2;
@@ -1935,6 +1934,20 @@ mod tests {
         }
         assert_eq!(dimension(612.5).unwrap(), 613);
         assert_eq!(pdf_size(612, 792, 1200, 1600).unwrap(), (1200, 1553));
+    }
+
+    #[test]
+    fn pdfium_loads_only_from_the_app_folder() {
+        let app = Path::new(r"C:\Tools\Preview");
+        assert_eq!(pdfium_candidates(app), [app.join("pdfium.dll")]);
+        let deps = Path::new(r"C:\repo\target\release\deps");
+        assert_eq!(
+            pdfium_candidates(deps),
+            [
+                deps.join("pdfium.dll"),
+                PathBuf::from(r"C:\repo\target\release\pdfium.dll")
+            ]
+        );
     }
 
     #[test]
