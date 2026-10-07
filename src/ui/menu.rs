@@ -429,7 +429,24 @@ fn draw_level(
 }
 
 fn item_at(t: &Tracker, level: usize, y: f32) -> Option<usize> {
-    t.levels.get(level)?.rows.iter().position(|r| y >= r.y0 && y < r.y1)
+    let l = t.levels.get(level)?;
+    row_at(&l.items, &l.rows, y)
+}
+
+/// The item row under `y`. Separators are not items, so hovering one
+/// selects nothing.
+fn row_at(items: &[MenuItem], rows: &[Rect], y: f32) -> Option<usize> {
+    rows.iter().position(|r| y >= r.y0 && y < r.y1).filter(|i| items.get(*i).is_some_and(selectable))
+}
+
+/// The node UI Automation reports as focused. Only items have nodes, so
+/// anything else reports the menu itself; AccessKit panics on a focus
+/// that is not in the tree.
+fn focus_node(items: &[MenuItem], selected: Option<usize>) -> NodeId {
+    match selected {
+        Some(i) if items.get(i).is_some_and(selectable) => NodeId(100 + i as u64),
+        _ => NodeId(1),
+    }
 }
 
 unsafe extern "system" fn menu_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -609,7 +626,7 @@ fn menu_tree(hwnd: isize) -> Option<TreeUpdate> {
             nodes,
             tree: Some(TreeInfo::new(root)),
             tree_id: TreeId::ROOT,
-            focus: l.selected.map_or(root, |i| NodeId(100 + i as u64)),
+            focus: focus_node(&l.items, l.selected),
         })
     })
 }
@@ -680,6 +697,20 @@ mod tests {
         assert_eq!(access(&items, None, 'o'), KeyResult::Select(0));
         assert_eq!(access(&items, Some(0), 'O'), KeyResult::Select(2));
         assert_eq!(access(&items, Some(2), 'O'), KeyResult::Select(0));
+    }
+
+    #[test]
+    fn separator_rows_take_no_hover_and_never_become_the_focus() {
+        let items = vec![item("&Open", true), MenuItem::separator(), item("E&xit", true)];
+        let rows = vec![Rect::new(0.0, 0.0, 100.0, 30.0), Rect::new(0.0, 30.0, 100.0, 9.0), Rect::new(0.0, 39.0, 100.0, 30.0)];
+        assert_eq!(row_at(&items, &rows, 10.0), Some(0));
+        assert_eq!(row_at(&items, &rows, 33.0), None, "the separator");
+        assert_eq!(row_at(&items, &rows, 50.0), Some(2));
+        assert_eq!(row_at(&items, &rows, 500.0), None);
+        assert_eq!(focus_node(&items, Some(2)), NodeId(102));
+        assert_eq!(focus_node(&items, Some(1)), NodeId(1), "a separator has no node");
+        assert_eq!(focus_node(&items, Some(9)), NodeId(1));
+        assert_eq!(focus_node(&items, None), NodeId(1));
     }
 
     #[test]
