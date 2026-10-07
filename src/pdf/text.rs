@@ -17,7 +17,10 @@ pub(super) struct Glyph {
 
 #[allow(dead_code)]
 impl PdfEngine {
-    /// The page's text in reading order with one box per character.
+    /// The page's text in reading order with one box per character, for
+    /// selection, search highlights, and Narrator. It needs only the
+    /// accessibility permission, which a PDF can grant while it forbids
+    /// copying. Before text goes to the clipboard, check `can_copy`.
     pub fn text_layer(
         &mut self,
         path: &Path,
@@ -31,12 +34,31 @@ impl PdfEngine {
             .ok_or("No PDF is open.")?
             .native
             .handle;
-        self.allow_copy(handle)?;
+        // Copy is bit 5 (16). Accessibility is bit 10 (512) from security
+        // handler revision 3; revision 2 uses the copy bit (ISO 32000-1, table 22).
+        let permissions = unsafe { (self.api.permissions)(handle) };
+        let revision = unsafe { (self.api.security_revision)(handle) };
+        if permissions & 16 == 0 && (revision < 3 || permissions & 512 == 0) {
+            return Err("This PDF's permissions do not allow reading its text.".into());
+        }
         let page = self.api.page(handle, page)?;
         let display = self.api.display(page.handle)?;
         let text = self.api.text_page(page.handle)?;
         let glyphs = self.api.glyphs(text.handle, &display)?;
         Ok(layout(&glyphs, display.width as f32, display.height as f32))
+    }
+
+    /// True when the PDF allows copying its text. Copy, export, and
+    /// clipboard paths need this; `text_layer` and `search` do not.
+    pub fn can_copy(&mut self, path: &Path, edits: &[PdfEdit]) -> Result<bool, String> {
+        self.ensure(path, edits)?;
+        let handle = self
+            .document
+            .as_ref()
+            .ok_or("No PDF is open.")?
+            .native
+            .handle;
+        Ok(self.allow_copy(handle).is_ok())
     }
 
     /// Every match of `query`, page by page. Stops with `SEARCH_CANCELED`

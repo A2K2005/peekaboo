@@ -237,6 +237,49 @@ fn text_layer_puts_columns_in_reading_order() {
     }
 }
 
+/// A one-page PDF with permission flags `p`. Its standard security handler
+/// uses the Identity crypt filter, so nothing is encrypted and no password is
+/// needed, but PDFium still reports the flags.
+fn permissions_pdf(path: &std::path::Path, p: i32) {
+    let zeros = "00".repeat(32);
+    let objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        stream("", &text_at(72.0, 700.0, 12.0, "Readable text")),
+        format!("<< /Filter /Standard /V 4 /R 4 /Length 128 /P {p} /O <{zeros}> /U <{zeros}> /CF << /StdCF << /CFM /V2 >> >> /StmF /Identity /StrF /Identity >>"),
+    ];
+    let id = "<00112233445566778899AABBCCDDEEFF>";
+    write_pdf(
+        path,
+        "1.7",
+        &objects,
+        &format!("/Encrypt 6 0 R /ID [{id} {id}]"),
+    );
+}
+
+#[test]
+fn text_layer_needs_only_the_accessibility_permission() {
+    let dir = out_dir("permissions");
+    // Every permission except copying (bit 5), so accessibility (bit 10) is on.
+    let accessible = dir.join("accessible.pdf");
+    permissions_pdf(&accessible, !16);
+    let locked = dir.join("locked.pdf");
+    permissions_pdf(&locked, !(16 | 512));
+    let plain = dir.join("plain.pdf");
+    text_pdf(&plain, &[text_at(72.0, 700.0, 12.0, "Plain")]);
+    let mut engine = PdfEngine::new().unwrap();
+    assert_eq!(
+        engine.text_layer(&accessible, 0, &[]).unwrap().text,
+        "Readable text"
+    );
+    assert!(!engine.can_copy(&accessible, &[]).unwrap());
+    assert!(engine.page_text(&accessible, 0).is_err());
+    assert!(engine.text_layer(&locked, 0, &[]).is_err());
+    assert!(engine.can_copy(&plain, &[]).unwrap());
+}
+
 #[test]
 fn search_finds_every_hit_in_500_pages_quickly() {
     let source = fixture("500-pages-50mb.pdf");
