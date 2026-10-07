@@ -195,6 +195,7 @@ dependencies = [
  "image-webp",
  "ort",
  "windows",
+ "windows-collections",
  "windows-numerics",
 ]
 

@@ -1,0 +1,15 @@
+# Template. Replace REPLACE_WITH_* values before submitting. See docs/packaging.md.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+PackageIdentifier: PreviewForWindows.PreviewForWindows
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: Preview for Windows
+PackageName: Preview for Windows
+License: REPLACE_WITH_LICENSE
+ShortDescription: Open, read, and edit PDFs and images. Files stay on your PC.
+Tags:
+  - pdf
+  - image-viewer
+  - pdf-editor
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0
