@@ -54,6 +54,7 @@ pub enum Action {
     Convert,
     Resize,
     Combine,
+    /// Quick view: the first path, then the files that arrows move through.
     Peek,
 }
 

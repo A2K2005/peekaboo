@@ -412,14 +412,18 @@ fn tooltip(l: &Look, state: &State, layout: &Layout) {
 pub(super) fn draw(p: &Painter, bitmap: Option<&ID2D1Bitmap>, fonts: &Fonts, state: &mut State, layout: &Layout) -> bool {
     let look = Look { p, t: state.theme, f: fonts, s: state.scale };
     p.clear(state.theme.chrome);
-    title_bar(&look, state, layout);
-    bars(&look, state, layout);
-    sidebar_panel(&look, state, layout);
-    super::organize::paint(p, state, layout);
+    if state.quick.is_none() {
+        title_bar(&look, state, layout);
+        bars(&look, state, layout);
+        sidebar_panel(&look, state, layout);
+        super::organize::paint(p, state, layout);
+    }
     let drew = if layout.empty.is_some() {
         p.fill(layout.document, state.theme.canvas);
         empty_state(&look, state, layout);
         false
+    } else if state.quick.is_some() {
+        super::quickview::paint(&look, bitmap, state, layout)
     } else {
         document::paint(p, bitmap, state, layout.document)
     };
@@ -480,6 +484,9 @@ pub(super) unsafe fn paint(hwnd: HWND) {
                 state.renderer = None;
                 state.cache.clear();
                 state.sent.clear();
+                if let Some(quick) = state.quick.as_mut() {
+                    quick.forget_bitmaps();
+                }
                 state.status = format!("Windows could not draw this view: {error}");
                 false
             }

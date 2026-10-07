@@ -68,6 +68,10 @@ pub(super) enum Command {
     ZoomMenu,
     AppMenu,
     MoreTools,
+    /// Quick view becomes the editor in the same window.
+    OpenInEditor,
+    IndexSheet,
+    FullScreen,
 }
 use Command::*;
 
@@ -123,11 +127,14 @@ pub(super) mod glyph {
     pub(in crate::ui) const CLOSE: u16 = 0xE8BB;
     pub(in crate::ui) const ADD: u16 = 0xE710;
     pub(in crate::ui) const CANCEL: u16 = 0xE711;
+    pub(in crate::ui) const FULL_SCREEN: u16 = 0xE740;
+    pub(in crate::ui) const VIEW_ALL: u16 = 0xE8A9;
     #[cfg(test)]
     pub(in crate::ui) const ALL: &[u16] = &[
         OPEN_PANE, ZOOM, EDIT, ROTATE, SHARE, SEARCH, MORE, HIGHLIGHT, UNDERLINE, STRIKETHROUGH, COMMENT,
         INKING, CROP, RESIZE, SIGNATURE, FONT_SIZE, SQUARE, CIRCLE, ARROW, SAVE, DOCUMENT, ERASE, FLIP,
         FOLDER_OPEN, PRINT, CHECK, CHEVRON_RIGHT, CHEVRON_DOWN, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, ADD, CANCEL,
+        FULL_SCREEN, VIEW_ALL,
     ];
 }
 
@@ -197,6 +204,9 @@ pub(super) fn info(command: Command) -> Info {
         ZoomMenu => i("Zoom", "&Zoom", Some(ZOOM), Some('Z')),
         AppMenu => i("More", "More", Some(MORE), Some('O')),
         MoreTools => i("More tools", "More tools", Some(MORE), Some('O')),
+        OpenInEditor => i("Open", "Open in &editor", None, None),
+        IndexSheet => i("Index sheet", "&Index sheet", Some(VIEW_ALL), None),
+        FullScreen => i("Full screen", "F&ull screen", Some(FULL_SCREEN), None),
     }
 }
 
@@ -315,6 +325,9 @@ pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
     (plain(0x41), Arrow),
     (plain(0x47), PlaceSignature),
     (plain(0x43), Crop),
+    (plain(0x0D), OpenInEditor),
+    (ctrl(0x0D), IndexSheet),
+    (plain(0x7A), FullScreen),
 ];
 
 pub(super) fn lookup(chord: Chord) -> Option<Command> {
@@ -370,13 +383,17 @@ pub(super) struct Ctx {
     pub(super) zoom: super::view::Zoom,
     pub(super) view: super::view::ViewMode,
     pub(super) zoom_select: bool,
+    pub(super) quick: bool,
+    pub(super) full_screen: bool,
 }
 
 /// Whether `command` can run in the state `x`.
 pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
     let ready = x.has_frame && !x.pending && !x.failed;
     match command {
-        Open | NewFromClipboard | Exit | ToggleSidebar | ToggleMarkup | AppMenu | MoreTools | NextPane | PreviousPane | BatchSelected => true,
+        Open | NewFromClipboard | Exit | ToggleSidebar | ToggleMarkup | AppMenu | MoreTools | NextPane | PreviousPane | BatchSelected
+        | FullScreen => true,
+        OpenInEditor | IndexSheet => x.quick,
         NextTab | PreviousTab => x.tabs > 1,
         Tab(_) | CloseTab => x.tabs > 0,
         Undo | Revert => x.has_frame && !x.pending,
@@ -397,6 +414,7 @@ pub(super) fn checked(command: Command, x: &Ctx) -> Option<bool> {
     match command {
         ToggleSidebar => Some(x.sidebar_open),
         ToggleMarkup => Some(x.markup_open),
+        FullScreen => Some(x.full_screen),
         Crop => Some(x.crop),
         ZoomToSelection => Some(x.zoom_select),
         Fit => Some(x.zoom == Zoom::Fit),
@@ -501,7 +519,7 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
             &[
                 Some(Previous), Some(Next), None, Some(ZoomIn), Some(ZoomOut), Some(ActualSize), Some(Fit),
                 Some(FitWidth), Some(ZoomToSelection), None, Some(ViewContinuous), Some(ViewSingle), Some(ViewTwoPages),
-                None, Some(ToggleSidebar), Some(ToggleMarkup), Some(Slideshow), None, Some(NextTab), Some(PreviousTab),
+                None, Some(ToggleSidebar), Some(ToggleMarkup), Some(Slideshow), Some(FullScreen), None, Some(NextTab), Some(PreviousTab),
             ],
             x,
         ),
@@ -589,7 +607,7 @@ pub(super) const ALL: &[Command] = &[
     MovePageDown, InsertPage, InsertImagePage, Previous, Next, ZoomIn, ZoomOut, Fit, FitWidth, ActualSize, ZoomToSelection, ViewContinuous, ViewSingle,
     ViewTwoPages, Slideshow, ToggleSidebar, ToggleMarkup, NextTab, PreviousTab, Tab(0),
     NextPane, PreviousPane, Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow,
-    SaveSignature, PlaceSignature, FillForm, ZoomMenu, AppMenu, MoreTools,
+    SaveSignature, PlaceSignature, FillForm, ZoomMenu, AppMenu, MoreTools, OpenInEditor, IndexSheet, FullScreen,
 ];
 
 #[cfg(test)]
@@ -664,7 +682,7 @@ mod tests {
         let everything = Ctx { has_frame: true, tabs: 2, ..Default::default() };
         let listed = flatten(&app_menu(&everything, &[]));
         // Chrome commands open menus or move focus; tab numbers are keyboard-only.
-        let not_listed = [ZoomMenu, AppMenu, MoreTools, NextPane, PreviousPane, Tab(0)];
+        let not_listed = [ZoomMenu, AppMenu, MoreTools, NextPane, PreviousPane, Tab(0), OpenInEditor, IndexSheet];
         for command in ALL {
             assert!(listed.contains(command) || not_listed.contains(command), "{command:?} missing");
         }

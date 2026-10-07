@@ -39,8 +39,12 @@ thread_local! {
 }
 
 pub fn run() -> Result<()> {
-    prepare()?;
     let command = crate::integration::parse_args(std::env::args_os().skip(1));
+    // A running instance takes the files.
+    let Some(_instance) = crate::integration::hand_off(crate::integration::WINDOW_CLASS, &command) else {
+        return Ok(());
+    };
+    prepare()?;
     let mut paths = Vec::new();
     for path in command.paths.into_iter().map(|p| std::fs::canonicalize(&p).unwrap_or(p)) {
         if !paths.contains(&path) {
@@ -50,8 +54,9 @@ pub fn run() -> Result<()> {
     use crate::integration::Action;
     let verb = matches!(command.action, Action::Convert | Action::Resize)
         .then(|| (command.action == Action::Resize, std::mem::take(&mut paths)));
+    let peek = (command.action == Action::Peek).then(|| std::mem::take(&mut paths));
     unsafe {
-        let result = main_window(&paths, verb, true);
+        let result = main_window(&paths, verb, peek, false);
         OleUninitialize();
         result
     }
@@ -84,10 +89,17 @@ pub fn prepare() -> Result<()> {
 
 /// Creates the main window hidden and handles messages until the window is destroyed.
 pub fn standby() -> Result<()> {
-    unsafe { main_window(&[], None, false) }
+    unsafe { main_window(&[], None, None, true) }
 }
 
-unsafe fn main_window(paths: &[PathBuf], verb: Option<(bool, Vec<PathBuf>)>, show: bool) -> Result<()> {
+/// `peek` opens Quick view at start. A resident window hides on close; any
+/// other window exits the message loop.
+unsafe fn main_window(
+    paths: &[PathBuf],
+    verb: Option<(bool, Vec<PathBuf>)>,
+    peek: Option<Vec<PathBuf>>,
+    resident: bool,
+) -> Result<()> {
     let instance = GetModuleHandleW(None)?;
     let system = GetDpiForSystem() as f32 / 96.0;
     let hwnd = CreateWindowExW(
@@ -119,12 +131,18 @@ unsafe fn main_window(paths: &[PathBuf], verb: Option<(bool, Vec<PathBuf>)>, sho
     state.tools.verb = verb;
     install(state);
     super::WINDOW.set(hwnd);
-    super::PEEKING.set(false);
     // Apply WM_NCCALCSIZE now that the state exists, so the caption goes.
     let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     super::drop::register(hwnd);
-    if show {
+    // The hidden resident window starts its timer only when it shows.
+    if !resident {
         SetTimer(Some(hwnd), 1, 10, None);
+    }
+    super::quickview::attach(hwnd, resident);
+    if let Some(mut files) = peek.filter(|files| !files.is_empty()) {
+        let first = files.remove(0);
+        super::peek(first, files);
+    } else if !resident {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
     }
@@ -232,7 +250,7 @@ unsafe fn nc_hit_test(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     }
     let mut point = lparam_point(lparam);
     let _ = ScreenToClient(hwnd, &mut point);
-    let border = frame_thickness(hwnd) as f32;
+    let border = if super::quickview::is_full_screen() { 0.0 } else { frame_thickness(hwnd) as f32 };
     let code = with_state(|s| hit_code(&s.layout(), point.x as f32, point.y as f32, s.maximized, border));
     LRESULT(code.unwrap_or(HTCLIENT) as isize)
 }
@@ -334,6 +352,7 @@ pub(super) unsafe fn activate(hwnd: HWND, id: WidgetId, keyboard: bool) {
         WidgetId::FindField | WidgetId::FindCase | WidgetId::FindClose => super::findbar::activate(hwnd, id),
         WidgetId::InfoButton(_) | WidgetId::InfoClose => super::infobar::activate(hwnd, id),
         WidgetId::Recent(index) => super::empty::open_recent(hwnd, index),
+        WidgetId::IndexItem(index) => super::quickview::pick(hwnd, index),
     }
     invalidate(hwnd);
 }
@@ -452,7 +471,9 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
     if matches!(e.phase, Phase::Down | Phase::Move) {
         sheet::slide(hwnd, e.x);
     }
-    if to_document && e.phase == Phase::Down {
+    // Quick view is read-only, so form fields do not take input there.
+    let quick = with_state(|s| s.quick.is_some()).unwrap_or(false);
+    if to_document && e.phase == Phase::Down && !quick {
         let edit_path = with_state(|s| {
             (((s.crop || s.markup.is_some()) && !super::pan::held()) || super::forms::needs_consent(s, &e))
                 .then(|| s.path.clone())
@@ -466,7 +487,11 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
         }
     }
     if to_document
-        && with_state(|s| super::forms::pointer(hwnd, s, &e).unwrap_or_else(|| document::on_pointer(hwnd, s, &e))).unwrap_or(false)
+        && with_state(|s| {
+            let form = if quick { None } else { super::forms::pointer(hwnd, s, &e) };
+            form.unwrap_or_else(|| document::on_pointer(hwnd, s, &e))
+        })
+        .unwrap_or(false)
     {
         repaint = true;
     }
@@ -487,7 +512,7 @@ unsafe fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM, horizontal: bool) {
     let _ = ScreenToClient(hwnd, &mut point);
     let at = (point.x as f32, point.y as f32);
     with_state(|s| {
-        if s.sheet.is_some() {
+        if s.sheet.is_some() || super::quickview::wheel(s, delta) {
             return;
         }
         let layout = s.layout();
@@ -506,6 +531,10 @@ fn key_char(vk: u16) -> Option<char> {
 
 /// Escape leaves modes and cancels long jobs.
 unsafe fn escape(hwnd: HWND) {
+    if super::quickview::is_full_screen() {
+        super::quickview::toggle_full_screen(hwnd);
+        return;
+    }
     with_state(|s| {
         s.crop = false;
         s.zoom_select = false;
@@ -529,9 +558,6 @@ unsafe fn escape(hwnd: HWND) {
 unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
     let down = |key: VIRTUAL_KEY| GetKeyState(key.0 as i32) < 0;
     let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
-    if !ctrl && !shift && !alt && matches!(VIRTUAL_KEY(vk), VK_SPACE | VK_ESCAPE) && super::dismiss(hwnd) {
-        return true;
-    }
     if vk == VK_MENU.0 {
         with_state(|s| s.alt_armed = true);
         return true;
@@ -721,7 +747,7 @@ unsafe fn close(hwnd: HWND) {
         return;
     }
     with_state(|s| s.cleanup_snapshots());
-    let _ = DestroyWindow(hwnd);
+    super::quickview::dismiss(hwnd);
 }
 
 fn session_end_allowed((dirty, saving): (bool, bool)) -> bool {
@@ -729,7 +755,12 @@ fn session_end_allowed((dirty, saving): (bool, bool)) -> bool {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if matches!(message, WM_POINTERUPDATE | WM_NCPOINTERUPDATE | WM_NCMOUSEMOVE) {
+        super::quickview::reveal(hwnd);
+    }
     match message {
+        // Full screen: the client area is the whole window, with no frame.
+        WM_NCCALCSIZE if wparam.0 != 0 && super::quickview::is_full_screen() => LRESULT(0),
         WM_NCCALCSIZE if wparam.0 != 0 => nc_calc_size(hwnd, lparam),
         WM_NCHITTEST => nc_hit_test(hwnd, wparam, lparam),
         WM_NCPOINTERUPDATE | WM_NCPOINTERDOWN | WM_NCPOINTERUP => {
@@ -805,7 +836,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
         WM_GETMINMAXINFO => {
             let info = &mut *(lparam.0 as *mut MINMAXINFO);
             let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
-            info.ptMinTrackSize = POINT { x: (360.0 * scale) as i32, y: (320.0 * scale) as i32 };
+            let height = if with_state(|s| s.quick.is_some()).unwrap_or(false) { 240.0 } else { 320.0 };
+            info.ptMinTrackSize = POINT { x: (360.0 * scale) as i32, y: (height * scale) as i32 };
             LRESULT(0)
         }
         WM_DPICHANGED => {
@@ -882,7 +914,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
-            if key_down(hwnd, wparam.0 as u16, message == WM_SYSKEYDOWN) {
+            // Bit 30: the key was already down, so this is auto-repeat.
+            let repeat = lparam.0 & (1 << 30) != 0;
+            if super::quickview::key(hwnd, wparam.0 as u16, repeat) || key_down(hwnd, wparam.0 as u16, message == WM_SYSKEYDOWN) {
                 LRESULT(0)
             } else {
                 DefWindowProcW(hwnd, message, wparam, lparam)
@@ -976,6 +1010,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
         }
         super::empty::WM_APP_RECENT => {
             super::empty::reload(hwnd);
+            LRESULT(0)
+        }
+        WM_COPYDATA => match crate::integration::decode_copydata(lparam) {
+            Some(command) => {
+                super::quickview::received(hwnd, command);
+                LRESULT(1)
+            }
+            None => LRESULT(0),
+        },
+        super::quickview::WM_APP_INCOMING => {
+            super::quickview::incoming(hwnd);
             LRESULT(0)
         }
         WM_CLOSE => {

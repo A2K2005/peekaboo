@@ -67,7 +67,7 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
     let Some(ctx) = with_state(|s| s.ctx()) else {
         return;
     };
-    if !commands::enabled(command, &ctx) {
+    if !commands::enabled(command, &ctx) || super::quickview::command(hwnd, command) {
         return;
     }
     match command {
@@ -809,6 +809,10 @@ pub(super) unsafe fn context_menu(hwnd: HWND, at: Option<(f32, f32)>) {
     }) else {
         return;
     };
+    // Quick view is read-only; its menus would offer editing commands.
+    if ctx.quick {
+        return;
+    }
     let (items, anchor) = match target {
         Some(WidgetId::Tab(index)) | Some(WidgetId::TabClose(index)) => {
             select_tab(hwnd, index);
