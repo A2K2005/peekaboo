@@ -69,6 +69,7 @@ pub(super) fn node_id(id: WidgetId) -> NodeId {
         WidgetId::InfoClose => 80_003,
         WidgetId::InfoButton(i) => 81_000 + i as u64,
         WidgetId::Recent(i) => 82_000 + i as u64,
+        WidgetId::IndexItem(i) => 3_000_000_000 + i as u64,
     })
 }
 
@@ -151,7 +152,8 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
     let mut toolbar = ids(&|w| w.region == Region::Toolbar);
     if let Some(path) = &s.path {
         nodes.push((FILE_TITLE, text(Role::Label, &file_name(path), layout.title_text)));
-        toolbar.insert(1, FILE_TITLE);
+        // Quick view has no toolbar buttons, so the title may be the only child.
+        toolbar.insert(toolbar.len().min(1), FILE_TITLE);
     }
     nodes.push((TOOLBAR, group(Role::Toolbar, "Toolbar", layout.toolbar, toolbar)));
     if let Some(bar) = layout.markup_bar {
@@ -232,6 +234,7 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
     }
     super::findbar::a11y(s, &layout, &mut nodes, &mut root_children);
     super::infobar::a11y(s, &layout, &mut nodes, &mut root_children);
+    super::quickview::a11y(&layout, &mut nodes, &mut root_children);
     let mut status = text(Role::Status, &s.visible_status(), layout.status);
     status.set_live(Live::Polite);
     nodes.push((STATUS, status));

@@ -51,6 +51,8 @@ pub enum Action {
     Convert,
     Resize,
     Combine,
+    /// Quick view: the first path, then the files that arrows move through.
+    Peek,
 }
 
 impl Action {
@@ -60,6 +62,7 @@ impl Action {
             Action::Convert => "--convert",
             Action::Resize => "--resize",
             Action::Combine => "--combine",
+            Action::Peek => "--peek",
         }
     }
 
@@ -69,6 +72,7 @@ impl Action {
             Action::Convert,
             Action::Resize,
             Action::Combine,
+            Action::Peek,
         ]
         .into_iter()
         .find(|a| a.flag() == flag)

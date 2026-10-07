@@ -288,6 +288,8 @@ pub(super) struct State {
     pub(super) messages: super::infobar::Messages,
     /// Recent files for the empty window, newest first.
     pub(super) recent: Vec<PathBuf>,
+    /// Set while the window is in Quick view; None in the editor.
+    pub(super) quick: Option<super::quickview::Quick>,
 }
 
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
@@ -401,6 +403,7 @@ impl State {
             find: Default::default(),
             messages: Default::default(),
             recent: if paths.is_empty() { super::empty::load() } else { Vec::new() },
+            quick: None,
         };
         add_tabs(&mut state, paths);
         state
@@ -500,6 +503,8 @@ impl State {
             zoom: self.zoom,
             view: self.view_mode,
             zoom_select: self.zoom_select,
+            quick: self.quick.is_some(),
+            full_screen: super::quickview::is_full_screen(),
         }
     }
     /// "Page 3 of 20" or "1920 × 1080 pixels".
@@ -645,6 +650,9 @@ impl State {
             ctx: self.ctx(),
             sheet,
         });
+        if let Some(quick) = &self.quick {
+            super::quickview::layout(self, quick, &mut layout);
+        }
         super::empty::add(self, &mut layout);
         super::infobar::add(self, &mut layout);
         super::findbar::add(self, &mut layout);
@@ -1177,6 +1185,7 @@ pub(super) unsafe fn tick(hwnd: HWND) {
         navigate(hwnd, 1);
     }
     super::imagetools::tick(hwnd);
+    super::quickview::tick(hwnd);
 }
 
 /// A file is on screen: tabs, title, and history follow it. Next or
@@ -1193,7 +1202,8 @@ fn shown(state: &mut State, path: PathBuf, page: u32, navigation: bool) -> Strin
         }
     }
     state.password_attempts.remove(&path);
-    if !navigation && previous.as_ref() != Some(&path) {
+    // A peek is not an open, so it stays out of the recent files.
+    if !navigation && previous.as_ref() != Some(&path) && state.quick.is_none() {
         super::empty::note(&path);
     }
     state.displayed = Some((path.clone(), page));

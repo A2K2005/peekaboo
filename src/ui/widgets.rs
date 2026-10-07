@@ -56,6 +56,8 @@ pub(super) enum WidgetId {
     InfoClose,
     /// A row of the recent files list on the empty window.
     Recent(usize),
+    /// A file in the Quick view index sheet.
+    IndexItem(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,7 +325,7 @@ pub(super) fn overflow<T: Copy + PartialEq>(items: &[T], drop: &[T], fits: usize
     (visible, hidden)
 }
 
-fn command_widget(command: Command, region: Region, rect: Rect, ctx: &Ctx) -> Widget {
+pub(super) fn command_widget(command: Command, region: Region, rect: Rect, ctx: &Ctx) -> Widget {
     let i = info(command);
     let tooltip = match commands::shortcut_text(command) {
         Some(keys) => format!("{} ({keys})", i.label),

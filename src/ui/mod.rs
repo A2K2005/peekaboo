@@ -30,6 +30,7 @@
 //! | infobar | Info bar and toasts, the live regions for messages |
 //! | empty | Empty window: New from clipboard and recent files |
 //! | pan | Space+drag panning |
+//! | quickview | Quick view: peek window, hover strip, index sheet, handoff to the editor |
 mod a11y;
 mod actions;
 mod app;
@@ -49,6 +50,7 @@ mod menu;
 mod organize;
 mod paint;
 mod pan;
+mod quickview;
 mod render;
 mod sheet;
 mod sidebar;
@@ -60,3 +62,12 @@ mod window;
 mod worker;
 
 pub use window::run;
+
+/// Shows `path` in Quick view. Arrows move through `siblings`: the
+/// selection when 2 or more files are selected, else the folder's files in
+/// Explorer view order. An empty list means the folder's files by name.
+/// Callable from any thread; the window thread does the work. A call before
+/// the window exists waits for it.
+pub fn peek(path: std::path::PathBuf, siblings: Vec<std::path::PathBuf>) {
+    quickview::post(path, siblings);
+}
