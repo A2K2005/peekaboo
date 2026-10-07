@@ -475,7 +475,9 @@ pub fn file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
     let mut ids = Vec::with_capacity(paths.len());
     let mut missing = None;
     for path in paths {
-        let id = unsafe { ILCreateFromPathW(&HSTRING::from(path.as_os_str())) };
+        // The shell parser rejects forward slashes; absolute() rewrites them.
+        let full = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+        let id = unsafe { ILCreateFromPathW(&HSTRING::from(full.as_os_str())) };
         if id.is_null() {
             missing = Some(path);
             break;
