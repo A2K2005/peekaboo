@@ -1352,7 +1352,11 @@ impl PdfEngine {
             } else {
                 (20, 70, 180, 255)
             };
-            check((self.api.annot_color)(handle, 0, red, green, blue, alpha))?;
+            // For free text, /C is the box fill. Leave it unset so the blue
+            // text from /DA stays readable on the page.
+            if kind != Text {
+                check((self.api.annot_color)(handle, 0, red, green, blue, alpha))?;
+            }
             if matches!(kind, Ink | Arrow | Rectangle | Ellipse) {
                 check((self.api.annot_border)(handle, 0.0, 0.0, 2.0))?;
             }
