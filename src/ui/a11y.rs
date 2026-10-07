@@ -300,6 +300,11 @@ pub(super) unsafe fn start(hwnd: HWND) {
     ADAPTER.with(|a| *a.borrow_mut() = Some(adapter));
 }
 
+/// Drops the adapter of a destroyed window, so the next window gets its own.
+pub(super) fn stop() {
+    drop(ADAPTER.take());
+}
+
 pub(super) unsafe fn get_object(wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
     let result = ADAPTER.with(|a| {
         let mut adapter = a.try_borrow_mut().ok()?;

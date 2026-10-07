@@ -59,4 +59,81 @@ mod widgets;
 mod window;
 mod worker;
 
-pub use window::run;
+pub use window::{prepare, run, standby};
+
+use std::{cell::Cell, path::PathBuf};
+use windows::Win32::{
+    Foundation::HWND,
+    System::Threading::{AttachThreadInput, GetCurrentThreadId},
+    UI::WindowsAndMessaging::{
+        DestroyWindow, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, KillTimer,
+        SetForegroundWindow, SetTimer, ShowWindow, SW_HIDE, SW_SHOW,
+    },
+};
+
+thread_local! {
+    /// This thread's main window, while it exists.
+    static WINDOW: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
+    /// The window shows a quick view, so Space and Esc hide it.
+    static PEEKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Shows `path` as a quick view in this thread's main window and brings it
+/// forward. `siblings` are the files to step through, in Explorer view order.
+pub fn peek(path: PathBuf, _siblings: Vec<PathBuf>) {
+    let hwnd = WINDOW.get();
+    if hwnd.is_invalid() {
+        return;
+    }
+    unsafe {
+        app::with_state(|s| app::add_tabs(s, std::slice::from_ref(&path)));
+        app::open(hwnd, path);
+        PEEKING.set(true);
+        SetTimer(Some(hwnd), 1, 10, None);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        // A background process may not take the foreground; a thread that
+        // shares the foreground thread's input state may.
+        let current = GetCurrentThreadId();
+        let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
+        let attached = foreground != current && AttachThreadInput(current, foreground, true).as_bool();
+        let _ = SetForegroundWindow(hwnd);
+        if attached {
+            let _ = AttachThreadInput(current, foreground, false);
+        }
+    }
+}
+
+/// Hides the window when it shows a quick view and no sheet waits for an answer.
+unsafe fn dismiss(hwnd: HWND) -> bool {
+    if !PEEKING.get() || app::with_state(|s| s.sheet.is_none()) != Some(true) {
+        return false;
+    }
+    PEEKING.set(false);
+    let _ = KillTimer(Some(hwnd), 1);
+    let _ = ShowWindow(hwnd, SW_HIDE);
+    true
+}
+
+/// Destroys the hidden main window when it holds documents and no unsaved
+/// work, which frees them; `standby` then returns. Returns false while the
+/// window is visible or busy, so the caller tries again later.
+pub fn release() -> bool {
+    let hwnd = WINDOW.get();
+    unsafe {
+        if hwnd.is_invalid() {
+            return true;
+        }
+        if IsWindowVisible(hwnd).as_bool() {
+            return false;
+        }
+        match app::with_state(|s| (s.path.is_none() && s.tabs.is_empty(), s.window_close_state())) {
+            Some((true, _)) => true,
+            Some((false, (false, false))) => {
+                app::with_state(|s| s.cleanup_snapshots());
+                let _ = DestroyWindow(hwnd);
+                true
+            }
+            _ => false,
+        }
+    }
+}
