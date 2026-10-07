@@ -1,7 +1,9 @@
-//! The info bar and toasts, the one place for messages that need attention.
-//! The bar holds errors, failed saves, outside changes, and offers until the
-//! user acts. A toast reports a finished result and goes after a few
-//! seconds. Both are UI Automation live regions, so Narrator reads them.
+//! The info bar and toasts, the one place for messages. The bar holds
+//! errors, failed saves, outside changes, and offers until the user acts,
+//! and pushes the document down so it never covers the page. Everything
+//! else, including each new `State::status` hint, is a quiet toast that
+//! goes after 2 seconds. Both are UI Automation live regions, so Narrator
+//! reads them.
 use super::{
     a11y, actions,
     app::{file_name, invalidate, with_state, SaveStatus, State, EMPTY_STATUS},
@@ -9,7 +11,7 @@ use super::{
     disk,
     paint::{icon_button, text_button, Look},
     render::{fonts, measure, Align},
-    theme::{Mode, Rgba},
+    theme::{motion, size, Mode, Rgba},
     widgets::{control_height, plain_widget, Layout, Rect, Region, Role, WidgetId},
 };
 use accesskit::{Live, Node, NodeId, Role as NodeRole};
@@ -25,7 +27,6 @@ use windows::Win32::{
 
 /// Posted by the default-app check when the offer should show.
 pub(super) const WM_APP_OFFER: u32 = WM_APP + 0x70;
-const TOAST_TIME: Duration = Duration::from_secs(4);
 const OFFER_FILE: &str = "default-app-offer.txt";
 const BAR_NODE: NodeId = NodeId(83_000);
 const TOAST_NODE: NodeId = NodeId(83_001);
@@ -59,16 +60,26 @@ pub(super) struct Messages {
     /// The newest bar shows; closing it shows the one before.
     bars: Vec<Bar>,
     toast: Option<(String, Instant)>,
+    /// The last `State::status` seen, so each new hint toasts once.
+    seen: String,
 }
 
 fn show(state: &mut State, bar: Bar) {
     // One error at a time; offers and conflicts repeat only for another file.
     state.messages.bars.retain(|b| b.kind != bar.kind || (bar.kind != Kind::Error && b.text != bar.text));
     state.messages.bars.push(bar);
+    relayout(state);
+}
+
+/// The bar changes the document's height, so the view renders again.
+fn relayout(state: &mut State) {
+    if state.frame.is_some() || state.pdf.is_some() {
+        state.due = Some(Instant::now() + Duration::from_millis(120));
+    }
 }
 
 pub(super) fn toast(state: &mut State, text: impl Into<String>) {
-    state.messages.toast = Some((text.into(), Instant::now() + TOAST_TIME));
+    state.messages.toast = Some((text.into(), Instant::now() + motion::TOAST));
 }
 
 pub(super) fn error(state: &mut State, text: impl Into<String>) {
@@ -110,13 +121,26 @@ pub(super) fn save_problem(state: &mut State, path: &Path) {
     }
 }
 
-/// Returns true when the toast just expired and the window needs a repaint.
+/// Toasts a new status hint, and drops an expired toast. Returns true when
+/// the window needs a repaint. A status that only restates the page count
+/// or a loading state stays quiet: the editor bar shows those.
 pub(super) fn tick(state: &mut State) -> bool {
+    let mut changed = false;
+    if state.status != state.messages.seen {
+        state.messages.seen = state.status.clone();
+        let quiet = state.status.is_empty()
+            || matches!(state.status.as_str(), "Opening..." | EMPTY_STATUS)
+            || state.status == state.subtitle();
+        if !quiet {
+            toast(state, state.status.clone());
+            changed = true;
+        }
+    }
     let expired = state.messages.toast.as_ref().is_some_and(|(_, until)| Instant::now() >= *until);
     if expired {
         state.messages.toast = None;
     }
-    expired
+    changed || expired
 }
 
 struct Geometry {
@@ -163,25 +187,27 @@ fn geometry(state: &State, doc: Rect) -> Option<Geometry> {
     })
 }
 
-/// Where content below the bar may start, so the find bar never covers it.
-pub(super) fn bottom(state: &State, doc: Rect) -> f32 {
-    geometry(state, doc).map_or(doc.y0, |g| g.card.y1)
-}
-
 fn toast_rect(state: &State, doc: Rect) -> Option<(&str, Rect)> {
     let (text, _) = state.messages.toast.as_ref()?;
     let fonts = fonts(state.scale, state.text_scale).ok()?;
     let s = state.scale;
-    let height = control_height(state.text_scale) * s;
-    let width = (measure(text, &fonts.body, 10_000.0).0 + 32.0 * s).min(doc.width() - 32.0 * s);
-    (width > 0.0 && doc.height() > height + 32.0 * s)
-        .then(|| (text.as_str(), Rect::new((doc.x0 + doc.x1 - width) / 2.0, doc.y1 - 16.0 * s - height, width, height)))
+    let height = size::TOAST.max(16.0 * state.text_scale + 12.0) * s;
+    let margin = size::TOAST_MARGIN * s;
+    let width = (measure(text, &fonts.body, 10_000.0).0 + 32.0 * s).min(doc.width() - 2.0 * margin);
+    (width > 0.0 && doc.height() > height + 2.0 * margin)
+        .then(|| (text.as_str(), Rect::new((doc.x0 + doc.x1 - width) / 2.0, doc.y1 - margin - height, width, height)))
 }
 
+/// Places the bar's buttons and pushes the document below the bar.
 pub(super) fn add(state: &State, layout: &mut Layout) {
-    let (Some(g), Some(bar)) = (geometry(state, layout.document), state.messages.bars.last()) else {
+    let (Some(g), Some(bar)) = (geometry(state, layout.info_area), state.messages.bars.last()) else {
         return;
     };
+    let top = (g.card.y1 + 8.0 * state.scale).min(layout.document.y1);
+    layout.document.y0 = top;
+    if let Some(view) = layout.widgets.iter_mut().find(|w| w.id == WidgetId::Document) {
+        view.rect.y0 = top;
+    }
     let modal = state.sheet.is_some();
     for (index, ((label, _), rect)) in bar.actions.iter().zip(g.buttons).enumerate() {
         let mut button = plain_widget(WidgetId::InfoButton(index), Role::Button, Region::InfoBar, rect, (*label).into());
@@ -209,7 +235,7 @@ pub(super) fn card(l: &Look, r: Rect) {
 }
 
 pub(super) fn paint(l: &Look, state: &State, layout: &Layout) {
-    if let (Some(g), Some(bar)) = (geometry(state, layout.document), state.messages.bars.last()) {
+    if let (Some(g), Some(bar)) = (geometry(state, layout.info_area), state.messages.bars.last()) {
         card(l, g.card);
         let (icon, color) = match bar.kind {
             Kind::Error => (ERROR, l.t.close_hover),
@@ -233,7 +259,7 @@ pub(super) fn paint(l: &Look, state: &State, layout: &Layout) {
 }
 
 pub(super) fn a11y(state: &State, layout: &Layout, nodes: &mut Vec<(NodeId, Node)>, children: &mut Vec<NodeId>) {
-    if let (Some(g), Some(bar)) = (geometry(state, layout.document), state.messages.bars.last()) {
+    if let (Some(g), Some(bar)) = (geometry(state, layout.info_area), state.messages.bars.last()) {
         let urgent = bar.kind != Kind::Offer;
         let mut node = Node::new(if urgent { NodeRole::Alert } else { NodeRole::Group });
         node.set_label(bar.text.clone());
@@ -260,6 +286,7 @@ pub(super) fn a11y(state: &State, layout: &Layout, nodes: &mut Vec<(NodeId, Node
 pub(super) unsafe fn activate(hwnd: HWND, id: WidgetId) {
     let action = with_state(|s| {
         let bar = s.messages.bars.pop()?;
+        relayout(s);
         if matches!(s.focus, Some(WidgetId::InfoButton(_) | WidgetId::InfoClose)) {
             s.focus = s.path.as_ref().map(|_| WidgetId::Document);
         }

@@ -4,41 +4,62 @@
 use super::{
     app::State,
     document,
-    widgets::{self, WidgetId},
+    theme::size,
+    widgets::{self, WidgetId, SHEET_TAB},
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 fn tab(state: &State) -> usize {
-    state.sidebar_tab.min(2)
+    state.sidebar_tab.min(SHEET_TAB)
 }
 
-/// Click, Enter, or UI Automation Invoke on a row: go to its page.
+/// Shows sidebar view `index`, keeping the current page in view.
+pub(super) fn show(state: &mut State, index: usize) {
+    state.sidebar_tab = index.min(SHEET_TAB);
+    if state.sidebar_tab == SHEET_TAB {
+        // The sheet hides the page view, so focus moves onto the sheet.
+        state.focus = Some(WidgetId::SidebarItem(state.page as usize));
+    }
+    follow_page(state);
+}
+
+/// Click, Enter, or UI Automation Invoke on a row: go to its page. A page
+/// picked on the contact sheet opens in the thumbnail view.
 pub(super) fn activate(state: &mut State, index: usize) {
     let tab = tab(state);
     state.sidebar_rows[tab] = index;
     state.focus = Some(WidgetId::SidebarItem(index));
     let page = state.pdf.as_ref().and_then(|v| match tab {
-        0 => Some(index as u32),
+        0 | SHEET_TAB => Some(index as u32),
         1 => v.outline.as_ref()?.as_ref().ok()?.get(index)?.page,
         _ => v.notes.get(index).map(|n| n.page),
     });
     if let Some(page) = page {
         document::go_to_page(state, page, true);
     }
+    if tab == SHEET_TAB {
+        show(state, 0);
+        state.focus = Some(WidgetId::Document);
+    }
 }
 
-/// Arrow keys, Page Up and Down, Home, and End move through the list.
-/// Thumbnails follow at once, as in Preview.
+/// Arrow keys, Page Up and Down, Home, and End move through the list; on
+/// the contact sheet, Left and Right move by one and Up and Down by a row.
+/// The document follows thumbnails at once, as in Preview.
 pub(super) fn key(state: &mut State, vk: u16, index: usize) -> bool {
     let layout = state.layout();
     let count = state.sidebar_list().len();
     if count == 0 {
         return false;
     }
-    let page = layout.widgets.iter().filter(|w| w.role == widgets::Role::ListItem).count().saturating_sub(1).max(1);
+    let tab = tab(state);
+    let row = if tab == SHEET_TAB { widgets::sheet_grid(layout.sidebar_panel.width(), state.scale, state.text_scale).0 } else { 1 };
+    let page = layout.widgets.iter().filter(|w| w.role == widgets::Role::ListItem).count().saturating_sub(row).max(row);
     let next = match VIRTUAL_KEY(vk) {
-        VK_UP => index.saturating_sub(1),
-        VK_DOWN => index + 1,
+        VK_LEFT if tab == SHEET_TAB => index.saturating_sub(1),
+        VK_RIGHT if tab == SHEET_TAB => index + 1,
+        VK_UP => index.saturating_sub(row),
+        VK_DOWN => index + row,
         VK_PRIOR => index.saturating_sub(page),
         VK_NEXT => index + page,
         VK_HOME => 0,
@@ -46,15 +67,19 @@ pub(super) fn key(state: &mut State, vk: u16, index: usize) -> bool {
         _ => return false,
     }
     .min(count - 1);
-    let tab = tab(state);
     state.sidebar_rows[tab] = next;
     state.focus = Some(WidgetId::SidebarItem(next));
     state.focus_visible = true;
     reveal(state, next);
-    if tab == 0 {
+    if matches!(tab, 0 | SHEET_TAB) {
         document::go_to_page(state, next as u32, true);
     }
     true
+}
+
+/// Dragging the sidebar's edge sets its width.
+pub(super) fn resize(state: &mut State, x: f32) {
+    state.sidebar_width = (x / state.scale).clamp(size::SIDEBAR_MIN, size::SIDEBAR_MAX);
 }
 
 pub(super) fn wheel(state: &mut State, delta: f32, layout: &widgets::Layout) {
@@ -66,22 +91,28 @@ pub(super) fn wheel(state: &mut State, delta: f32, layout: &widgets::Layout) {
 
 /// Keeps the current page's thumbnail in view while the document scrolls.
 pub(super) fn follow_page(state: &mut State) {
-    if state.sidebar_open && state.sidebar_tab == 0 && state.pdf.is_some() {
+    if state.sidebar_open && matches!(state.sidebar_tab, 0 | SHEET_TAB) && state.pdf.is_some() {
         reveal(state, state.page as usize);
     }
 }
 
-/// Scrolls the list just enough to show row `index` whole.
+/// Scrolls the list just enough to show row `index` whole. Scrolling down
+/// stops where a row starts, so the top row is never cut to its blank lower half.
 fn reveal(state: &mut State, index: usize) {
-    let panel = state.layout().sidebar_panel.height();
-    let (top, height) = widgets::sidebar_row(&state.sidebar_list(), index, state.scale, state.text_scale);
+    let panel = state.layout().sidebar_panel;
+    let (s, ts) = (state.scale, state.text_scale);
+    let list = state.sidebar_list();
+    let (top, height) = widgets::sidebar_row(&list, index, panel.width(), s, ts);
+    let current = state.sidebar_scroll[tab(state)];
+    let scroll = if top < current {
+        top
+    } else if top + height > current + panel.height() {
+        widgets::row_start_after(&list, top + height - panel.height(), panel.width(), s, ts).min(top)
+    } else {
+        current
+    };
     let tab = tab(state);
-    let scroll = &mut state.sidebar_scroll[tab];
-    if top < *scroll {
-        *scroll = top;
-    } else if top + height > *scroll + panel {
-        *scroll = top + height - panel;
-    }
+    state.sidebar_scroll[tab] = scroll;
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ use super::{
     theme::{Mode, Rgba, Theme},
     view::{self, ViewMode, Zoom},
     widgets::{self, plain_widget, Layout, Rect, Region, Role, WidgetId},
+    window::{is_full_screen, toggle_full_screen, PLACEMENT},
     worker::{is_pdf, WM_APP_WAKE},
 };
 use crate::integration::Action;
@@ -82,6 +83,8 @@ const STRIP_HOLD: Duration = Duration::from_millis(1500);
 const KEYS: &[Command] = &[
     Command::ZoomIn,
     Command::ZoomOut,
+    Command::ActualSize,
+    Command::Fit,
     Command::FitWidth,
     Command::CopyText,
     Command::Print,
@@ -100,8 +103,6 @@ static PENDING: Mutex<Option<(PathBuf, Vec<PathBuf>)>> = Mutex::new(None);
 
 thread_local! {
     static HANDOFFS: RefCell<Vec<crate::integration::Command>> = const { RefCell::new(Vec::new()) };
-    /// Window placement and style to restore when full screen ends.
-    static FULL: RefCell<Option<(WINDOWPLACEMENT, isize)>> = const { RefCell::new(None) };
 }
 
 pub(super) struct Quick {
@@ -153,10 +154,6 @@ impl Quick {
     pub(super) fn forget_bitmaps(&mut self) {
         self.bitmaps.iter_mut().for_each(|b| *b = None);
     }
-}
-
-pub(super) fn is_full_screen() -> bool {
-    FULL.with(|f| f.borrow().is_some())
 }
 
 /// Queues a peek from any thread and wakes the window thread.
@@ -336,6 +333,7 @@ fn reset(s: &mut State) {
     // close() pauses autosave while it asks; the hidden window starts fresh.
     s.pause_save_dispatch(false);
     s.status = EMPTY_STATUS.into();
+    s.messages = Default::default();
     s.recent = super::empty::load();
     if let Some(renderer) = s.renderer.as_mut() {
         renderer.bitmap = None;
@@ -348,14 +346,6 @@ fn work_area(monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> RECT {
         let _ = GetMonitorInfoW(monitor, &mut info);
     }
     info.rcWork
-}
-
-fn monitor_rect(hwnd: HWND) -> RECT {
-    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-    unsafe {
-        let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info);
-    }
-    info.rcMonitor
 }
 
 /// Sizes the window so its client area is `client`, centered on `center`
@@ -379,7 +369,7 @@ unsafe fn place(hwnd: HWND, client: (f32, f32), work: RECT, center: Option<(i32,
 unsafe fn set_style(hwnd: HWND, quick: bool) {
     let frame = (WS_OVERLAPPEDWINDOW.0 | WS_POPUP.0) as isize;
     let wanted = if quick { (WS_POPUP | WS_THICKFRAME).0 } else { WS_OVERLAPPEDWINDOW.0 } as isize;
-    let saved = FULL.with(|f| {
+    let saved = PLACEMENT.with(|f| {
         let mut f = f.borrow_mut();
         let (_, style) = f.as_mut()?;
         *style = (*style & !frame) | wanted;
@@ -628,7 +618,6 @@ pub(super) unsafe fn command(hwnd: HWND, command: Command) -> bool {
     match command {
         Command::OpenInEditor => open_editor(hwnd, false),
         Command::IndexSheet => toggle_grid(hwnd),
-        Command::FullScreen => toggle_full_screen(hwnd),
         Command::ToggleMarkup if quick => open_editor(hwnd, true),
         _ => return false,
     }
@@ -664,11 +653,7 @@ unsafe fn open_editor(hwnd: HWND, markup: bool) {
         let _ = GetClientRect(hwnd, &mut client);
         let _ = GetWindowRect(hwnd, &mut window);
         let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
-        let chrome = with_state(|s| {
-            let layout = s.layout();
-            layout.document.y0 + (s.size.1 - layout.status.y0)
-        })
-        .unwrap_or(112.0 * scale);
+        let chrome = with_state(|s| s.layout().document.y0).unwrap_or(48.0 * scale);
         let size = ((client.right as f32).max(EDITOR_WIDTH * scale), client.bottom as f32 + chrome);
         let work = work_area(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
         place(hwnd, size, work, None);
@@ -706,38 +691,6 @@ unsafe fn open_command(hwnd: HWND, command: crate::integration::Command) {
         }
     }
     activate_window(hwnd);
-    invalidate(hwnd);
-}
-
-/// Full screen on the window's monitor, and back to the saved placement.
-/// https://devblogs.microsoft.com/oldnewthing/20100412-00/?p=14353
-pub(super) unsafe fn toggle_full_screen(hwnd: HWND) {
-    match FULL.with(|f| f.borrow_mut().take()) {
-        Some((placement, style)) => {
-            SetWindowLongPtrW(hwnd, GWL_STYLE, style);
-            let _ = SetWindowPlacement(hwnd, &placement);
-            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-        }
-        None => {
-            let mut placement = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-            if GetWindowPlacement(hwnd, &mut placement).is_err() {
-                return;
-            }
-            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-            FULL.with(|f| *f.borrow_mut() = Some((placement, style)));
-            SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !(WS_OVERLAPPEDWINDOW.0 as isize)) | WS_POPUP.0 as isize);
-            let r = monitor_rect(hwnd);
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOP),
-                r.left,
-                r.top,
-                r.right - r.left,
-                r.bottom - r.top,
-                SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
-            );
-        }
-    }
     invalidate(hwnd);
 }
 
@@ -788,7 +741,6 @@ pub(super) unsafe fn key(hwnd: HWND, vk: u16, repeat: bool) -> bool {
         VK_PRIOR | VK_NEXT | VK_HOME | VK_END if !ctrl && grid.is_none() => {
             with_state(|s| document::key(s, vk, shift));
         }
-        _ if ctrl && vk == 0x30 => actions::execute(hwnd, Command::ActualSize, true),
         _ => match commands::lookup(Chord { key: vk, ctrl, shift, alt }) {
             Some(command) if KEYS.contains(&command) => actions::execute(hwnd, command, true),
             Some(_) => {}
@@ -949,13 +901,15 @@ pub(super) fn layout(s: &State, q: &Quick, layout: &mut Layout) {
     let strip = Rect::new(0.0, 0.0, w, (STRIP * scale).min(h));
     // The strip drags the window, except in full screen.
     layout.title_bar = if is_full_screen() { Rect::default() } else { strip };
-    layout.toolbar = Rect::default();
     layout.title_text = Rect::default();
+    layout.tab_strip = None;
     layout.markup_bar = None;
     layout.sidebar = None;
+    layout.sidebar_edge = None;
     layout.sidebar_panel = Rect::default();
+    layout.contact_sheet = false;
     layout.document = full;
-    layout.status = Rect::new(0.0, h, w, 0.0);
+    layout.info_area = full;
     layout.empty = None;
     layout.toolbar_overflow.clear();
     layout.markup_overflow.clear();

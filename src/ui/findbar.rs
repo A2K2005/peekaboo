@@ -473,7 +473,7 @@ fn geometry(state: &State, doc: Rect) -> Option<Geometry> {
     if field_width < 80.0 * s {
         return None;
     }
-    let top = infobar::bottom(state, doc) + 8.0 * s;
+    let top = doc.y0 + 8.0 * s;
     let card = Rect::new(doc.x1 - 16.0 * s - width, top, width, control + 2.0 * pad);
     let mut x = card.x0 + pad;
     let mut take = |w: f32| {

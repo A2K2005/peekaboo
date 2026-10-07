@@ -801,7 +801,18 @@ pub(super) fn wanted(state: &State, layout: &widgets::Layout) -> Vec<Item> {
         let (w, h) = widgets::thumb_size(v.sizes[page as usize], state.scale);
         item(Work::Thumb { page }, 0.0, [0, 0, w as u32, h as u32])
     };
-    let mid = (g.left + g.doc.width() / 2.0, g.top + g.doc.height() / 2.0);
+    if layout.contact_sheet {
+        // The sheet covers the pages, so only its thumbnails are needed.
+        return layout
+            .widgets
+            .iter()
+            .filter_map(|w| match w.id {
+                widgets::WidgetId::SidebarItem(index) if !skip(Work::Thumb { page: index as u32 }) => Some(thumb(index as u32)),
+                _ => None,
+            })
+            .collect();
+    }
+    let mid =(g.left + g.doc.width() / 2.0, g.top + g.doc.height() / 2.0);
     let tiles_in = |top: f32, bottom: f32| -> Vec<(usize, Item, bool)> {
         let mut found = Vec::new();
         for (page, r) in &g.layout.pages[view::visible(&g.layout, top, bottom)] {
@@ -843,7 +854,7 @@ pub(super) fn wanted(state: &State, layout: &widgets::Layout) -> Vec<Item> {
         out.extend(placeholders);
     }
     let mut sidebar_thumbs = Vec::new();
-    if layout.sidebar.is_some() && state.sidebar_tab == 0 {
+    if layout.sidebar.is_some() && matches!(state.sidebar_tab, 0 | widgets::SHEET_TAB) {
         for w in &layout.widgets {
             if let widgets::WidgetId::SidebarItem(index) = w.id {
                 let item = thumb(index as u32);
@@ -867,7 +878,7 @@ pub(super) fn wanted(state: &State, layout: &widgets::Layout) -> Vec<Item> {
     }
     if layout.sidebar.is_some() {
         match state.sidebar_tab {
-            0 => {
+            0 | widgets::SHEET_TAB => {
                 out.extend(sidebar_thumbs.into_iter().filter_map(|(item, ready)| (!ready).then_some(item)));
             }
             1 if v.outline.is_none() => out.push(item(Work::Outline, 0.0, [0; 4])),

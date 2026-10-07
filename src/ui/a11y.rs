@@ -7,7 +7,7 @@ use super::{
     commands::{self, Command},
     widgets::{Role as WidgetRole, Widget, WidgetId},
 };
-use accesskit::{Action, ActionHandler, ActionRequest, ActivationHandler, Live, Node, NodeId, Rect, Role, TreeId, TreeInfo, TreeUpdate};
+use accesskit::{Action, ActionHandler, ActionRequest, ActivationHandler, Node, NodeId, Rect, Role, TreeId, TreeInfo, TreeUpdate};
 use std::cell::RefCell;
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
@@ -29,7 +29,6 @@ const MARKUP_BAR: NodeId = NodeId(5);
 const SIDEBAR: NodeId = NodeId(6);
 const SIDEBAR_TABS: NodeId = NodeId(7);
 const SIDEBAR_PANEL: NodeId = NodeId(8);
-const STATUS: NodeId = NodeId(9);
 const SHEET: NodeId = NodeId(10);
 const SHEET_MESSAGE: NodeId = NodeId(11);
 const EMPTY: NodeId = NodeId(12);
@@ -144,25 +143,29 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
     }
     use super::widgets::Region;
     let tabs = ids(&|w| w.role == WidgetRole::Tab);
-    nodes.push((TAB_LIST, group(Role::TabList, "Open files", layout.title_bar, tabs)));
+    nodes.push((TAB_LIST, group(Role::TabList, "Open files", layout.tab_strip.unwrap_or_default(), tabs)));
     let mut title_children = vec![TAB_LIST];
     title_children.extend(ids(&|w| w.region == Region::TitleBar && w.role != WidgetRole::Tab));
     nodes.push((TITLE_BAR, group(Role::TitleBar, "Title bar", layout.title_bar, title_children)));
     let mut root_children = vec![TITLE_BAR, TOOLBAR];
     let mut toolbar = ids(&|w| w.region == Region::Toolbar);
     if let Some(path) = &s.path {
-        nodes.push((FILE_TITLE, text(Role::Label, &file_name(path), layout.title_text)));
+        let label = match s.title_detail() {
+            detail if detail.is_empty() => file_name(path),
+            detail => format!("{}, {detail}", file_name(path)),
+        };
+        nodes.push((FILE_TITLE, text(Role::Label, &label, layout.title_text)));
         // Quick view has no toolbar buttons, so the title may be the only child.
         toolbar.insert(toolbar.len().min(1), FILE_TITLE);
     }
-    nodes.push((TOOLBAR, group(Role::Toolbar, "Toolbar", layout.toolbar, toolbar)));
+    nodes.push((TOOLBAR, group(Role::Toolbar, "Toolbar", layout.title_bar, toolbar)));
     if let Some(bar) = layout.markup_bar {
         nodes.push((MARKUP_BAR, group(Role::Toolbar, "Markup tools", bar, ids(&|w| w.region == Region::MarkupBar))));
         root_children.push(MARKUP_BAR);
     }
     if let Some(side) = layout.sidebar {
         nodes.push((SIDEBAR_TABS, group(Role::TabList, "Sidebar views", side, ids(&|w| w.role == WidgetRole::SidebarTab))));
-        let panel = super::widgets::SIDEBAR_TABS[s.sidebar_tab.min(2)];
+        let panel = super::widgets::SIDEBAR_TABS[s.sidebar_tab.min(3)];
         let mut rows = ids(&|w| w.role == WidgetRole::ListItem);
         if let super::widgets::SidebarList::Message(message) = s.sidebar_list() {
             if !message.is_empty() {
@@ -235,10 +238,6 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
     super::findbar::a11y(s, &layout, &mut nodes, &mut root_children);
     super::infobar::a11y(s, &layout, &mut nodes, &mut root_children);
     super::quickview::a11y(&layout, &mut nodes, &mut root_children);
-    let mut status = text(Role::Status, &s.visible_status(), layout.status);
-    status.set_live(Live::Polite);
-    nodes.push((STATUS, status));
-    root_children.push(STATUS);
     if let (Some(sheet), Some(card)) = (&s.sheet, &layout.sheet) {
         let mut children = Vec::new();
         if !sheet.message.is_empty() {
@@ -455,9 +454,11 @@ mod tests {
             tabs: &tabs,
             active_tab: Some(0),
             maximized: false,
+            chrome: true,
             has_document: true,
             title: "report.pdf, page 1 of 20",
             sidebar_open: true,
+            sidebar_width: crate::ui::theme::size::SIDEBAR,
             sidebar_tab: 0,
             sidebar_list: super::super::widgets::SidebarList::Thumbnails(&[[612.0, 792.0]; 4]),
             sidebar_scroll: 0.0,

@@ -1,6 +1,5 @@
 //! Save model file steps that run off the window thread: a snapshot of the
-//! opened version, crash-safe replacement of the user's file, copy names,
-//! and the remembered first-edit choice.
+//! opened version, crash-safe replacement of the user's file, and copy names.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -239,40 +238,9 @@ pub(super) fn can_overwrite(path: &Path) -> Result<(), String> {
     }
 }
 
-/// The answer to the first-edit question, when "Remember my choice" is on.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum Choice {
-    Overwrite,
-    Copy,
-}
-const CHOICE_FILE: &str = "save-choice.txt";
-
 /// %LOCALAPPDATA%\PreviewForWindows
 pub(super) fn app_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("PreviewForWindows"))
-}
-
-pub(super) fn remembered(dir: &Path) -> Option<Choice> {
-    match fs::read_to_string(dir.join(CHOICE_FILE)).ok()?.trim() {
-        "overwrite" => Some(Choice::Overwrite),
-        "copy" => Some(Choice::Copy),
-        _ => None,
-    }
-}
-
-/// Saves the choice, or forgets it with None.
-pub(super) fn remember(dir: &Path, choice: Option<Choice>) -> io::Result<()> {
-    let path = dir.join(CHOICE_FILE);
-    match choice {
-        None => match fs::remove_file(path) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        },
-        Some(choice) => {
-            fs::create_dir_all(dir)?;
-            fs::write(path, if choice == Choice::Overwrite { "overwrite" } else { "copy" })
-        }
-    }
 }
 
 #[cfg(test)]
@@ -400,19 +368,5 @@ mod tests {
         assert_eq!(snapshot(&original, &dir.join("keep-2"), opened), Err(Failure::Changed));
         assert!(!dir.join("keep-2").join("form.pdf").exists());
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn remembers_and_forgets_the_first_edit_choice() {
-        let dir = temp("choice").join("app");
-        assert_eq!(remembered(&dir), None);
-        remember(&dir, Some(Choice::Copy)).unwrap();
-        assert_eq!(remembered(&dir), Some(Choice::Copy));
-        remember(&dir, Some(Choice::Overwrite)).unwrap();
-        assert_eq!(remembered(&dir), Some(Choice::Overwrite));
-        remember(&dir, None).unwrap();
-        remember(&dir, None).unwrap();
-        assert_eq!(remembered(&dir), None);
-        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 }

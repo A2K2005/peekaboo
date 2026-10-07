@@ -2,7 +2,7 @@
 //! empty state, sheets, focus rectangles, keytips, and tooltips. The
 //! document itself is drawn by document.rs.
 use super::{
-    app::{State, invalidate, with_state},
+    app::{State, file_name, invalidate, with_state},
     commands::glyph,
     document,
     render::{Align, Fonts, Painter, Renderer, fonts, measure},
@@ -95,21 +95,42 @@ pub(super) fn text_button(l: &Look, state: &State, w: &Widget) {
     l.p.text(&w.label, r.inset(4.0 * l.s), &l.f.body, color, Align::Center);
 }
 
+/// The editor bar: the title and page count, the tools, and the caption
+/// buttons; then the tab strip when 2 or more files are open.
 fn title_bar(l: &Look, state: &State, layout: &Layout) {
     let s = l.s;
     let bar = layout.title_bar;
-    l.p.push_clip(bar);
+    if bar.height() > 0.0 {
+        l.p.fill(bar, l.t.bar);
+        l.p.fill(Rect { y0: bar.y1 - s, ..bar }, l.t.divider);
+        let t = layout.title_text;
+        let name = state.path.as_deref().map(file_name).unwrap_or_else(|| "Preview for Windows".into());
+        let detail = state.title_detail();
+        if detail.is_empty() {
+            l.p.text(&name, t, &l.f.strong, l.t.text, Align::Leading);
+        } else {
+            let (line, small) = (20.0 * state.text_scale * s, 16.0 * state.text_scale * s);
+            let y = (t.y0 + t.y1 - line - small) / 2.0;
+            l.p.text(&name, Rect { y0: y, y1: y + line, ..t }, &l.f.strong, l.t.text, Align::Leading);
+            l.p.text(&detail, Rect { y0: y + line, y1: y + line + small, ..t }, &l.f.caption, l.t.text_secondary, Align::Leading);
+        }
+        for w in layout.widgets.iter().filter(|w| w.region == Region::Toolbar) {
+            icon_button(l, state, w);
+        }
+    }
+    if let Some(strip) = layout.tab_strip {
+        l.p.fill(Rect { y0: strip.y1 - s, ..strip }, l.t.divider);
+    }
     for w in layout.widgets.iter().filter(|w| w.region == Region::TitleBar) {
         match w.id {
             WidgetId::Tab(_) => {
                 let selected = w.checked == Some(true);
                 let r = w.rect;
                 if selected {
-                    // Round the top corners only; the bottom joins the toolbar.
-                    l.p.fill_round(Rect { y1: r.y1 + 8.0 * s, ..r }, 8.0 * s, l.t.selected);
+                    l.p.fill_round(r, 6.0 * s, l.t.selected);
+                    l.p.stroke_round(r, 6.0 * s, l.t.divider, s);
                 } else if let Some(fill) = background(state, w) {
-                    let inner = Rect { x0: r.x0 + 2.0 * s, y0: r.y0 + 2.0 * s, x1: r.x1 - 2.0 * s, y1: r.y1 - 4.0 * s };
-                    l.p.fill_round(inner, 4.0 * s, if fill == Fill::Hover { l.t.hover } else { l.t.pressed });
+                    l.p.fill_round(r, 6.0 * s, if fill == Fill::Hover { l.t.hover } else { l.t.pressed });
                 }
                 let color = if selected {
                     l.t.selected_text
@@ -154,53 +175,28 @@ fn title_bar(l: &Look, state: &State, layout: &Layout) {
             _ => {}
         }
     }
-    if state.tabs.is_empty() {
-        if let Some(plus) = layout.widgets.iter().find(|w| w.id == WidgetId::NewTab) {
-            let r = Rect { x0: plus.rect.x1 + 12.0 * s, y0: bar.y0, x1: bar.x1 - 3.0 * 46.0 * s, y1: bar.y1 };
-            l.p.text("Preview for Windows", r, &l.f.body, l.t.text_secondary, Align::Leading);
-        }
-    }
-    l.p.pop_clip();
 }
 
 fn bars(l: &Look, state: &State, layout: &Layout) {
     let s = l.s;
-    l.p.fill(layout.toolbar, l.t.bar);
-    for w in layout.widgets.iter().filter(|w| w.region == Region::Toolbar) {
-        icon_button(l, state, w);
-    }
     if let Some(bar) = layout.markup_bar {
         l.p.fill(bar, l.t.bar);
         l.p.fill(Rect { y0: bar.y1 - s, ..bar }, l.t.divider);
         for w in layout.widgets.iter().filter(|w| w.region == Region::MarkupBar) {
             icon_button(l, state, w);
         }
-    } else {
-        l.p.fill(Rect { y0: layout.toolbar.y1 - s, ..layout.toolbar }, l.t.divider);
     }
     if let Some(side) = layout.sidebar {
         l.p.fill(side, l.t.content_layer);
         l.p.fill(Rect { y1: layout.sidebar_panel.y0, ..side }, l.t.bar);
-        l.p.fill(Rect { x0: side.x1 - s, ..side }, l.t.divider);
+        if !layout.contact_sheet {
+            let edge = if state.sidebar_resize.is_some() { l.t.accent } else { l.t.divider };
+            l.p.fill(Rect { x0: side.x1 - s, ..side }, edge);
+        }
         for w in layout.widgets.iter().filter(|w| w.role == Role::SidebarTab) {
-            let selected = w.checked == Some(true);
-            if let Some(fill) = background(state, w) {
-                l.p.fill_round(w.rect, 4.0 * s, if fill == Fill::Hover { l.t.hover } else { l.t.pressed });
-            }
-            let font = if selected { &l.f.strong } else { &l.f.body };
-            let color = if selected { l.t.text } else { l.t.text_secondary };
-            l.p.text(&w.label, w.rect, font, color, Align::Center);
-            if selected {
-                let bar = Rect { x0: w.rect.x0 + 16.0 * s, y0: w.rect.y1 - 3.0 * s, x1: w.rect.x1 - 16.0 * s, y1: w.rect.y1 };
-                l.p.fill_round(bar, 1.5 * s, l.t.accent);
-            }
+            icon_button(l, state, w);
         }
     }
-    let status = layout.status;
-    l.p.fill(status, l.t.bar);
-    l.p.fill(Rect { y1: status.y0 + s, ..status }, l.t.divider);
-    let text = Rect { x0: status.x0 + 12.0 * s, y0: status.y0, x1: status.x1 - 12.0 * s, y1: status.y1 };
-    l.p.text(&state.visible_status(), text, &l.f.caption, l.t.text_secondary, Align::Leading);
 }
 
 /// The sidebar list: thumbnails with page numbers, outline entries indented
@@ -216,7 +212,7 @@ fn sidebar_panel(l: &Look, state: &mut State, layout: &Layout) {
         l.p.text(message, line, &l.f.wrap, l.t.text_secondary, Align::Leading);
         return;
     }
-    let scroll = state.sidebar_scroll[state.sidebar_tab.min(2)];
+    let scroll = state.sidebar_scroll[state.sidebar_tab.min(3)];
     let (rows, _) = widgets::sidebar_rows(&list, panel, scroll, s, ts);
     let rows: Vec<(usize, Rect, String, u32)> = rows
         .into_iter()
@@ -225,7 +221,7 @@ fn sidebar_panel(l: &Look, state: &mut State, layout: &Layout) {
             (i, r, list.label(i), level)
         })
         .collect();
-    let thumbnails = matches!(list, SidebarList::Thumbnails(_));
+    let thumbnails = matches!(list, SidebarList::Thumbnails(_) | SidebarList::Sheet(_));
     l.p.push_clip(panel);
     for (index, row, label, level) in rows {
         if state.hover == Some(WidgetId::SidebarItem(index)) {
@@ -424,7 +420,11 @@ pub(super) fn draw(p: &Painter, bitmap: Option<&ID2D1Bitmap>, fonts: &Fonts, sta
         false
     } else if state.quick.is_some() {
         super::quickview::paint(&look, bitmap, state, layout)
+    } else if layout.contact_sheet {
+        false
     } else {
+        // The band an info bar pushed the document out of.
+        p.fill(Rect { y1: layout.document.y0, ..layout.info_area }, state.theme.canvas);
         document::paint(p, bitmap, state, layout.document)
     };
     super::infobar::paint(&look, state, layout);
@@ -656,7 +656,7 @@ mod tests {
                 state.markup = Some(crate::model::AnnotationKind::Highlight);
                 state.hover = Some(WidgetId::Command(crate::ui::commands::Command::Rotate));
                 state.tooltip = state.hover;
-                state.focus = Some(WidgetId::Command(crate::ui::commands::Command::ZoomMenu));
+                state.focus = Some(WidgetId::Command(crate::ui::commands::Command::ZoomIn));
                 state.focus_visible = true;
             }
             "keytips" => {
@@ -984,8 +984,8 @@ mod tests {
                 assert!(close(pixel(&shot, size.0 - 4, size.1 - 60), palette(Mode::Light).canvas), "{file}");
                 if text_scale == 2.25 {
                     let rotate = layout.widgets.iter().find(|w| w.id == WidgetId::Command(crate::ui::commands::Command::Rotate)).unwrap();
-                    assert_eq!(rotate.rect.width(), 40.0, "225% text preserves 40 DIP icon targets");
-                    assert!(layout.toolbar.height() >= 20.0 * text_scale + 12.0);
+                    assert_eq!(rotate.rect.width(), 36.0, "225% text preserves 36 DIP icon targets");
+                    assert!(layout.title_bar.height() >= 26.0 * text_scale + 12.0);
                 }
                 let path = out.join(file);
                 let _ = std::fs::remove_file(&path);

@@ -425,7 +425,7 @@ fn blur(state: &mut State) {
     }
 }
 
-/// True when a press starts an edit, so the first-edit choice comes first.
+/// True when a press starts an edit, so the save target is set first.
 pub(super) fn needs_consent(state: &State, e: &PointerEvent) -> bool {
     if e.phase != Phase::Down || state.forms.pad.is_some() {
         return false;
@@ -733,7 +733,7 @@ unsafe fn mark_selection(hwnd: HWND, command: Command) -> bool {
     true
 }
 
-/// Adds edits to a file's recipe after the first-edit choice was made.
+/// Adds edits to a file's recipe once its save target is set.
 unsafe fn push(hwnd: HWND, state: &mut State, path: &PathBuf, change: impl FnOnce(&mut Edits)) {
     if !state.tabs.contains(path) {
         return;

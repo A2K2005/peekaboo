@@ -46,13 +46,25 @@ pub(super) enum Command {
     ViewTwoPages,
     Slideshow,
     ToggleSidebar,
+    SidebarHide,
+    SidebarThumbnails,
+    SidebarContents,
+    SidebarNotes,
+    SidebarSheet,
+    FullScreen,
     ToggleMarkup,
     NextTab,
     PreviousTab,
-    /// Tabs 1 to 8; 8 means the last tab.
+    /// Tabs 1 to 8.
     Tab(u8),
     NextPane,
     PreviousPane,
+    /// Turns the markup tool off, so a drag selects text again.
+    SelectText,
+    /// Markup bar buttons that open a menu of related tools.
+    ShapesMenu,
+    HighlightMenu,
+    SignMenu,
     Draw,
     Highlight,
     Underline,
@@ -65,13 +77,11 @@ pub(super) enum Command {
     SaveSignature,
     PlaceSignature,
     FillForm,
-    ZoomMenu,
     AppMenu,
     MoreTools,
     /// Quick view becomes the editor in the same window.
     OpenInEditor,
     IndexSheet,
-    FullScreen,
 }
 use Command::*;
 
@@ -93,8 +103,14 @@ const fn i(label: &'static str, menu: &'static str, glyph: Option<u16>, key: Opt
 /// https://learn.microsoft.com/windows/apps/design/style/segoe-ui-symbol-font
 pub(super) mod glyph {
     pub(in crate::ui) const OPEN_PANE: u16 = 0xE8A0;
-    /// ZoomIn, so the Zoom button does not look like Search.
-    pub(in crate::ui) const ZOOM: u16 = 0xE8A3;
+    pub(in crate::ui) const ZOOM_IN: u16 = 0xE8A3;
+    pub(in crate::ui) const ZOOM_OUT: u16 = 0xE71F;
+    pub(in crate::ui) const INFO: u16 = 0xE946;
+    pub(in crate::ui) const PAGE: u16 = 0xE7C3;
+    pub(in crate::ui) const LIST: u16 = 0xE8FD;
+    pub(in crate::ui) const GRID: u16 = 0xE8A9;
+    pub(in crate::ui) const CHARACTERS: u16 = 0xE8C1;
+    pub(in crate::ui) const SELECT_ALL: u16 = 0xE8B3;
     pub(in crate::ui) const EDIT: u16 = 0xE70F;
     pub(in crate::ui) const ROTATE: u16 = 0xE7AD;
     pub(in crate::ui) const SHARE: u16 = 0xE72D;
@@ -114,7 +130,6 @@ pub(super) mod glyph {
     pub(in crate::ui) const ARROW: u16 = 0xE72A;
     pub(in crate::ui) const SAVE: u16 = 0xE74E;
     pub(in crate::ui) const DOCUMENT: u16 = 0xE8A5;
-    pub(in crate::ui) const ERASE: u16 = 0xE75C;
     pub(in crate::ui) const FLIP: u16 = 0xE8AB;
     pub(in crate::ui) const FOLDER_OPEN: u16 = 0xE838;
     pub(in crate::ui) const PRINT: u16 = 0xE749;
@@ -131,8 +146,9 @@ pub(super) mod glyph {
     pub(in crate::ui) const VIEW_ALL: u16 = 0xE8A9;
     #[cfg(test)]
     pub(in crate::ui) const ALL: &[u16] = &[
-        OPEN_PANE, ZOOM, EDIT, ROTATE, SHARE, SEARCH, MORE, HIGHLIGHT, UNDERLINE, STRIKETHROUGH, COMMENT,
-        INKING, CROP, RESIZE, SIGNATURE, FONT_SIZE, SQUARE, CIRCLE, ARROW, SAVE, DOCUMENT, ERASE, FLIP,
+        OPEN_PANE, ZOOM_IN, ZOOM_OUT, INFO, PAGE, LIST, GRID, CHARACTERS, SELECT_ALL, EDIT, ROTATE, SHARE, SEARCH, MORE,
+        HIGHLIGHT, UNDERLINE, STRIKETHROUGH, COMMENT, INKING, CROP, RESIZE, SIGNATURE, FONT_SIZE, SQUARE, CIRCLE, ARROW, SAVE,
+        DOCUMENT, FLIP,
         FOLDER_OPEN, PRINT, CHECK, CHEVRON_RIGHT, CHEVRON_DOWN, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, ADD, CANCEL,
         FULL_SCREEN, VIEW_ALL,
     ];
@@ -149,7 +165,7 @@ pub(super) fn info(command: Command) -> Info {
         Print => i("Print", "&Print...", Some(PRINT), None),
         BatchFolder => i("Convert all images in this folder", "Convert &folder...", None, None),
         BatchSelected => i("Convert selected images", "Convert &selected images...", None, None),
-        FileInfo => i("File information", "File &information", None, None),
+        FileInfo => i("File information", "File &information", Some(INFO), Some('I')),
         Share => i("Share", "S&hare", Some(SHARE), Some('H')),
         CloseTab => i("Close tab", "Close &tab", Some(CANCEL), None),
         Exit => i("Exit", "E&xit", None, None),
@@ -163,7 +179,7 @@ pub(super) fn info(command: Command) -> Info {
         Flip => i("Flip horizontally", "F&lip horizontally", Some(FLIP), Some('L')),
         Crop => i("Crop", "Cr&op", Some(CROP), Some('C')),
         Resize => i("Resize", "Re&size...", Some(RESIZE), Some('Z')),
-        RemoveBackground => i("Remove background", "Remove &background...", Some(ERASE), Some('B')),
+        RemoveBackground => i("Remove background", "Remove &background...", Some(SELECT_ALL), Some('B')),
         DeletePage => i("Delete page", "&Delete page...", None, None),
         MovePage => i("Move page", "&Move page...", None, None),
         MovePageUp => i("Move page up", "Move page u&p", None, None),
@@ -172,8 +188,8 @@ pub(super) fn info(command: Command) -> Info {
         InsertImagePage => i("Insert image as page", "Insert image as pag&e...", None, None),
         Previous => i("Previous", "&Previous", None, None),
         Next => i("Next", "&Next", None, None),
-        ZoomIn => i("Zoom in", "Zoom &in", None, None),
-        ZoomOut => i("Zoom out", "Zoom &out", None, None),
+        ZoomIn => i("Zoom in", "Zoom &in", Some(ZOOM_IN), Some('Z')),
+        ZoomOut => i("Zoom out", "Zoom &out", Some(ZOOM_OUT), Some('X')),
         Fit => i("Fit to window", "&Fit to window", None, None),
         FitWidth => i("Fit width", "Fit &width", None, None),
         ActualSize => i("Actual size", "Actual si&ze", None, None),
@@ -183,14 +199,24 @@ pub(super) fn info(command: Command) -> Info {
         ViewTwoPages => i("Two pages side by side", "Two pages side &by side", None, None),
         Slideshow => i("Slideshow", "Slide&show", None, None),
         ToggleSidebar => i("Sidebar", "Si&debar", Some(OPEN_PANE), Some('S')),
+        SidebarHide => i("Hide sidebar", "&Hide sidebar", None, None),
+        SidebarThumbnails => i("Thumbnails", "&Thumbnails", Some(PAGE), None),
+        SidebarContents => i("Table of contents", "Table of &contents", Some(LIST), None),
+        SidebarNotes => i("Highlights and notes", "Highlights and &notes", Some(COMMENT), None),
+        SidebarSheet => i("Contact sheet", "Contact &sheet", Some(GRID), None),
+        FullScreen => i("Full screen", "F&ull screen", Some(FULL_SCREEN), None),
         ToggleMarkup => i("Markup", "&Markup bar", Some(EDIT), Some('M')),
         NextTab => i("Next tab", "Next &tab", None, None),
         PreviousTab => i("Previous tab", "Previous t&ab", None, None),
         Tab(_) => i("Go to tab", "Go to tab", None, None),
         NextPane => i("Next pane", "Next pane", None, None),
         PreviousPane => i("Previous pane", "Previous pane", None, None),
+        SelectText => i("Select text", "Select te&xt", Some(CHARACTERS), Some('X')),
+        ShapesMenu => i("Shapes", "Sha&pes", Some(SQUARE), Some('P')),
+        HighlightMenu => i("Highlight and strike", "&Highlight", Some(HIGHLIGHT), Some('H')),
+        SignMenu => i("Sign", "Si&gn", Some(SIGNATURE), Some('G')),
         Draw => i("Draw", "&Draw", Some(INKING), Some('D')),
-        Highlight => i("Highlight", "&Highlight", Some(HIGHLIGHT), Some('H')),
+        Highlight => i("Highlight", "&Highlight", Some(HIGHLIGHT), Some('G')),
         Underline => i("Underline", "&Underline", Some(UNDERLINE), Some('U')),
         Strikethrough => i("Strikethrough", "Stri&kethrough", Some(STRIKETHROUGH), Some('K')),
         Note => i("Note", "&Note...", Some(COMMENT), Some('N')),
@@ -201,23 +227,47 @@ pub(super) fn info(command: Command) -> Info {
         SaveSignature => i("Draw a new signature", "Draw a ne&w signature", Some(ADD), Some('V')),
         PlaceSignature => i("Sign", "&Sign", Some(SIGNATURE), Some('G')),
         FillForm => i("Fill form", "Fill f&orm", Some(DOCUMENT), Some('F')),
-        ZoomMenu => i("Zoom", "&Zoom", Some(ZOOM), Some('Z')),
         AppMenu => i("More", "More", Some(MORE), Some('O')),
         MoreTools => i("More tools", "More tools", Some(MORE), Some('O')),
         OpenInEditor => i("Open", "Open in &editor", None, None),
         IndexSheet => i("Index sheet", "&Index sheet", Some(VIEW_ALL), None),
-        FullScreen => i("Full screen", "F&ull screen", Some(FULL_SCREEN), None),
     }
 }
 
-/// Toolbar buttons, PRD order. Overflow hides them in `TOOLBAR_DROP` order.
-pub(super) const TOOLBAR: &[Command] = &[ZoomMenu, ToggleMarkup, Rotate, Share, Find];
-/// Overflow order from the UX spec: Share first, then Rotate.
-pub(super) const TOOLBAR_DROP: &[Command] = &[Share, Rotate, ZoomMenu, ToggleMarkup, Find];
+/// Editor bar buttons after the title, in Preview's order. Overflow hides
+/// them in `TOOLBAR_DROP` order.
+pub(super) const TOOLBAR: &[Command] = &[FileInfo, ZoomOut, ZoomIn, Share, Highlight, Rotate, ToggleMarkup, Find];
+pub(super) const TOOLBAR_DROP: &[Command] = &[Share, Highlight, Rotate, FileInfo, ZoomOut, ZoomIn, ToggleMarkup, Find];
+/// Markup bar tools in Preview's order. Commands for the other document
+/// type are left out (`for_type`).
 pub(super) const MARKUP_TOOLS: &[Command] = &[
-    Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow, PlaceSignature,
-    SaveSignature, FillForm, Crop, Resize, Flip, RemoveBackground,
+    SelectText, RemoveBackground, Draw, ShapesMenu, TextBox, HighlightMenu, SignMenu, Note, Resize, Flip, Rotate, Crop,
+    FillForm,
 ];
+
+/// Buttons that start a new group get a wider gap before them.
+pub(super) fn starts_group(command: Command) -> bool {
+    matches!(command, ZoomOut | Share | Highlight | Find | AppMenu | Draw | Note | Resize)
+}
+
+/// The tools a menu button holds.
+pub(super) fn tool_group(command: Command) -> &'static [Command] {
+    match command {
+        ShapesMenu => &[Rectangle, Ellipse, Arrow],
+        HighlightMenu => &[Highlight, Underline, Strikethrough],
+        SignMenu => &[PlaceSignature, SaveSignature],
+        _ => &[],
+    }
+}
+
+/// False for commands that never apply to this document type.
+pub(super) fn for_type(command: Command, pdf: bool) -> bool {
+    match command {
+        Flip | Resize | RemoveBackground => !pdf,
+        FillForm => pdf,
+        _ => true,
+    }
+}
 
 pub(super) fn annotation(command: Command) -> Option<crate::model::AnnotationKind> {
     use crate::model::AnnotationKind as K;
@@ -254,10 +304,24 @@ const fn plain(key: u16) -> Chord {
 const fn shift(key: u16) -> Chord {
     Chord { key, ctrl: false, shift: true, alt: false }
 }
+const fn alt(key: u16) -> Chord {
+    Chord { key, ctrl: false, shift: false, alt: true }
+}
 
-/// Keyboard shortcuts from docs/research/ux-teardown.md, "Consolidated
-/// keyboard shortcuts". The first chord per command is the one menus show.
+/// Preview's shortcuts with Cmd as Ctrl and Option as Alt
+/// (docs/quicklook-spec.md section 4), then docs/research/ux-teardown.md.
+/// Preview's Option-Cmd chords use Ctrl+Shift here: Ctrl+Alt is AltGr on
+/// many layouts. The first chord per command is the one menus show.
 pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
+    (ctrl_shift(0x31), SidebarHide),
+    (ctrl_shift(0x32), SidebarThumbnails),
+    (ctrl_shift(0x33), SidebarContents),
+    (ctrl_shift(0x34), SidebarNotes),
+    (ctrl_shift(0x35), SidebarSheet),
+    (plain(0x7A), FullScreen),
+    (ctrl(0x49), FileInfo),
+    (alt(0x28), Next),
+    (alt(0x26), Previous),
     (ctrl(0x4F), Open),
     (ctrl(0x54), Open),
     (ctrl(0x57), CloseTab),
@@ -272,7 +336,6 @@ pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
     (ctrl(0x36), Tab(5)),
     (ctrl(0x37), Tab(6)),
     (ctrl(0x38), Tab(7)),
-    (ctrl(0x39), Tab(8)),
     (ctrl_shift(0x53), SaveCopy),
     (ctrl(0x53), SaveCopy),
     (ctrl(0x50), Print),
@@ -286,8 +349,9 @@ pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
     (ctrl(0x6B), ZoomIn),
     (ctrl(0xBD), ZoomOut),
     (ctrl(0x6D), ZoomOut),
-    (ctrl(0x30), Fit),
-    (ctrl(0x60), Fit),
+    (ctrl(0x30), ActualSize),
+    (ctrl(0x60), ActualSize),
+    (ctrl(0x39), Fit),
     (ctrl(0xDC), FitWidth),
     (plain(0x74), Slideshow),
     (ctrl_shift(0x42), ToggleSidebar),
@@ -312,22 +376,8 @@ pub(super) const SHORTCUTS: &[(Chord, Command)] = &[
     (plain(0x27), Next),
     (plain(0x22), Next),
     (ctrl(0x4E), NewFromClipboard),
-    // Single-letter tool keys reuse each tool's markup bar key. Text boxes
-    // are EDIT children, which take their own keys, so typing never picks a tool.
-    (plain(0x44), Draw),
-    (plain(0x48), Highlight),
-    (plain(0x55), Underline),
-    (plain(0x4B), Strikethrough),
-    (plain(0x4E), Note),
-    (plain(0x54), TextBox),
-    (plain(0x50), Rectangle),
-    (plain(0x45), Ellipse),
-    (plain(0x41), Arrow),
-    (plain(0x47), PlaceSignature),
-    (plain(0x43), Crop),
     (plain(0x0D), OpenInEditor),
     (ctrl(0x0D), IndexSheet),
-    (plain(0x7A), FullScreen),
 ];
 
 pub(super) fn lookup(chord: Chord) -> Option<Command> {
@@ -377,26 +427,32 @@ pub(super) struct Ctx {
     pub(super) can_next: bool,
     pub(super) tabs: usize,
     pub(super) sidebar_open: bool,
+    pub(super) sidebar_tab: usize,
     pub(super) markup_open: bool,
+    pub(super) full_screen: bool,
     pub(super) crop: bool,
     pub(super) tool: Option<Command>,
     pub(super) zoom: super::view::Zoom,
     pub(super) view: super::view::ViewMode,
     pub(super) zoom_select: bool,
     pub(super) quick: bool,
-    pub(super) full_screen: bool,
+    /// The open file has edits in its recipe.
+    pub(super) can_undo: bool,
 }
+
+/// Sidebar modes in sidebar tab order.
+pub(super) const SIDEBAR_MODES: [Command; 4] = [SidebarThumbnails, SidebarContents, SidebarNotes, SidebarSheet];
 
 /// Whether `command` can run in the state `x`.
 pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
     let ready = x.has_frame && !x.pending && !x.failed;
     match command {
-        Open | NewFromClipboard | Exit | ToggleSidebar | ToggleMarkup | AppMenu | MoreTools | NextPane | PreviousPane | BatchSelected
-        | FullScreen => true,
+        Open | NewFromClipboard | Exit | ToggleMarkup | FullScreen | AppMenu | MoreTools | NextPane | PreviousPane | BatchSelected => true,
         OpenInEditor | IndexSheet => x.quick,
+        ToggleSidebar | SidebarHide | SidebarThumbnails | SidebarContents | SidebarNotes | SidebarSheet => x.pdf,
         NextTab | PreviousTab => x.tabs > 1,
         Tab(_) | CloseTab => x.tabs > 0,
-        Undo | Revert => x.has_frame && !x.pending,
+        Undo | Revert => x.has_frame && !x.pending && x.can_undo,
         _ if !ready => false,
         Flip | Resize | RemoveBackground | BatchFolder => !x.pdf,
         ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | InsertImagePage | ViewContinuous | ViewSingle | ViewTwoPages => x.pdf,
@@ -413,8 +469,14 @@ pub(super) fn checked(command: Command, x: &Ctx) -> Option<bool> {
     use super::view::{ViewMode, Zoom};
     match command {
         ToggleSidebar => Some(x.sidebar_open),
-        ToggleMarkup => Some(x.markup_open),
+        SidebarHide => Some(!x.sidebar_open),
+        SidebarThumbnails | SidebarContents | SidebarNotes | SidebarSheet => {
+            Some(x.sidebar_open && SIDEBAR_MODES.get(x.sidebar_tab) == Some(&command))
+        }
         FullScreen => Some(x.full_screen),
+        ToggleMarkup => Some(x.markup_open),
+        SelectText => Some(x.tool.is_none() && !x.crop),
+        ShapesMenu | HighlightMenu | SignMenu => Some(x.tool.is_some_and(|tool| tool_group(command).contains(&tool))),
         Crop => Some(x.crop),
         ZoomToSelection => Some(x.zoom_select),
         Fit => Some(x.zoom == Zoom::Fit),
@@ -513,22 +575,21 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
             x,
         ),
     ));
-    menu.push(MenuItem::submenu(
-        "&View",
-        items(
-            &[
-                Some(Previous), Some(Next), None, Some(ZoomIn), Some(ZoomOut), Some(ActualSize), Some(Fit),
-                Some(FitWidth), Some(ZoomToSelection), None, Some(ViewContinuous), Some(ViewSingle), Some(ViewTwoPages),
-                None, Some(ToggleSidebar), Some(ToggleMarkup), Some(Slideshow), Some(FullScreen), None, Some(NextTab), Some(PreviousTab),
-            ],
-            x,
-        ),
-    ));
+    let mut view = items(
+        &[
+            Some(Previous), Some(Next), None, Some(ZoomIn), Some(ZoomOut), Some(ActualSize), Some(Fit),
+            Some(FitWidth), Some(ZoomToSelection), None, Some(ViewContinuous), Some(ViewSingle), Some(ViewTwoPages), None,
+        ],
+        x,
+    );
+    view.push(MenuItem::submenu("Si&debar", items(&[Some(SidebarHide), None, Some(SidebarThumbnails), Some(SidebarContents), Some(SidebarNotes), Some(SidebarSheet)], x)));
+    view.extend(items(&[Some(ToggleMarkup), Some(FullScreen), Some(Slideshow), None, Some(NextTab), Some(PreviousTab)], x));
+    menu.push(MenuItem::submenu("&View", view));
     menu.push(MenuItem::submenu(
         "Mar&kup",
         items(
             &[
-                Some(Draw), Some(Highlight), Some(Underline), Some(Strikethrough), Some(Note), Some(TextBox),
+                Some(SelectText), None, Some(Draw), Some(Highlight), Some(Underline), Some(Strikethrough), Some(Note), Some(TextBox),
                 Some(Rectangle), Some(Ellipse), Some(Arrow), None, Some(SaveSignature), Some(PlaceSignature),
                 Some(FillForm),
             ],
@@ -563,12 +624,9 @@ pub(super) fn document_menu(x: &Ctx) -> Vec<MenuItem> {
     menu
 }
 
-pub(super) fn zoom_menu(x: &Ctx) -> Vec<MenuItem> {
-    let mut list = vec![Some(ZoomIn), Some(ZoomOut), None, Some(ActualSize), Some(Fit), Some(FitWidth), Some(ZoomToSelection)];
-    if x.pdf {
-        list.extend([None, Some(ViewContinuous), Some(ViewSingle), Some(ViewTwoPages)]);
-    }
-    items(&list, x)
+/// A markup bar menu button's tools.
+pub(super) fn tool_menu(command: Command, x: &Ctx) -> Vec<MenuItem> {
+    items(&tool_group(command).iter().copied().map(Some).collect::<Vec<_>>(), x)
 }
 
 /// Right-click on a page thumbnail.
@@ -587,7 +645,13 @@ pub(super) fn tab_menu(x: &Ctx) -> Vec<MenuItem> {
 }
 
 pub(super) fn markup_overflow_menu(overflow: &[Command], x: &Ctx) -> Vec<MenuItem> {
-    items(&overflow.iter().copied().map(Some).collect::<Vec<_>>(), x)
+    overflow
+        .iter()
+        .map(|c| match tool_group(*c) {
+            [] => MenuItem::for_command(*c, x),
+            _ => MenuItem::submenu(info(*c).menu, tool_menu(*c, x)),
+        })
+        .collect()
 }
 
 /// The access key marked with `&`, upper-cased.
@@ -605,9 +669,10 @@ pub(super) const ALL: &[Command] = &[
     Open, NewFromClipboard, SaveCopy, ExtractPage, Combine, Print, BatchFolder, BatchSelected, FileInfo, Share, CloseTab, Exit, Undo,
     Revert, CopyText, Find, FindNext, FindPrevious, Rotate, Flip, Crop, Resize, RemoveBackground, DeletePage, MovePage, MovePageUp,
     MovePageDown, InsertPage, InsertImagePage, Previous, Next, ZoomIn, ZoomOut, Fit, FitWidth, ActualSize, ZoomToSelection, ViewContinuous, ViewSingle,
-    ViewTwoPages, Slideshow, ToggleSidebar, ToggleMarkup, NextTab, PreviousTab, Tab(0),
-    NextPane, PreviousPane, Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow,
-    SaveSignature, PlaceSignature, FillForm, ZoomMenu, AppMenu, MoreTools, OpenInEditor, IndexSheet, FullScreen,
+    ViewTwoPages, Slideshow, ToggleSidebar, SidebarHide, SidebarThumbnails, SidebarContents, SidebarNotes, SidebarSheet,
+    FullScreen, ToggleMarkup, NextTab, PreviousTab, Tab(0), NextPane, PreviousPane, SelectText, ShapesMenu, HighlightMenu,
+    SignMenu, Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow, SaveSignature,
+    PlaceSignature, FillForm, AppMenu, MoreTools, OpenInEditor, IndexSheet,
 ];
 
 #[cfg(test)]
@@ -641,40 +706,34 @@ mod tests {
         assert_eq!(lookup(ctrl(0x09)), Some(NextTab));
         assert_eq!(lookup(ctrl(0x31)), Some(Tab(0)));
         assert_eq!(lookup(ctrl(0x38)), Some(Tab(7)));
-        assert_eq!(lookup(ctrl(0x39)), Some(Tab(8)));
+        assert_eq!(lookup(ctrl(0x39)), Some(Fit));
+        assert_eq!(lookup(ctrl(0x30)), Some(ActualSize));
         assert_eq!(lookup(ctrl_shift(0x42)), Some(ToggleSidebar));
+        assert_eq!(lookup(ctrl_shift(0x31)), Some(SidebarHide));
+        assert_eq!(lookup(ctrl_shift(0x35)), Some(SidebarSheet));
+        assert_eq!(lookup(alt(0x28)), Some(Next));
         assert_eq!(lookup(plain(0x25)), Some(Previous));
         assert_eq!(lookup(ctrl(0x41)), None);
+        assert_eq!(lookup(plain(0x4E)), None, "typing a letter never picks a tool");
         assert_eq!(shortcut_text(SaveCopy).as_deref(), Some("Ctrl+Shift+S"));
         assert_eq!(shortcut_text(ZoomIn).as_deref(), Some("Ctrl+="));
         assert_eq!(shortcut_text(Slideshow).as_deref(), Some("F5"));
-        assert_eq!(shortcut_text(FileInfo).as_deref(), Some("Alt+Enter"));
+        assert_eq!(shortcut_text(FullScreen).as_deref(), Some("F11"));
+        assert_eq!(shortcut_text(FileInfo).as_deref(), Some("Ctrl+I"));
         assert_eq!(lookup(ctrl(0xDC)), Some(FitWidth));
         assert_eq!(shortcut_text(FitWidth).as_deref(), Some("Ctrl+\\"));
     }
 
     #[test]
-    fn zoom_menu_marks_the_current_zoom_and_view() {
-        use super::super::view::{ViewMode, Zoom};
-        let pdf = Ctx { has_frame: true, pdf: true, tabs: 1, zoom: Zoom::FitWidth, view: ViewMode::TwoPages, ..Default::default() };
-        let menu = zoom_menu(&pdf);
-        let checked: Vec<Command> = menu
-            .iter()
-            .filter(|m| m.checked == Some(true))
-            .filter_map(|m| match m.pick {
-                Some(Pick::Command(c)) => Some(c),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(checked, vec![FitWidth, ViewTwoPages]);
-        let image = Ctx { pdf: false, zoom: Zoom::Ratio(1.0), ..pdf };
-        let menu = zoom_menu(&image);
-        assert!(!flatten(&menu).contains(&ViewSingle), "view modes are for PDFs");
-        assert!(menu.iter().any(|m| m.pick == Some(Pick::Command(ActualSize)) && m.checked == Some(true)));
-        let keys: Vec<char> = zoom_menu(&pdf).iter().filter_map(|m| access_key(&m.label)).collect();
-        for (n, key) in keys.iter().enumerate() {
-            assert!(!keys[n + 1..].contains(key), "zoom menu reuses {key}");
-        }
+    fn tool_menus_mark_the_active_tool_and_its_button() {
+        let pdf = Ctx { has_frame: true, pdf: true, tabs: 1, tool: Some(Ellipse), ..Default::default() };
+        assert_eq!(flatten(&tool_menu(ShapesMenu, &pdf)), vec![Rectangle, Ellipse, Arrow]);
+        assert!(tool_menu(ShapesMenu, &pdf).iter().any(|m| m.pick == Some(Pick::Command(Ellipse)) && m.checked == Some(true)));
+        assert_eq!(checked(ShapesMenu, &pdf), Some(true));
+        assert_eq!(checked(HighlightMenu, &pdf), Some(false));
+        assert_eq!(checked(SelectText, &pdf), Some(false));
+        let overflow = markup_overflow_menu(&[ShapesMenu, Crop], &pdf);
+        assert_eq!(overflow[0].children.len(), 3, "a hidden menu button becomes a submenu");
     }
 
     #[test]
@@ -682,7 +741,8 @@ mod tests {
         let everything = Ctx { has_frame: true, tabs: 2, ..Default::default() };
         let listed = flatten(&app_menu(&everything, &[]));
         // Chrome commands open menus or move focus; tab numbers are keyboard-only.
-        let not_listed = [ZoomMenu, AppMenu, MoreTools, NextPane, PreviousPane, Tab(0), OpenInEditor, IndexSheet];
+        let not_listed =
+            [AppMenu, MoreTools, ShapesMenu, HighlightMenu, SignMenu, ToggleSidebar, NextPane, PreviousPane, Tab(0), OpenInEditor, IndexSheet];
         for command in ALL {
             assert!(listed.contains(command) || not_listed.contains(command), "{command:?} missing");
         }
@@ -701,7 +761,9 @@ mod tests {
     #[test]
     fn access_keys_are_unique_within_each_submenu() {
         let x = Ctx::default();
-        for menu in app_menu(&x, &[]) {
+        let menus = app_menu(&x, &[]);
+        let nested = menus.iter().flat_map(|m| m.children.iter().filter(|c| !c.children.is_empty()));
+        for menu in menus.iter().chain(nested) {
             let keys: Vec<_> = menu.children.iter().filter_map(|m| access_key(&m.label)).collect();
             for (n, key) in keys.iter().enumerate() {
                 assert!(!keys[n + 1..].contains(key), "{} reuses {key}", menu.label);
@@ -730,8 +792,9 @@ mod tests {
         assert!(!enabled(DeletePage, &image) && enabled(Resize, &image));
         let busy = Ctx { pending: true, ..pdf };
         assert!(!enabled(Rotate, &busy) && !enabled(Undo, &busy) && enabled(Open, &busy));
-        let failed = Ctx { failed: true, ..pdf };
+        let failed = Ctx { failed: true, can_undo: true, ..pdf };
         assert!(!enabled(Rotate, &failed) && enabled(Undo, &failed));
+        assert!(!enabled(Undo, &pdf) && !enabled(Revert, &pdf), "nothing to undo without edits");
         assert!(!enabled(NextTab, &pdf) && enabled(CloseTab, &pdf));
         let empty = Ctx::default();
         assert!(enabled(Open, &empty) && !enabled(SaveCopy, &empty) && !enabled(CloseTab, &empty));
