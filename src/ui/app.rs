@@ -416,9 +416,10 @@ pub(super) unsafe fn schedule(hwnd: HWND, state: &mut State, delta: i32) {
 
 pub(super) unsafe fn open(hwnd: HWND, path: PathBuf) {
     with_state(|state| {
-        if let Some((path, page)) = &state.displayed {
+        if let Some((path, _)) = &state.displayed {
             if !state.pending && !state.render_failed {
-                state.views.insert(path.clone(), (*page, state.zoom, state.pan));
+                // The page now in view; a PDF has scrolled since it opened.
+                state.views.insert(path.clone(), (state.page, state.zoom, state.pan));
             }
         }
         let path = std::fs::canonicalize(&path).unwrap_or(path);

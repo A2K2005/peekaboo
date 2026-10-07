@@ -396,6 +396,9 @@ pub(super) unsafe fn paint(hwnd: HWND) {
             state.cache.new_frame();
             let renderer = state.renderer.take().unwrap();
             let uploaded = document::upload(state, &renderer.painter);
+            // Ask for missing tiles before drawing: EndDraw waits for the
+            // display, and the worker can render meanwhile.
+            document::request(state, &layout);
             if uploaded.is_ok() {
                 renderer.begin();
             }
@@ -425,7 +428,6 @@ pub(super) unsafe fn paint(hwnd: HWND) {
             }
         }
         let more = super::bench::after_present(hwnd, state, layout.document, drew);
-        document::request(state, &layout);
         if gliding || more {
             invalidate(hwnd);
         }
