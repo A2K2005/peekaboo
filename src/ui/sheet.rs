@@ -162,7 +162,7 @@ pub(super) unsafe fn color_edit(hdc: HDC, text: COLORREF, field: COLORREF) -> LR
 /// Names the EDIT for UI Automation, because its visible label is drawn by
 /// Direct2D rather than a STATIC control. Dynamic annotation:
 /// https://learn.microsoft.com/windows/win32/winauto/dynamic-annotation-api
-unsafe fn name_field(edit: HWND, name: &str) {
+pub(super) unsafe fn name_field(edit: HWND, name: &str) {
     if let Ok(services) = CoCreateInstance::<_, IAccPropServices>(&CAccPropServices, None, CLSCTX_INPROC_SERVER) {
         let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         let _ = services.SetHwndPropStr(edit, OBJID_CLIENT.0 as u32, CHILDID_SELF, PROPID_ACC_NAME, PCWSTR(name.as_ptr()));

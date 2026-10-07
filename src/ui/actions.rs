@@ -81,6 +81,10 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
             }
             return;
         }
+        NewFromClipboard => {
+            super::empty::new_from_clipboard(hwnd);
+            return;
+        }
         Exit => {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             return;
@@ -136,6 +140,7 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
                 s.focus = widgets::next_region(&layout.widgets, s.focus, command == PreviousPane).or(s.focus);
                 s.focus_visible = true;
             });
+            super::findbar::follow_focus();
             invalidate(hwnd);
             return;
         }
@@ -279,19 +284,11 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             });
             invalidate(hwnd);
         }
-        CopyText | Find | FillForm => {
+        Find => super::findbar::open(hwnd),
+        CopyText | FillForm => {
             let job = match command {
                 FillForm => Job::Fields(request),
-                CopyText => Job::Text(request, text_selection.filter(|selection| !selection.is_empty())),
-                _ => {
-                    let Some(values) = sheet::input(hwnd, "Find", &[("Text to find", String::new())]) else {
-                        return;
-                    };
-                    let Some(query) = values.into_iter().next().filter(|v| !v.trim().is_empty()) else {
-                        return;
-                    };
-                    Job::Find(request, query)
-                }
+                _ => Job::Text(request, text_selection.filter(|selection| !selection.is_empty())),
             };
             with_state(|s| {
                 if !s.send(job) {

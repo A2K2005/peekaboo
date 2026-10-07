@@ -933,13 +933,14 @@ pub(super) unsafe fn on_pointer(hwnd: HWND, state: &mut State, e: &PointerEvent)
         }
         return false;
     }
-    let selecting = state.crop || state.markup.is_some() || state.zoom_select;
+    let panning = super::pan::gesture(e.phase);
+    let selecting = !panning && (state.crop || state.markup.is_some() || state.zoom_select);
     match e.phase {
         Phase::Down => {
             if state.pending || state.render_failed || (state.frame.is_none() && state.pdf.is_none()) {
                 return false;
             }
-            if !selecting && e.kind == PointerKind::Mouse {
+            if !selecting && !panning && e.kind == PointerKind::Mouse {
                 if let Some((page, point, size)) = text_point(state, e.x, e.y) {
                     state.request_text_layer(page);
                     if let Some(layer) = state.text_layers.get(&page) {
@@ -973,7 +974,7 @@ pub(super) unsafe fn on_pointer(hwnd: HWND, state: &mut State, e: &PointerEvent)
                 }
                 state.text_selection = None;
             }
-            if (state.crop || state.markup.is_some()) && state.pdf.is_some() {
+            if selecting && (state.crop || state.markup.is_some()) && state.pdf.is_some() {
                 // Markup and crop go to the page under the pointer.
                 let Some((page, rect)) = geometry(state).and_then(|g| page_at(&g, e.x, e.y)) else {
                     return false;

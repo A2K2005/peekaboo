@@ -63,10 +63,16 @@ pub(super) fn node_id(id: WidgetId) -> NodeId {
         WidgetId::SheetControl(i) => 62_000 + i as u64,
         WidgetId::Document => 70_000,
         WidgetId::SidebarItem(i) => 2_000_000 + i as u64,
+        WidgetId::FindField => 80_000,
+        WidgetId::FindCase => 80_001,
+        WidgetId::FindClose => 80_002,
+        WidgetId::InfoClose => 80_003,
+        WidgetId::InfoButton(i) => 81_000 + i as u64,
+        WidgetId::Recent(i) => 82_000 + i as u64,
     })
 }
 
-fn bounds(r: super::widgets::Rect) -> Rect {
+pub(super) fn bounds(r: super::widgets::Rect) -> Rect {
     Rect { x0: r.x0 as f64, y0: r.y0 as f64, x1: r.x1 as f64, y1: r.y1 as f64 }
 }
 
@@ -168,9 +174,11 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
     }
     if let Some(empty) = &layout.empty {
         nodes.push((EMPTY_HEADING, text(Role::Heading, "Open a PDF or image", empty.heading)));
-        nodes.push((RECENT, text(Role::Label, "Recent files. Files you open will show here.", empty.recent)));
+        let rows = ids(&|w| w.role == WidgetRole::ListItem && w.region == Region::Document);
+        let label = if rows.is_empty() { "Recent files. Files you open will show here." } else { "Recent files" };
+        nodes.push((RECENT, group(Role::List, label, empty.recent, rows)));
         let mut children = vec![EMPTY_HEADING];
-        children.extend(ids(&|w| w.region == Region::Document));
+        children.extend(ids(&|w| w.region == Region::Document && w.role == WidgetRole::Button));
         children.push(RECENT);
         nodes.push((EMPTY, group(Role::Group, "Start", layout.document, children)));
         root_children.push(EMPTY);
@@ -222,6 +230,8 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
             }
         }
     }
+    super::findbar::a11y(s, &layout, &mut nodes, &mut root_children);
+    super::infobar::a11y(s, &layout, &mut nodes, &mut root_children);
     let mut status = text(Role::Status, &s.visible_status(), layout.status);
     status.set_live(Live::Polite);
     nodes.push((STATUS, status));
@@ -253,7 +263,7 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
     nodes.push((ROOT, group(Role::Window, &title, super::widgets::Rect::new(0.0, 0.0, s.size.0, s.size.1), root_children)));
     let focus = s
         .focus
-        .filter(|f| !matches!(f, WidgetId::SheetField(_)))
+        .filter(|f| !matches!(f, WidgetId::SheetField(_) | WidgetId::FindField))
         .filter(|f| layout.widgets.iter().any(|w| w.id == *f))
         .map_or(ROOT, node_id);
     TreeUpdate { nodes, tree: Some(TreeInfo::new(ROOT)), tree_id: TreeId::ROOT, focus }

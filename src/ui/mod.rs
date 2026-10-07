@@ -25,6 +25,10 @@
 //! | files | File dialogs, clipboard, saved signature |
 //! | imagetools | Image crop handles, resize, export, batch, and background removal results |
 //! | text | Text selection, copy, and image search over text layers |
+//! | findbar | Find bar with live search |
+//! | infobar | Info bar and toasts, the live regions for messages |
+//! | empty | Empty window: New from clipboard and recent files |
+//! | pan | Space+drag panning |
 mod a11y;
 mod actions;
 mod app;
@@ -34,11 +38,15 @@ mod commands;
 mod disk;
 mod document;
 mod drop;
+mod empty;
 mod files;
+mod findbar;
 mod imagetools;
+mod infobar;
 mod menu;
 mod organize;
 mod paint;
+mod pan;
 mod render;
 mod sheet;
 mod sidebar;

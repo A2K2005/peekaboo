@@ -49,6 +49,13 @@ pub(super) enum WidgetId {
     /// A row of the open sidebar list: a page thumbnail, an outline entry,
     /// or a note.
     SidebarItem(usize),
+    FindField,
+    FindCase,
+    FindClose,
+    InfoButton(usize),
+    InfoClose,
+    /// A row of the recent files list on the empty window.
+    Recent(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +78,8 @@ pub(super) enum Region {
     MarkupBar,
     Sidebar,
     Document,
+    FindBar,
+    InfoBar,
     Sheet,
 }
 
@@ -336,7 +345,7 @@ fn command_widget(command: Command, region: Region, rect: Rect, ctx: &Ctx) -> Wi
     }
 }
 
-fn plain_widget(id: WidgetId, role: Role, region: Region, rect: Rect, label: String) -> Widget {
+pub(super) fn plain_widget(id: WidgetId, role: Role, region: Region, rect: Rect, label: String) -> Widget {
     Widget {
         id,
         role,

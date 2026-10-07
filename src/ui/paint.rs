@@ -21,11 +21,11 @@ use windows::{
     core::Result,
 };
 
-struct Look<'a> {
-    p: &'a Painter,
-    t: Theme,
-    f: &'a Fonts,
-    s: f32,
+pub(super) struct Look<'a> {
+    pub(super) p: &'a Painter,
+    pub(super) t: Theme,
+    pub(super) f: &'a Fonts,
+    pub(super) s: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -48,7 +48,7 @@ fn background(state: &State, w: &Widget) -> Option<Fill> {
     }
 }
 
-fn icon_button(l: &Look, state: &State, w: &Widget) {
+pub(super) fn icon_button(l: &Look, state: &State, w: &Widget) {
     let fill = background(state, w);
     let checked = w.checked == Some(true);
     let mut color = if w.enabled { l.t.text } else { l.t.text_disabled };
@@ -72,7 +72,7 @@ fn icon_button(l: &Look, state: &State, w: &Widget) {
     }
 }
 
-fn text_button(l: &Look, state: &State, w: &Widget) {
+pub(super) fn text_button(l: &Look, state: &State, w: &Widget) {
     let r = w.rect;
     let fill = background(state, w);
     let (mut back, mut color) = if w.primary { (l.t.accent, l.t.on_accent) } else { (l.t.field, l.t.text) };
@@ -262,12 +262,12 @@ fn empty_state(l: &Look, state: &State, layout: &Layout) {
         return;
     };
     l.p.text("Open a PDF or image", empty.heading, &l.f.title, l.t.text, Align::Center);
-    for w in layout.widgets.iter().filter(|w| w.region == Region::Document) {
+    for w in layout.widgets.iter().filter(|w| w.region == Region::Document && w.role == Role::Button) {
         text_button(l, state, w);
     }
     l.p.text("Or drop a PDF or image here", empty.drop_hint, &l.f.body, l.t.text_secondary, Align::Center);
     l.p.text("Recent files", empty.recent_heading, &l.f.strong, l.t.text, Align::Center);
-    l.p.text("Files you open will show here.", empty.recent, &l.f.body, l.t.text_secondary, Align::Center);
+    super::empty::paint_recent(l, state, layout, empty.recent);
 }
 
 fn sheet(l: &Look, state: &State, layout: &Layout) {
@@ -423,6 +423,8 @@ pub(super) fn draw(p: &Painter, bitmap: Option<&ID2D1Bitmap>, fonts: &Fonts, sta
     } else {
         document::paint(p, bitmap, state, layout.document)
     };
+    super::infobar::paint(&look, state, layout);
+    super::findbar::paint(&look, state, layout);
     sheet(&look, state, layout);
     focus_ring(&look, state, layout);
     keytips(&look, state, layout);
