@@ -186,7 +186,8 @@ pub(super) struct Geometry {
 }
 
 pub(super) fn gap(state: &State) -> f32 {
-    (GAP * state.scale).round()
+    let gap = if state.quick.is_some() { super::quickview::INSET } else { GAP };
+    (gap * state.scale).round()
 }
 
 pub(super) fn geometry_in(state: &State, doc: Rect) -> Option<Geometry> {

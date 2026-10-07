@@ -26,7 +26,7 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{
-    AssocQueryStringW, ASSOCF_NONE, ASSOCSTR, ASSOCSTR_EXECUTABLE, ASSOCSTR_PROGID,
+    AssocQueryStringW, ASSOCF_NONE, ASSOCSTR, ASSOCSTR_EXECUTABLE, ASSOCSTR_FRIENDLYAPPNAME, ASSOCSTR_PROGID,
     BHID_DataObject, IDataTransferManagerInterop, ILCreateFromPathW, ILFree, SHAddToRecentDocs,
     SHChangeNotify, SHCreateShellItemArrayFromIDLists, SHDoDragDrop, ShellExecuteW, SHARD_PATHW,
     SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
@@ -654,25 +654,7 @@ pub fn open_default_apps() -> Result<(), String> {
 /// or by this program's path ("Open with" choices use the path).
 pub fn is_default_for(extension: &str) -> bool {
     let extension = HSTRING::from(extension);
-    let query = |what: ASSOCSTR| -> Option<String> {
-        let mut buffer = [0u16; 1024];
-        let mut length = buffer.len() as u32;
-        unsafe {
-            AssocQueryStringW(
-                ASSOCF_NONE,
-                what,
-                &extension,
-                PCWSTR::null(),
-                Some(PWSTR(buffer.as_mut_ptr())),
-                &mut length,
-            )
-        }
-        .ok()
-        .ok()?;
-        Some(String::from_utf16_lossy(
-            &buffer[..(length as usize).saturating_sub(1).min(buffer.len())],
-        ))
-    };
+    let query = |what: ASSOCSTR| association(&extension, what);
     if query(ASSOCSTR_PROGID).is_some_and(|progid| progid.starts_with("PreviewForWindows.")) {
         return true;
     }
@@ -681,6 +663,45 @@ pub fn is_default_for(extension: &str) -> bool {
         (Some(found), Some(exe)) => found.eq_ignore_ascii_case(exe),
         _ => false,
     }
+}
+
+fn association(extension: &HSTRING, what: ASSOCSTR) -> Option<String> {
+    let mut buffer = [0u16; 1024];
+    let mut length = buffer.len() as u32;
+    unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            what,
+            extension,
+            PCWSTR::null(),
+            Some(PWSTR(buffer.as_mut_ptr())),
+            &mut length,
+        )
+    }
+    .ok()
+    .ok()?;
+    Some(String::from_utf16_lossy(
+        &buffer[..(length as usize).saturating_sub(1).min(buffer.len())],
+    ))
+}
+
+/// The name Windows shows for the app that opens `extension` (".pdf"), or
+/// None when that app is this one or no app is set.
+pub fn default_app_name(extension: &str) -> Option<String> {
+    if is_default_for(extension) {
+        return None;
+    }
+    association(&HSTRING::from(extension), ASSOCSTR_FRIENDLYAPPNAME).filter(|name| !name.is_empty())
+}
+
+/// Opens `path` with the default verb of its type.
+pub fn open_with_default(path: &Path) -> Result<(), String> {
+    let file = HSTRING::from(path);
+    let result = unsafe { ShellExecuteW(None, PCWSTR::null(), &file, None, None, SW_SHOWNORMAL) };
+    if result.0 as isize <= 32 {
+        return Err(format!("Windows could not open {}.", path.display()));
+    }
+    Ok(())
 }
 
 /// True when this user's Default apps list has the app.

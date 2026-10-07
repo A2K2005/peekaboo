@@ -910,6 +910,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_GETOBJECT => a11y::get_object(wparam, lparam).unwrap_or_else(|| DefWindowProcW(hwnd, message, wparam, lparam)),
+        // Quick view's open and close motion keep the layout and render
+        // target at the final size; the window shows them scaled.
+        WM_SIZE if super::quickview::moving() => LRESULT(0),
         WM_SIZE => {
             let (width, height) = ((lparam.0 & 0xffff) as f32, ((lparam.0 >> 16) & 0xffff) as f32);
             with_state(|s| {
@@ -931,7 +934,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             let info = &mut *(lparam.0 as *mut MINMAXINFO);
             let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
             let height = if with_state(|s| s.quick.is_some()).unwrap_or(false) { 240.0 } else { 320.0 };
-            info.ptMinTrackSize = POINT { x: (360.0 * scale) as i32, y: (height * scale) as i32 };
+            // The motion starts and ends at the item's size in Explorer.
+            let min = if super::quickview::moving() { (1.0, 1.0) } else { (360.0 * scale, height * scale) };
+            info.ptMinTrackSize = POINT { x: min.0 as i32, y: min.1 as i32 };
             LRESULT(0)
         }
         WM_DPICHANGED => {

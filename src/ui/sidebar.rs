@@ -91,7 +91,9 @@ pub(super) fn wheel(state: &mut State, delta: f32, layout: &widgets::Layout) {
 
 /// Keeps the current page's thumbnail in view while the document scrolls.
 pub(super) fn follow_page(state: &mut State) {
-    if state.sidebar_open && matches!(state.sidebar_tab, 0 | SHEET_TAB) && state.pdf.is_some() {
+    if state.quick.is_some() {
+        super::quickview::follow_rail(state);
+    } else if state.sidebar_open && matches!(state.sidebar_tab, 0 | SHEET_TAB) && state.pdf.is_some() {
         reveal(state, state.page as usize);
     }
 }

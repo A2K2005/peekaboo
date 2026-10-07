@@ -525,7 +525,7 @@ impl MenuItem {
             children: Vec::new(),
         }
     }
-    fn for_command(command: Command, x: &Ctx) -> Self {
+    pub(super) fn for_command(command: Command, x: &Ctx) -> Self {
         Self {
             label: info(command).menu.into(),
             shortcut: shortcut_text(command).unwrap_or_default(),

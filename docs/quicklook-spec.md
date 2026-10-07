@@ -17,7 +17,9 @@ Speed: first frame under 100 ms from the key press ([NN/g 0.1 s limit](https://w
 | Space in an Explorer file list or on the desktop, with a file selected | Open Quick view for the selection |
 | Space or Esc in Quick view | Close. Focus returns to Explorer with the same selection. |
 | Left, Right, Up, Down | Next or previous file. With 2 or more files selected, move through the selection only. With 1 file selected, move through supported siblings in Explorer view order, and move Explorer's selection to match. |
-| Enter, or the **Open** button | Turn Quick view into the full editor, on the same page and zoom |
+| Enter | Turn Quick view into the full editor, on the same page and zoom |
+| The **Open** button | Open the file in its default app, named on the button ("Open in Microsoft Edge"). When this app is the default, the button says **Open** and acts like Enter. |
+| Right-click | Copy and Open |
 | Ctrl+Enter | Index sheet: a grid of the selected files. Click or Enter opens one. |
 | Ctrl+wheel, Ctrl+= and Ctrl+-, pinch | Zoom. Ctrl+0 is actual size. |
 | Wheel, Page Up, Page Down, Home, End | Scroll a multi-page PDF continuously |
@@ -28,9 +30,11 @@ Also: an Explorer verb "Quick view" and `preview.exe --peek <path>`. Like PowerT
 
 ### Quick view window
 
-- Near-borderless: rounded corners, 1 px border, system shadow. No tabs, sidebar, status bar, or markup bar.
-- Sized to content, centered on Explorer's monitor. Images show at 100% when they fit, else fit 80% of the work area. PDFs fit the page width, at most 85% of the work-area height.
-- A 40 px hover strip shows the file name (centered) and, on the right: **Open**, Markup, Rotate (images), Share, Close. It fades out 1.5 s after the pointer stops.
+- Near-borderless: rounded corners on Windows 11, system shadow, Mica on Windows 11 and a solid tint elsewhere. No tabs, status bar, or markup bar.
+- A header above the content, never over it: Close and Full screen at the left, then the file name, left-aligned. At the right: More (Markup, Rotate for images, Index sheet, Open in editor), Share, and **Open**. The header hides only in full screen, where it shows when the pointer moves and fades 1.5 s after it stops.
+- PDFs of 2 or more pages get a 90 px rail of page thumbnails at the left; a click goes to the page.
+- Sized to the content plus the header, centered on Explorer's monitor. Images show at 100% when they fit, else fit 80% of the work area. PDFs fit the page width, at most 85% of the work-area height.
+- The window grows from the file's item in Explorer and shrinks back to it on close. UI Automation gives the item's rectangle (the focused list item); without it, the window fades in from 96% of its size.
 - Markup turns the window into the editor with the markup bar open. Quick view stays read-only.
 
 ## 2. Architecture on Win32
@@ -88,11 +92,11 @@ Mac behavior marked "observed" is from use, not from Apple docs, so it is unveri
 | [ ] | Peek close | Space or close button | Space, Esc, Close | Esc added: Windows convention |
 | [ ] | Next or previous | Arrow keys ([Apple](https://support.apple.com/guide/mac-help/mh14119/mac)) | Arrow keys; Explorer selection follows | None |
 | [ ] | Index sheet | Cmd-Return | Ctrl+Enter | Cmd maps to Ctrl |
-| [ ] | Open in app | "Open with" button | **Open** button, Enter | Enter: Explorer and Peek convention |
+| [ ] | Open in app | "Open with" button | "Open in *app*" button; Enter opens the editor | Enter: Explorer and Peek convention |
 | [ ] | Peek zoom | Cmd-Plus, Cmd-Minus | Ctrl+=, Ctrl+-, Ctrl+wheel | None |
 | [ ] | Peek actions | Markup, rotate, share, full screen | Same | None |
-| [ ] | Peek opening motion | Zoom from the file icon (observed) | 120 ms fade and 0.97 to 1 scale, centered | Icon rectangles in Details view are not exposed reliably (unverified) |
-| [ ] | Peek window controls | Close and full screen at top left (observed) | Close at top right | Windows convention |
+| [ ] | Peek opening motion | Zoom from the file icon (observed) | Zoom from the item's UI Automation rectangle; else fade and 0.96 to 1 scale | Details view gives a row; the motion uses its left square, where the icon is |
+| [ ] | Peek window controls | Close and full screen at top left (observed) | Same, then More, Share, and Open at top right | None |
 | [ ] | Editor toolbar order | Sidebar, title, Info, Zoom out, Zoom in, Share, Highlight, Rotate, Markup, Search (observed) | Same order, own icons | Current "⋯" menu stays last for the rest |
 | [ ] | Markup tools order | Text select, Rect select, Redact, Sketch, Draw, Shapes, Text, Highlight, Sign, Note, Shape style, Border color, Fill color, Text style, Rotate, Crop, Form fill ([Apple](https://support.apple.com/en-in/guide/preview/prvw11580/mac)) | Same order. Underline and strikethrough move into the Highlight menu. Shapes is one menu. | Redact is v2 (PRD). Remove the eraser: Delete removes the selected mark. |
 | [ ] | Markup toggle | Cmd-Shift-A | Ctrl+Shift+A | None |
@@ -123,7 +127,9 @@ Mica on Windows 11 22H2 and later, solid elsewhere (D10). High contrast keeps sy
 
 | Element | Size |
 | --- | --- |
-| Quick view hover strip | 40 px tall, 12 px side padding, 32 px buttons, 4 px gaps |
+| Quick view header | 36 px tall (grows with text size), 8 px side padding, 28 px buttons, 4 px gaps |
+| Quick view content | 6 px from the window edges and between pages, on the window tint |
+| Quick view page rail | 90 px |
 | Quick view minimum | 360 by 240 px |
 | Editor bar | 48 px, 12 px side padding, 36 px buttons, 4 px gaps, 12 px between groups |
 | Markup bar | 40 px, under the editor bar |
@@ -134,11 +140,11 @@ Type: Segoe UI Variable, 14 px title, 12 px secondary.
 
 | Motion | Duration and easing |
 | --- | --- |
-| Quick view open | 120 ms opacity 0 to 1 and scale 0.97 to 1, `cubic-bezier(0,0,0,1)` |
-| Quick view close | 83 ms opacity 1 to 0, `cubic-bezier(1,0,1,1)` |
+| Quick view open | 150 ms from the item's rectangle (or 0.96 scale) to full size, cubic ease out; opacity 0.3 to 1 in the first 40% |
+| Quick view close | 120 ms back to the item's rectangle (or 0.96 scale), cubic ease in; opacity to 0 in the last 40% |
 | Next or previous file | 83 ms crossfade, no slide |
 | Quick view to editor | 167 ms window resize; the chrome fades in |
-| Hover strip | 120 ms in, 167 ms out after 1.5 s idle |
+| Full-screen header | 120 ms in, 167 ms out after 1.5 s idle |
 | Markup bar | 167 ms slide (exists) |
 
 Durations follow Fluent's 83, 167, and 250 ms set and its enter and exit curves ([Microsoft](https://learn.microsoft.com/en-us/windows/apps/design/motion/timing-and-easing)). When Windows animations are off, every change is instant.
@@ -190,6 +196,8 @@ Source: owner's screen recordings, read as frames on Oct 8, 2026. Sizes are at t
 Markup bar order: selection, wand, sketch, draw, shapes, text, sign, adjust color, adjust size, then shape style, border color, fill color, text style, note.
 
 ### 7.3 Gaps, ranked by impact on "instant, no barrier"
+
+Gaps 1 to 6 are built (`src/ui/quickview.rs`). Not yet checked on screen (unverified): the motion relies on the Direct2D window target stretching its last frame while the window moves.
 
 | # | Mac | Ours today | Change | Files in `src/ui` |
 | --- | --- | --- | --- | --- |
