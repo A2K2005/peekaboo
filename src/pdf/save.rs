@@ -9,9 +9,13 @@ impl PdfEngine {
     /// Writes `output` as the original file's bytes, unchanged, plus an
     /// incremental update with `edits`. The edits replay on a fresh document,
     /// because PDFium appends every object a document has loaded, not only
-    /// changed ones (docs/research/pdf-engine.md, section 2). If the result
-    /// does not reopen with the same pages, this writes a full copy instead
-    /// and returns `SaveMode::Full`.
+    /// changed ones (docs/research/pdf-engine.md, section 2).
+    ///
+    /// The update must keep the original bytes, end in a classic xref table,
+    /// and reopen with the same pages. Otherwise this writes a full copy and
+    /// returns `SaveMode::Full`. PDFium's update for sources with a
+    /// cross-reference stream fails qpdf --check (its XRef stream has no
+    /// /Type and no endobj), so those sources always get a full copy.
     pub fn save_incremental(
         &mut self,
         path: &Path,
@@ -27,15 +31,11 @@ impl PdfEngine {
         let parent = output.parent().ok_or("Choose a valid output folder.")?;
         let (temporary, file) = temporary_in(parent)?;
         self.write_file(document.native.handle, file, INCREMENTAL_SAVE)?;
-        if self.same_pages(document.native.handle, &temporary.0) {
-            let appended = starts_with_file(&temporary.0, path)
-                .map_err(|e| format!("Cannot check the saved PDF: {e}"))?;
+        let checked = appended_update(&temporary.0, path)
+            .map_err(|e| format!("Cannot check the saved PDF: {e}"))?;
+        if checked && self.same_pages(document.native.handle, &temporary.0) {
             commit(&temporary, &output)?;
-            return Ok(if appended {
-                SaveMode::Incremental
-            } else {
-                SaveMode::Full
-            });
+            return Ok(SaveMode::Incremental);
         }
         drop(temporary);
         self.write_new(document.native.handle, &output, FULL_SAVE)?;
@@ -132,6 +132,42 @@ impl PdfEngine {
         let expected = sizes(document);
         expected.is_some() && expected == sizes(reopened.native.handle)
     }
+}
+
+/// True when `saved` is `original` plus an update whose last `startxref`
+/// points past the original bytes at a classic `xref` table.
+fn appended_update(saved: &Path, original: &Path) -> std::io::Result<bool> {
+    let length = std::fs::metadata(original)?.len();
+    if !starts_with_file(saved, original)? {
+        return Ok(false);
+    }
+    let mut file = File::open(saved)?;
+    let size = file.metadata()?.len();
+    let mut tail = vec![0; size.min(1024) as usize];
+    file.seek(SeekFrom::Start(size - tail.len() as u64))?;
+    file.read_exact(&mut tail)?;
+    let Some(offset) = last_startxref(&tail) else {
+        return Ok(false);
+    };
+    if offset < length || offset >= size {
+        return Ok(false);
+    }
+    let mut keyword = [0; 4];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut keyword)?;
+    Ok(&keyword == b"xref")
+}
+
+/// The number after the last `startxref` keyword.
+fn last_startxref(tail: &[u8]) -> Option<u64> {
+    let at = tail.windows(9).rposition(|w| w == b"startxref")?;
+    let digits: String = tail[at + 9..]
+        .iter()
+        .skip_while(|b| b.is_ascii_whitespace())
+        .take_while(|b| b.is_ascii_digit())
+        .map(|&b| b as char)
+        .collect();
+    digits.parse().ok()
 }
 
 /// True when `file` begins with the bytes of `prefix`.

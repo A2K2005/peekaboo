@@ -244,12 +244,46 @@ impl PdfEngine {
     /// are (DCTDecode), with the EXIF orientation applied by the image
     /// matrix. Other formats decode through WIC, so COM must be initialized
     /// on this thread.
+    ///
+    /// The page is built in a scratch document and imported. Generating page
+    /// content inside `document` makes PDFium append every page's content
+    /// stream to an incremental save (measured: 213 KB against 6 KB on the
+    /// 500-page fixture).
     pub(super) fn insert_image(
         &self,
         document: Handle,
         at: u32,
         path: &Path,
         fit: ImageFit,
+    ) -> Result<(), String> {
+        let count = unsafe { (self.api.count)(document) }.max(0) as u32;
+        let neighbor = match fit {
+            ImageFit::Neighbor if count > 0 => Some(
+                self.api
+                    .page_size(document, at.saturating_sub(1).min(count - 1))?,
+            ),
+            _ => None,
+        };
+        let scratch = self.new_document()?;
+        self.image_page(scratch.handle, path, neighbor)?;
+        let first = 0;
+        unsafe {
+            if (self.api.import)(document, scratch.handle, &first, 1, at as i32) == 0
+                || (self.api.count)(document) != count as i32 + 1
+            {
+                return Err("Cannot insert the image page.".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes page 0 of an empty `document` from an image file. `neighbor`
+    /// is the page size to fit into; `None` sizes the page to the image.
+    fn image_page(
+        &self,
+        document: Handle,
+        path: &Path,
+        neighbor: Option<(f32, f32)>,
     ) -> Result<(), String> {
         let unreadable = |e: std::io::Error| format!("Cannot read the image file: {e}");
         let mut file = File::open(path).map_err(unreadable)?;
@@ -270,14 +304,6 @@ impl PdfEngine {
             (height as f64, width as f64)
         } else {
             (width as f64, height as f64)
-        };
-        let count = unsafe { (self.api.count)(document) }.max(0) as u32;
-        let neighbor = match fit {
-            ImageFit::Neighbor if count > 0 => Some(
-                self.api
-                    .page_size(document, at.saturating_sub(1).min(count - 1))?,
-            ),
-            _ => None,
         };
         let (page_width, page_height, box_) = match neighbor {
             Some((w, h)) => {
@@ -302,7 +328,7 @@ impl PdfEngine {
             if (self.api.image_matrix)(image.handle, m[0], m[1], m[2], m[3], m[4], m[5]) == 0 {
                 return Err("Cannot place the image on the page.".into());
             }
-            let page = (self.api.page_new)(document, at as i32, page_width, page_height);
+            let page = (self.api.page_new)(document, 0, page_width, page_height);
             if page.is_null() {
                 return Err("Cannot insert the image page.".into());
             }
@@ -316,9 +342,6 @@ impl PdfEngine {
                 || (self.api.page_generate)(page.handle) == 0
             {
                 return Err("Cannot generate the image page.".into());
-            }
-            if (self.api.count)(document) != count as i32 + 1 {
-                return Err("The image page was not inserted.".into());
             }
         }
         Ok(())

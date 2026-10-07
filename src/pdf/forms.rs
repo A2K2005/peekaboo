@@ -136,12 +136,14 @@ impl PdfEngine {
                         .display(handle)?
                         .user(x as f64, y as f64)
                         .ok_or("Cannot map this point on the page.")?;
-                    let event = match input {
-                        FormInput::PointerDown { .. } => api.form_down,
-                        FormInput::PointerUp { .. } => api.form_up,
-                        _ => api.form_move,
+                    // PDFium hit-tests presses against the widget the pointer
+                    // entered, so a press always moves there first.
+                    (api.form_move)(form, handle, 0, ux, uy);
+                    match input {
+                        FormInput::PointerDown { .. } => (api.form_down)(form, handle, 0, ux, uy),
+                        FormInput::PointerUp { .. } => (api.form_up)(form, handle, 0, ux, uy),
+                        _ => 1,
                     };
-                    event(form, handle, 0, ux, uy);
                 }
                 FormInput::Char(c) => {
                     // Tab moves focus through `Key`; as a character it would be typed.
