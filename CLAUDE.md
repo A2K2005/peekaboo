@@ -10,8 +10,10 @@ Building v1 end to end. Plan and slice status: [docs/plan-v1.md](docs/plan-v1.md
 | --- | --- | --- |
 | 1. Research | Done (some measurements pending) | `docs/research/*.md`, `docs/research/SUMMARY.md` |
 | Codex development build | Merged here (D9) | Rust app: viewing, page edits, markup, images, OCR, background removal |
-| Wave 1: foundations | In progress | UI foundation, PDF engine, imaging and AI, Windows integration, benchmarks |
-| Wave 2: v1 tasks | Not started | 7 slices in PRD order |
+| Wave 1: foundations | Merged into branch `v1`; review fixes in progress | UI foundation, PDF engine, imaging and AI, Windows integration, benchmarks |
+| Wave 2: v1 tasks | In progress (W2-1 viewer) | 7 slices in PRD order |
+
+Branches: `master` holds the research and the Codex merge. All wave work merges into `v1`. Nothing merges into `master` without the owner (D14). Worktrees live in `Desktop/extension/pfw-worktrees/`.
 | Wave 3: release gates | Not started | Accessibility, performance, round trip, packaging, final review |
 
 ## Architecture summary
@@ -20,11 +22,12 @@ Rust 2021 with windows-rs 0.62 on Win32 and Direct2D. One UI thread. One documen
 
 | Module | Role |
 | --- | --- |
-| `src/shell.rs` | Window, input, commands, painting (wave 1 splits it into `src/ui/`) |
-| `src/pdf.rs` | PDFium loading, rendering, text, forms, annotations, page edits, saves |
-| `src/imaging.rs` | WIC decode, edits, export |
-| `src/ocr.rs` | Windows.Media.Ocr |
-| `src/background.rs` | ONNX Runtime background removal, loaded on first use |
+| `src/ui/` | Shell: `window` (message loop, title bar, input, theme and DPI changes), `app` (state, tabs, scheduling), `worker` (document worker and task worker), `commands` (command table, shortcuts, menus), `actions`, `widgets` (layout, hit test, focus, access keys), `paint`, `document` (view, pointer, pinch), `render` (Direct2D HWND target), `theme`, `menu` (custom popup menus), `sheet` (in-window dialogs with EDIT input), `a11y` (AccessKit), `files` |
+| `src/pdf.rs`, `src/pdf/` | PDFium: rendering and tiles, text layer and search, forms session, annotations, page edits, incremental and full saves |
+| `src/imaging.rs` | WIC decode, edits, export with format and quality, size estimate, clipboard, batch |
+| `src/ocr.rs` | Windows.Media.Ocr returning `TextLayer` |
+| `src/background.rs` | ONNX Runtime background removal (Snap model, CPU), loaded on first use |
+| `src/integration.rs` | Single-instance handoff, file associations, Explorer verbs, share, drag out, recent files (wired in wave 2) |
 | `src/printing.rs` | Print dialog, rasterizing, spooling |
 | `src/model.rs` | Shared types |
 
@@ -85,4 +88,6 @@ This PC is not the PRD reference laptop (i5 12th gen, 8 GB, Windows 11) or the l
 | D12 | 2026-10-06 | One verifier agent per slice does both edge-case testing and review. | Keeps "never review your own work" at lower usage cost. |
 | D13 | 2026-10-06 | Fixed `pdfium.dll` lookup for test binaries in `target/<profile>/deps`. | Codex's tests passed only because a stray DLL copy existed in its build folder. |
 | D14 | 2026-10-07 | Git: commit only when the owner asks. Exception: wave agents commit to their own local worktree branches. The orchestrator reports to the owner before any merge or commit on `master`. Nothing is pushed. | Owner objected to unrequested commits, then allowed branch commits for parallel work. |
+| D16 | 2026-10-07 | Background removal ships the Snap model (Apache-2.0 weights, undisclosed training data) on the CPU path: 0.31 s for 12 MP, IoU 0.90 against BiRefNet. BiRefNet, BEN2, and ormbg are rejected: trained on data with no-commercial-use terms. DirectML stays off: the iGPU was slower than the CPU and the NVIDIA path hit GPU timeouts. | Measured in W1-C. Snap's training data needs lawyer review before release. |
+| D17 | 2026-10-07 | Arrows save as Ink annotations. | PDFium cannot create Line annotations. Ink has an appearance stream; pdf.js draws it (W1-B test). Edge and Acrobat display is unverified. |
 | D15 | 2026-10-07 | No GUI launches while the owner uses the PC. Headless tests only. GUI checks (screenshots, UIA dumps, launch timing) run only after the owner says they are away. | Owner revoked an earlier "launch briefly" permission after test windows disrupted their work. |
