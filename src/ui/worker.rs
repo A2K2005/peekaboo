@@ -817,6 +817,57 @@ mod tests {
         std::fs::remove_dir_all(folder).unwrap();
     }
 
+    /// Next image after its neighbors were pre-decoded, through the real
+    /// document worker and WIC. The window adds one upload and one draw.
+    #[test]
+    fn next_image_comes_from_the_predecode_cache_headless() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/image-24mp.jpg");
+        if !source.is_file() {
+            eprintln!("skipped: fixtures are missing; run tools/make-fixtures.ps1");
+            return;
+        }
+        let folder = std::env::temp_dir().join(format!("pfw-next-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = std::fs::canonicalize(folder).unwrap();
+        for n in 1..=3 {
+            std::fs::copy(&source, folder.join(format!("{n:03}.jpg"))).unwrap();
+        }
+        let first = folder.join("001.jpg");
+        let mut workers = Workers::start(HWND::default()).unwrap();
+        let (width, height) = (1100, 700);
+        let request = |delta: i32| Request { generation: 1, path: first.clone(), page: 0, delta, width, height, sessions: HashMap::new() };
+        let timeout = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        assert!(workers.send(Job::Render(request(0))));
+        let Ok(Event::Render(shown)) = workers.receiver.recv_timeout(timeout) else { panic!("no image") };
+        let cold = started.elapsed().as_secs_f64() * 1000.0;
+        let frame = shown.result.unwrap();
+        assert_eq!((frame.source_width, frame.source_height, shown.from_predecode), (6000, 4000, false));
+        let neighbor = |delta: i32| Item {
+            key: Key { doc: doc_id(&first), work: Work::Predecode { delta, width, height } },
+            path: first.clone(),
+            edits: Arc::default(),
+            scale: 0.0,
+            region: [0; 4],
+        };
+        workers.request(vec![neighbor(1), neighbor(-1)]);
+        for _ in 0..2 {
+            let Ok(Event::Done(item, Outcome::Predecoded)) = workers.receiver.recv_timeout(timeout) else { panic!("no pre-decode") };
+            workers.delivered(&item.key);
+        }
+        let started = std::time::Instant::now();
+        assert!(workers.send(Job::Render(request(1))));
+        let Ok(Event::Render(next)) = workers.receiver.recv_timeout(timeout) else { panic!("no next image") };
+        let warm = started.elapsed().as_secs_f64() * 1000.0;
+        assert!(next.from_predecode && next.navigation);
+        assert_eq!(next.path, folder.join("002.jpg"));
+        assert!(next.result.is_ok());
+        println!("24 MP JPEG at 1100 x 700: first decode {cold:.1} ms; next image from pre-decode {warm:.2} ms");
+        assert!(warm < 50.0, "PRD: next image under 50 ms");
+        workers.stop();
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
     /// Opens the 500-page fixture on a real document worker, renders tiles
     /// through the queue, and prints timings. Headless: no window.
     #[test]

@@ -1056,6 +1056,170 @@ unsafe fn finish_crop(hwnd: HWND, state: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{model::Frame, ui::theme, ui::worker::Workers};
+
+    const LETTER: [f32; 2] = [612.0, 792.0];
+
+    /// A window 1100 by 800 pixels showing a 20-page PDF.
+    fn pdf_state(zoom: Zoom) -> State {
+        let workers = Workers::start(HWND::default()).unwrap();
+        let path = PathBuf::from("a.pdf");
+        let mut s = State::new(workers, &[path.clone()], (1100.0, 800.0), 1.0, 1.0, theme::palette(theme::Mode::Light));
+        s.animations = false;
+        s.zoom = zoom;
+        s.pdf = Some(PdfView::new(path, vec![LETTER; 20], Arc::default(), 0));
+        let doc = s.layout().document;
+        prepare(&mut s, doc);
+        s
+    }
+
+    /// The page under a client point, and the point as a fraction of it.
+    fn under(s: &State, at: (f32, f32)) -> (u32, f32, f32) {
+        let g = geometry(s).unwrap();
+        let (page, r) = g.layout.pages.iter().map(|(p, r)| (*p, screen(&g, *r))).find(|(_, r)| r.contains(at.0, at.1)).unwrap();
+        (page, (at.0 - r.x0) / r.width(), (at.1 - r.y0) / r.height())
+    }
+
+    fn top(s: &State) -> f32 {
+        geometry(s).unwrap().top
+    }
+
+    #[test]
+    fn scroll_keys_move_by_lines_and_screens_and_stop_at_the_ends() {
+        let mut s = pdf_state(Zoom::FitWidth);
+        let doc = s.layout().document;
+        let start = top(&s);
+        assert!(key(&mut s, VK_DOWN.0, false));
+        assert_eq!(top(&s), start + LINE);
+        assert!(key(&mut s, VK_NEXT.0, false));
+        assert_eq!(top(&s), start + LINE + doc.height() - LINE);
+        assert!(key(&mut s, VK_SPACE.0, true), "Shift+Space goes back a screen");
+        assert_eq!(top(&s), start + LINE);
+        assert!(key(&mut s, VK_END.0, false));
+        let g = geometry(&s).unwrap();
+        assert_eq!(g.top, g.layout.height - doc.height());
+        assert_eq!(s.page, 19);
+        assert_eq!(s.status, "Page 20 of 20");
+        assert!(key(&mut s, VK_HOME.0, false));
+        assert_eq!((top(&s), s.page), (0.0, 0));
+        assert!(!key(&mut s, VK_LEFT.0, false), "Left stays with the Previous command");
+        assert!(step_page(&mut s, 1) && s.page == 1);
+        assert!(!step_page(&mut s, -2), "no page before the first");
+    }
+
+    #[test]
+    fn single_page_view_turns_the_page_at_its_edges() {
+        let mut s = pdf_state(Zoom::FitWidth);
+        s.view_mode = ViewMode::Single;
+        go_to_page(&mut s, 3, false);
+        let mut presses = 0;
+        while s.page == 3 && presses < 10 {
+            key(&mut s, VK_NEXT.0, false);
+            presses += 1;
+        }
+        assert_eq!((s.page, presses), (4, 3), "two screens of page 4, then the next page");
+        key(&mut s, VK_PRIOR.0, false);
+        key(&mut s, VK_PRIOR.0, false);
+        assert_eq!(s.page, 3);
+        let g = geometry(&s).unwrap();
+        assert_eq!(g.top, g.layout.height - g.doc.height(), "the previous page shows its bottom");
+        key(&mut s, VK_END.0, false);
+        assert_eq!(s.page, 19);
+    }
+
+    #[test]
+    fn two_page_view_steps_a_row_at_a_time() {
+        let mut s = pdf_state(Zoom::Fit);
+        s.view_mode = ViewMode::TwoPages;
+        assert!(step_page(&mut s, 1));
+        assert_eq!(s.page, 2);
+        s.page = 5;
+        assert!(step_page(&mut s, -1));
+        assert_eq!(s.page, 2, "back from the row of pages 5 and 6");
+    }
+
+    #[test]
+    fn zoom_keeps_the_page_point_under_the_pointer() {
+        let mut s = pdf_state(Zoom::FitWidth);
+        scroll_by(&mut s, 0.0, 2000.0, false);
+        let at = (700.0, 500.0);
+        let before = under(&s, at);
+        set_zoom(&mut s, Zoom::Ratio(2.5), Some(at));
+        let after = under(&s, at);
+        assert_eq!(before.0, after.0);
+        assert!((before.1 - after.1).abs() < 0.002 && (before.2 - after.2).abs() < 0.002, "{before:?} {after:?}");
+        let r = ratio(&s);
+        wheel(&mut s, 120.0, false, true, at);
+        assert!((ratio(&s) / r - 1.25).abs() < 1e-3, "Ctrl+wheel zooms by a quarter per notch");
+        let wheeled = under(&s, at);
+        assert!((before.1 - wheeled.1).abs() < 0.002 && (before.2 - wheeled.2).abs() < 0.002);
+        set_zoom(&mut s, Zoom::Ratio(0.8), None);
+        zoom_step(&mut s, true);
+        assert!((ratio(&s) - 1.0).abs() < 1e-4, "zoom in lands on actual size");
+        set_zoom(&mut s, Zoom::Fit, None);
+        let g = geometry(&s).unwrap();
+        let page = g.layout.pages.iter().find(|(p, _)| *p == s.page).unwrap().1;
+        assert!(page.height() <= g.doc.height(), "fit to window shows the whole page");
+    }
+
+    #[test]
+    fn pinch_zooms_around_the_fingers_and_settles_after() {
+        let mut s = pdf_state(Zoom::FitWidth);
+        let g = geometry(&s).unwrap();
+        let fingers = [(400.0, 400.0), (600.0, 400.0)];
+        let before = under(&s, (500.0, 400.0));
+        let pinch = Pinch { ids: [1, 2], start: fingers, scale: g.scale, origin: (g.left, g.top) };
+        pinch_to(&mut s, &pinch, 2.0, (0.0, 0.0));
+        assert!((geometry(&s).unwrap().scale / g.scale - 2.0).abs() < 1e-3);
+        let after = under(&s, (500.0, 400.0));
+        assert!(before.0 == after.0 && (before.1 - after.1).abs() < 0.002 && (before.2 - after.2).abs() < 0.002);
+        let doc = s.layout().document;
+        prepare(&mut s, doc);
+        assert!(s.due.is_some(), "tiles at the new scale wait until the zoom is still");
+        assert!(settle(&mut s));
+        let v = s.pdf.as_ref().unwrap();
+        assert_eq!((v.render_scale, v.fallback_scale), (geometry(&s).unwrap().scale, g.scale));
+    }
+
+    #[test]
+    fn zoom_to_selection_fills_the_view_with_the_dragged_area() {
+        let mut s = pdf_state(Zoom::FitWidth);
+        let doc = s.layout().document;
+        let (x, y) = (300.0, 300.0);
+        let target = under(&s, (x + 100.0, y + 50.0));
+        let start = ratio(&s);
+        s.zoom_select = true;
+        s.selection = Some((x, y, x + 200.0, y + 100.0));
+        finish_zoom(&mut s);
+        assert!(!s.zoom_select);
+        let center = ((doc.x0 + doc.x1) / 2.0, (doc.y0 + doc.y1) / 2.0);
+        let shown = under(&s, center);
+        assert_eq!(shown.0, target.0);
+        assert!((shown.1 - target.1).abs() < 0.003 && (shown.2 - target.2).abs() < 0.003, "{shown:?} {target:?}");
+        let factor = (doc.width() / 200.0).min(doc.height() / 100.0);
+        assert!((ratio(&s) - start * factor).abs() < 1e-3, "the 200-pixel-wide area now fills the view");
+    }
+
+    #[test]
+    fn images_zoom_around_the_pointer_and_decode_again_when_still() {
+        let workers = Workers::start(HWND::default()).unwrap();
+        let path = PathBuf::from("photo.jpg");
+        let mut s = State::new(workers, &[path.clone()], (1100.0, 800.0), 1.0, 1.0, theme::palette(theme::Mode::Light));
+        s.frame = Some(Frame { width: 1, height: 1, pixels: vec![255; 4], page_count: 1, source_width: 4000, source_height: 3000 });
+        s.displayed = Some((path, 0));
+        let doc = s.layout().document;
+        assert_eq!(image_box(&s, doc), (doc.width() as u32, doc.height() as u32), "fit decodes at the view size");
+        let at = (300.0, 300.0);
+        let before = view::image_rect(doc, (4000, 3000), ratio(&s), s.pan);
+        set_zoom(&mut s, Zoom::Ratio(0.5), Some(at));
+        let after = view::image_rect(doc, (4000, 3000), 0.5, s.pan);
+        let fraction = |r: Rect| ((at.0 - r.x0) / r.width(), (at.1 - r.y0) / r.height());
+        assert!((fraction(before).0 - fraction(after).0).abs() < 1e-4 && (fraction(before).1 - fraction(after).1).abs() < 1e-4);
+        assert!(s.due.is_some());
+        assert_eq!(image_box(&s, doc), (2000, 1500), "decoded at the shown size once still");
+        set_zoom(&mut s, Zoom::Fit, None);
+        assert_eq!(s.pan, (0.0, 0.0));
+    }
 
     #[test]
     fn pinch_ratio_and_midpoint_pan() {
