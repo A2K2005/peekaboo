@@ -533,6 +533,11 @@ pub fn share_files(hwnd: HWND, paths: &[PathBuf]) -> Result<(), String> {
     let handler_token = token.clone();
     let handler = TypedEventHandler::<DataTransferManager, DataRequestedEventArgs>::new(
         move |sender, args| {
+            // One share per call; the next call registers fresh items. Remove
+            // the handler first, so a failure below cannot leave it registered.
+            sender
+                .ok()?
+                .RemoveDataRequested(handler_token.load(Ordering::SeqCst))?;
             let data = args.ok()?.Request()?.Data()?;
             data.Properties()?.SetTitle(&HSTRING::from(&title))?;
             let items = files
@@ -541,11 +546,7 @@ pub fn share_files(hwnd: HWND, paths: &[PathBuf]) -> Result<(), String> {
                 .collect::<Result<Vec<_>, _>>()?;
             data.SetStorageItemsReadOnly(&windows_collections::IIterable::<IStorageItem>::from(
                 items,
-            ))?;
-            // One share per call; the next call registers fresh items.
-            sender
-                .ok()?
-                .RemoveDataRequested(handler_token.load(Ordering::SeqCst))
+            ))
         },
     );
     token.store(
