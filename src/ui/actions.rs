@@ -339,9 +339,10 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             edits.pdf.push(PdfEdit::InsertBlank { at });
             s.page = at;
         }),
-        Undo => edit(hwnd, |_, edits| {
+        Undo => edit(hwnd, |s, edits| {
             if pdf {
-                edits.pdf.pop();
+                let undone = edits.pdf.pop();
+                s.page = page_after_undo(s.page, count, undone.as_ref());
             } else {
                 edits.image.pop();
             }
@@ -353,6 +354,17 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
         }),
         _ => {}
     }
+}
+
+/// The page count after undoing `undone`, and `page` kept inside it. An
+/// undone insert removes a page; an undone delete brings one back.
+pub(super) fn page_after_undo(page: u32, count: u32, undone: Option<&PdfEdit>) -> u32 {
+    let count = match undone {
+        Some(PdfEdit::InsertBlank { .. } | PdfEdit::InsertImage { .. }) => count.saturating_sub(1),
+        Some(PdfEdit::Delete { .. }) => count + 1,
+        _ => count,
+    };
+    page.min(count.saturating_sub(1))
 }
 
 /// True while the file, page, and render generation still match a request
@@ -574,6 +586,16 @@ pub(super) unsafe fn context_menu(hwnd: HWND, at: Option<(f32, f32)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_keeps_the_page_inside_the_document() {
+        let insert = PdfEdit::InsertBlank { at: 5 };
+        assert_eq!(page_after_undo(5, 6, Some(&insert)), 4, "undoing an insert on the last page");
+        assert_eq!(page_after_undo(2, 6, Some(&insert)), 2);
+        assert_eq!(page_after_undo(4, 5, Some(&PdfEdit::Delete { page: 4 })), 4);
+        assert_eq!(page_after_undo(3, 4, Some(&PdfEdit::RotateRight { page: 3 })), 3);
+        assert_eq!(page_after_undo(0, 1, None), 0);
+    }
 
     #[test]
     fn page_edits_from_a_sheet_need_the_same_page_and_generation() {
