@@ -112,7 +112,11 @@ fn image_exports_preserve_resolution_alpha_and_source() {
     .unwrap();
     let resized = imaging::decode(&resize, 10, 10).unwrap();
     assert_eq!((resized.width, resized.height), (4, 6));
-    let large = root.join("fixtures/image-24mp.jpg");
+    // PFW_FIXTURES overrides the fixtures folder.
+    let fixtures = std::env::var_os("PFW_FIXTURES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("fixtures"));
+    let large = fixtures.join("image-24mp.jpg");
     assert!(large.is_file(), "Run tools/make-fixtures.ps1 first");
     let preview = imaging::decode(&large, 100, 100).unwrap();
     assert!(preview.width <= 100);
@@ -136,10 +140,16 @@ fn image_exports_preserve_resolution_alpha_and_source() {
     )
     .is_err());
     assert!(!out.join("invalid.png").exists());
-    assert!(imaging::export(&source, &out.join("unsupported.heic"), &[]).is_err());
-    assert!(!out.join("unsupported.heic").exists());
-    assert!(imaging::decode(&root.join("fixtures/corrupt.jpg"), 10, 10).is_err());
-    let small = root.join("fixtures/image-small.png");
+    let heic = out.join("codec.heic");
+    assert_eq!(
+        imaging::export(&source, &heic, &[]).is_ok(),
+        imaging::heic_encode_available()
+    );
+    assert_eq!(heic.exists(), imaging::heic_encode_available());
+    let corrupt = out.join("corrupt.jpg");
+    fs::write(&corrupt, b"not a jpeg").unwrap();
+    assert!(imaging::decode(&corrupt, 10, 10).is_err());
+    let small = fixtures.join("image-small.png");
     let unmarked = imaging::decode(&small, 640, 480).unwrap();
     use model::AnnotationKind::*;
     for (index, kind) in [

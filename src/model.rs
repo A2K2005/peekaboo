@@ -101,6 +101,58 @@ pub struct Frame {
     pub source_height: u32,
 }
 
+// Imaging types (W1-C)
+
+/// Image file formats the app can write.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFormat {
+    Jpeg,
+    Png,
+    WebP,
+    Tiff,
+    Heic,
+    Bmp,
+}
+
+/// `quality` is 0..1 and applies to JPEG, HEIC, and lossy WebP.
+/// `lossless` applies to WebP only.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExportOptions {
+    pub format: ImageFormat,
+    pub quality: f32,
+    pub lossless: bool,
+}
+
+/// How a batch resizes each image. `Percent` is 100 for the original size.
+/// `MaxEdge` shrinks the longest side to the value and never enlarges.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BatchResize {
+    Pixels { width: u32, height: u32 },
+    Percent(f32),
+    MaxEdge(u32),
+}
+
+/// One batch action, applied to every input: rotate, then resize, then
+/// write in `options.format` (or each input's own format when `None`).
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchJob {
+    pub quarter_turns: u8,
+    pub resize: Option<BatchResize>,
+    pub options: Option<ExportOptions>,
+}
+
+/// The outcome for one batch input: the new file, or why it failed.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchResult {
+    pub input: std::path::PathBuf,
+    pub output: Result<std::path::PathBuf, String>,
+}
+
 pub fn frame_bytes(width: u32, height: u32) -> Result<usize, String> {
     let len = (width as usize)
         .checked_mul(height as usize)

@@ -1,4 +1,6 @@
-use crate::model::{fit_size, frame_bytes, AnnotationKind, Frame, ImageEdit};
+use crate::model::{
+    fit_size, frame_bytes, AnnotationKind, ExportOptions, Frame, ImageEdit, ImageFormat,
+};
 use std::{
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
@@ -7,17 +9,22 @@ use std::{
 use windows::{
     core::{w, Interface, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{GENERIC_READ, GENERIC_WRITE},
+        Foundation::{GENERIC_READ, GENERIC_WRITE, VARIANT_TRUE},
         Graphics::Imaging::*,
+        Media::MediaFoundation::{
+            MFMediaType_Video, MFTEnumEx, MFVideoFormat_HEVC, MFT_CATEGORY_VIDEO_DECODER,
+            MFT_ENUM_FLAG_ALL, MFT_REGISTER_TYPE_INFO,
+        },
         Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS},
         System::{
             Com::{
-                CoCreateInstance,
+                CoCreateInstance, CoTaskMemFree, IStream,
                 StructuredStorage::{PropVariantClear, PropVariantToUInt16, PROPBAG2, PROPVARIANT},
-                CLSCTX_INPROC_SERVER,
+                CLSCTX_INPROC_SERVER, STREAM_SEEK_END,
             },
-            Variant::{VARIANT, VT_R4},
+            Variant::{VARIANT, VT_BOOL, VT_R4},
         },
+        UI::Shell::SHCreateMemStream,
     },
 };
 fn wide(path: &Path) -> Vec<u16> {
@@ -41,10 +48,8 @@ pub fn decode_edited(
 ) -> Result<Frame, String> {
     unsafe {
         let factory = factory()?;
-        let source = edited_source(&factory, path, edits).map_err(|e| {
-            format!("Could not open this image. It may be damaged or need a Windows codec. {e}")
-        })?;
-        let (source_width, source_height) = size(&source)?;
+        let (source, (source_width, source_height)) =
+            edited_source(&factory, path, edits, Some((max_width, max_height)))?;
         let (width, height) = fit_size(source_width, source_height, max_width, max_height)?;
         let scaler = factory.CreateBitmapScaler().map_err(err)?;
         scaler
@@ -112,11 +117,15 @@ unsafe fn rotated(
     rotator.Initialize(&cached, transform).map_err(err)?;
     rotator.cast().map_err(err)
 }
+/// Returns the edited source and its full-resolution size. `display` is the
+/// target box of a viewing decode. With no edits, the codec may then scale
+/// natively (JPEG DCT scaling), so the source can be smaller than that size.
 unsafe fn edited_source(
     factory: &IWICImagingFactory,
     path: &Path,
     edits: &[ImageEdit],
-) -> Result<IWICBitmapSource, String> {
+    display: Option<(u32, u32)>,
+) -> Result<(IWICBitmapSource, (u32, u32)), String> {
     let filename = wide(path);
     let frame = factory
         .CreateDecoderFromFilename(
@@ -126,19 +135,50 @@ unsafe fn edited_source(
             WICDecodeMetadataCacheOnDemand,
         )
         .and_then(|decoder| decoder.GetFrame(0));
-    let (mut source, orientation) = match frame {
-        Ok(frame) => (
-            frame.cast::<IWICBitmapSource>().map_err(err)?,
-            read_orientation(&frame),
-        ),
+    let (mut source, orientation, full) = match frame {
+        Ok(frame) => {
+            let (width, height) = size(&frame)?;
+            let orientation = read_orientation(&frame);
+            let swapped = orientation >= 5;
+            let full = if swapped {
+                (height, width)
+            } else {
+                (width, height)
+            };
+            let reduced = match display {
+                Some((max_width, max_height)) if edits.is_empty() => {
+                    let (w, h) = fit_size(full.0, full.1, max_width, max_height)?;
+                    reduced_frame(
+                        factory,
+                        &frame,
+                        width,
+                        if swapped { (h, w) } else { (w, h) },
+                    )
+                }
+                _ => None,
+            };
+            match reduced {
+                Some(source) => (source, orientation, Some(full)),
+                None => (frame.cast().map_err(err)?, orientation, None),
+            }
+        }
         Err(_)
             if path
                 .extension()
                 .is_some_and(|x| x.eq_ignore_ascii_case("webp")) =>
         {
-            (webp_source(factory, path)?, 1)
+            (webp_source(factory, path)?, 1, None)
         }
-        Err(error) => return Err(error.to_string()),
+        Err(_) if format_for(path) == Some(ImageFormat::Heic) && !heic_decode_available() => {
+            return Err(format!(
+                "Windows cannot open HEIC files on this PC. {HEIC_HELP}"
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not open this image. It may be damaged or need a Windows codec. {error}"
+            ))
+        }
     };
     size(&source)?;
     let transform = match orientation {
@@ -189,7 +229,53 @@ unsafe fn edited_source(
             }
         };
     }
-    Ok(source)
+    let full = match full {
+        Some(full) => full,
+        None => size(&source)?,
+    };
+    Ok((source, full))
+}
+
+/// Decode at the smallest native codec scale that still covers `want`,
+/// in frame orientation. None when the codec cannot scale or it saves nothing.
+unsafe fn reduced_frame(
+    factory: &IWICImagingFactory,
+    frame: &IWICBitmapFrameDecode,
+    frame_width: u32,
+    want: (u32, u32),
+) -> Option<IWICBitmapSource> {
+    let transform: IWICBitmapSourceTransform = frame.cast().ok()?;
+    let (mut width, mut height) = want;
+    transform.GetClosestSize(&mut width, &mut height).ok()?;
+    if width >= frame_width || width < want.0 || height < want.1 {
+        return None;
+    }
+    let mut format = GUID_WICPixelFormat32bppPBGRA;
+    transform.GetClosestPixelFormat(&mut format).ok()?;
+    let bitmap = factory
+        .CreateBitmap(width, height, &format, WICBitmapCacheOnLoad)
+        .ok()?;
+    {
+        let lock = bitmap
+            .Lock(std::ptr::null(), WICBitmapLockWrite.0 as u32)
+            .ok()?;
+        let stride = lock.GetStride().ok()?;
+        let (mut length, mut data) = (0, std::ptr::null_mut());
+        lock.GetDataPointer(&mut length, &mut data).ok()?;
+        let buffer = std::slice::from_raw_parts_mut(data, length as usize);
+        transform
+            .CopyPixels(
+                std::ptr::null(),
+                width,
+                height,
+                &format,
+                WICBitmapTransformRotate0,
+                stride,
+                buffer,
+            )
+            .ok()?;
+    }
+    bitmap.cast().ok()
 }
 
 unsafe fn webp_source(
@@ -429,31 +515,233 @@ fn crop_rect(
     })
 }
 /// Rebuild from the original. Never export a display-resolution preview.
+/// The output extension picks the format. JPEG quality is 0.92; WebP is lossless.
 pub fn export(path: &Path, output: &Path, edits: &[ImageEdit]) -> Result<(), String> {
+    export_with(path, output, edits, &default_options(output)?).map(|_| ())
+}
+/// Rebuild from the original with explicit options. Returns the bytes written.
+pub fn export_with(
+    path: &Path,
+    output: &Path,
+    edits: &[ImageEdit],
+    options: &ExportOptions,
+) -> Result<u64, String> {
     unsafe {
         let factory = factory()?;
-        let source = edited_source(&factory, path, edits)?;
-        write_source(&factory, &source, output)
+        let (source, _) = edited_source(&factory, path, edits, None)?;
+        write_source(&factory, &source, output, options)
     }
 }
+/// The bytes `export_with` would write. No file is written. Above a pixel
+/// budget it encodes full-resolution row bands and scales the size up: a full
+/// encode of a 24 MP photo took 0.3 s for JPEG, 1.3 s for PNG, 1.9 s for WebP.
+#[allow(dead_code)] // The shell calls this in wave 2.
+pub fn estimate_size(
+    path: &Path,
+    edits: &[ImageEdit],
+    options: &ExportOptions,
+) -> Result<u64, String> {
+    unsafe {
+        let factory = factory()?;
+        let (source, _) = edited_source(&factory, path, edits, None)?;
+        let (width, height) = size(&source)?;
+        let budget = match options.format {
+            ImageFormat::Jpeg | ImageFormat::Bmp => 40_000_000,
+            _ => 4_000_000,
+        };
+        if width as u64 * height as u64 <= budget {
+            return encoded_length(&factory, &source, options);
+        }
+        let (sample, rows) = row_sample(&factory, &source, width, height)?;
+        let length = encoded_length(&factory, &sample, options)?;
+        Ok((length as f64 * height as f64 / rows as f64).round() as u64)
+    }
+}
+unsafe fn encoded_length(
+    factory: &IWICImagingFactory,
+    source: &IWICBitmapSource,
+    options: &ExportOptions,
+) -> Result<u64, String> {
+    // SHCreateMemStream: a TIFF took 0.8 s here, CreateStreamOnHGlobal took 29.6 s.
+    let stream = SHCreateMemStream(None).ok_or("Not enough memory to estimate the file size.")?;
+    encode(factory, source, &stream, options)?;
+    let mut length = 0;
+    stream
+        .Seek(0, STREAM_SEEK_END, Some(&mut length))
+        .map_err(err)?;
+    Ok(length)
+}
+/// Eight evenly spaced bands of full-resolution rows, about 2 MP in total,
+/// stacked into one bitmap. Band heights are multiples of 16 rows to match
+/// JPEG and WebP blocks. Returns the bitmap and its row count.
+unsafe fn row_sample(
+    factory: &IWICImagingFactory,
+    source: &IWICBitmapSource,
+    width: u32,
+    height: u32,
+) -> Result<(IWICBitmapSource, u32), String> {
+    const BANDS: u32 = 8;
+    let band = (2_000_000 / width / BANDS / 16 * 16)
+        .max(16)
+        .min(height / BANDS)
+        .max(1);
+    let rows = band * BANDS;
+    let converter = factory.CreateFormatConverter().map_err(err)?;
+    converter
+        .Initialize(
+            source,
+            &GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone,
+            None,
+            0.0,
+            WICBitmapPaletteTypeCustom,
+        )
+        .map_err(err)?;
+    let bitmap = factory
+        .CreateBitmap(
+            width,
+            rows,
+            &GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapCacheOnLoad,
+        )
+        .map_err(err)?;
+    {
+        let lock = bitmap
+            .Lock(std::ptr::null(), WICBitmapLockWrite.0 as u32)
+            .map_err(err)?;
+        let stride = lock.GetStride().map_err(err)?;
+        let (mut length, mut data) = (0, std::ptr::null_mut());
+        lock.GetDataPointer(&mut length, &mut data).map_err(err)?;
+        let buffer = std::slice::from_raw_parts_mut(data, length as usize);
+        let band_bytes = band as usize * stride as usize;
+        for i in 0..BANDS {
+            let rect = WICRect {
+                X: 0,
+                Y: ((height - band) as u64 * i as u64 / (BANDS - 1) as u64) as i32,
+                Width: width as i32,
+                Height: band as i32,
+            };
+            let start = i as usize * band_bytes;
+            converter
+                .CopyPixels(&rect, stride, &mut buffer[start..start + band_bytes])
+                .map_err(err)?;
+        }
+    }
+    Ok((bitmap.cast().map_err(err)?, rows))
+}
 pub fn export_frame(frame: &Frame, output: &Path) -> Result<(), String> {
+    unsafe {
+        let factory = factory()?;
+        let bitmap = frame_bitmap(&factory, frame)?;
+        write_source(&factory, &bitmap, output, &default_options(output)?).map(|_| ())
+    }
+}
+unsafe fn frame_bitmap(
+    factory: &IWICImagingFactory,
+    frame: &Frame,
+) -> Result<IWICBitmapSource, String> {
     if frame_bytes(frame.width, frame.height)? != frame.pixels.len() {
         return Err("Invalid image buffer.".into());
     }
+    factory
+        .CreateBitmapFromMemory(
+            frame.width,
+            frame.height,
+            &GUID_WICPixelFormat32bppPBGRA,
+            frame.width * 4,
+            &frame.pixels,
+        )
+        .map_err(err)?
+        .cast()
+        .map_err(err)
+}
+fn format_for(path: &Path) -> Option<ImageFormat> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "jpg" | "jpeg" | "jpe" | "jfif" => ImageFormat::Jpeg,
+        "png" => ImageFormat::Png,
+        "webp" => ImageFormat::WebP,
+        "tif" | "tiff" => ImageFormat::Tiff,
+        "heic" | "heif" => ImageFormat::Heic,
+        "bmp" => ImageFormat::Bmp,
+        _ => return None,
+    })
+}
+fn default_options(output: &Path) -> Result<ExportOptions, String> {
+    let format =
+        format_for(output).ok_or("Choose JPEG, PNG, WebP, TIFF, HEIC, or BMP for image export.")?;
+    Ok(ExportOptions {
+        format,
+        quality: 0.92,
+        lossless: true,
+    })
+}
+/// True when Windows can open HEIC files. The HEIF Image Extension alone is
+/// not enough: decoding also needs an HEVC decoder (HEVC Video Extensions),
+/// which Media Foundation lists. https://learn.microsoft.com/windows/win32/wic/heif-codec
+pub fn heic_decode_available() -> bool {
     unsafe {
-        let factory = factory()?;
-        let bitmap = factory
-            .CreateBitmapFromMemory(
-                frame.width,
-                frame.height,
-                &GUID_WICPixelFormat32bppPBGRA,
-                frame.width * 4,
-                &frame.pixels,
-            )
-            .map_err(err)?;
-        write_source(&factory, &bitmap.cast().map_err(err)?, output)
+        factory().is_ok_and(|f| {
+            f.CreateDecoder(&GUID_ContainerFormatHeif, std::ptr::null())
+                .is_ok()
+        }) && hevc_decoders() > 0
     }
 }
+/// True when Windows can save HEIC. This encodes a small test image: on the
+/// dev PC, Media Foundation listed 3 hardware HEVC encoders, yet the HEIF
+/// encoder failed with 0xC00D5212 because HEVC Video Extensions are missing.
+#[allow(dead_code)] // The shell calls this in wave 2.
+pub fn heic_encode_available() -> bool {
+    unsafe {
+        let Ok(factory) = factory() else {
+            return false;
+        };
+        let Ok(bitmap) =
+            factory.CreateBitmap(16, 16, &GUID_WICPixelFormat24bppBGR, WICBitmapCacheOnLoad)
+        else {
+            return false;
+        };
+        let Some(stream) = SHCreateMemStream(None) else {
+            return false;
+        };
+        let options = ExportOptions {
+            format: ImageFormat::Heic,
+            quality: 0.5,
+            lossless: false,
+        };
+        bitmap
+            .cast()
+            .is_ok_and(|source| encode_wic(&factory, &source, &stream, &options).is_ok())
+    }
+}
+/// Count the HEVC decoders that Media Foundation lists.
+/// https://learn.microsoft.com/windows/win32/api/mfapi/nf-mfapi-mftenumex
+unsafe fn hevc_decoders() -> u32 {
+    let input = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: MFVideoFormat_HEVC,
+    };
+    let (mut list, mut count) = (std::ptr::null_mut(), 0u32);
+    let category = MFT_CATEGORY_VIDEO_DECODER;
+    if MFTEnumEx(
+        category,
+        MFT_ENUM_FLAG_ALL,
+        Some(&input),
+        None,
+        &mut list,
+        &mut count,
+    )
+    .is_err()
+    {
+        return 0;
+    }
+    for i in 0..count as usize {
+        drop((*list.add(i)).take());
+    }
+    CoTaskMemFree(Some(list as *const _));
+    count
+}
+const HEIC_HELP: &str = "Install HEIF Image Extensions and HEVC Video Extensions from the Microsoft Store, then try again.";
 struct TempFile(PathBuf);
 impl Drop for TempFile {
     fn drop(&mut self) {
@@ -465,24 +753,14 @@ unsafe fn write_source(
     factory: &IWICImagingFactory,
     source: &IWICBitmapSource,
     output: &Path,
-) -> Result<(), String> {
+    options: &ExportOptions,
+) -> Result<u64, String> {
     if output.exists() {
         return Err("A file already exists there. Choose a new name to keep both files.".into());
     }
-    let extension = output
-        .extension()
-        .map(|s| s.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    if extension == "webp" {
-        return write_webp(factory, source, output);
+    if format_for(output) != Some(options.format) {
+        return Err("The file name extension does not match the export format.".into());
     }
-    let (container, jpeg) = match extension.as_str() {
-        "png" => (GUID_ContainerFormatPng, false),
-        "jpg" | "jpeg" => (GUID_ContainerFormatJpeg, true),
-        "tif" | "tiff" => (GUID_ContainerFormatTiff, false),
-        "bmp" => (GUID_ContainerFormatBmp, false),
-        _ => return Err("Choose PNG, JPEG, WebP, TIFF, or BMP for image export.".into()),
-    };
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -505,89 +783,7 @@ unsafe fn write_source(
         stream
             .InitializeFromFilename(PCWSTR(filename.as_ptr()), GENERIC_WRITE.0)
             .map_err(err)?;
-        let encoder = factory
-            .CreateEncoder(&container, std::ptr::null())
-            .map_err(err)?;
-        encoder
-            .Initialize(&stream, WICBitmapEncoderNoCache)
-            .map_err(err)?;
-        let (mut frame, mut options) = (None, None);
-        encoder
-            .CreateNewFrame(&mut frame, &mut options)
-            .map_err(err)?;
-        if jpeg {
-            if let Some(options) = &options {
-                let mut name: Vec<u16> = "ImageQuality".encode_utf16().chain(Some(0)).collect();
-                let property = PROPBAG2 {
-                    pstrName: PWSTR(name.as_mut_ptr()),
-                    ..Default::default()
-                };
-                let mut quality = VARIANT::default();
-                (*quality.Anonymous.Anonymous).vt = VT_R4;
-                (*quality.Anonymous.Anonymous).Anonymous.fltVal = 0.92;
-                options.Write(1, &property, &quality).map_err(err)?;
-            }
-        }
-        let frame = frame.ok_or("Windows did not create an output encoder.")?;
-        frame.Initialize(options.as_ref()).map_err(err)?;
-        let (width, height) = size(source)?;
-        frame.SetSize(width, height).map_err(err)?;
-        let mut pixel_format = if jpeg {
-            GUID_WICPixelFormat24bppBGR
-        } else {
-            GUID_WICPixelFormat32bppBGRA
-        };
-        frame.SetPixelFormat(&mut pixel_format).map_err(err)?;
-        let converter = factory.CreateFormatConverter().map_err(err)?;
-        if jpeg {
-            frame_bytes(width, 1)?;
-            converter
-                .Initialize(
-                    source,
-                    &GUID_WICPixelFormat32bppPBGRA,
-                    WICBitmapDitherTypeNone,
-                    None,
-                    0.0,
-                    WICBitmapPaletteTypeCustom,
-                )
-                .map_err(err)?;
-            let mut rgba = vec![0u8; width as usize * 4];
-            let mut rgb = vec![0u8; width as usize * 3];
-            for row in 0..height {
-                let rect = WICRect {
-                    X: 0,
-                    Y: row as i32,
-                    Width: width as i32,
-                    Height: 1,
-                };
-                converter
-                    .CopyPixels(&rect, width * 4, &mut rgba)
-                    .map_err(err)?;
-                for (input, output) in rgba.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
-                    let white = 255 - input[3];
-                    for channel in 0..3 {
-                        output[channel] = input[channel].saturating_add(white);
-                    }
-                }
-                frame.WritePixels(1, width * 3, &rgb).map_err(err)?;
-            }
-        } else {
-            converter
-                .Initialize(
-                    source,
-                    &pixel_format,
-                    WICBitmapDitherTypeNone,
-                    None,
-                    0.0,
-                    WICBitmapPaletteTypeCustom,
-                )
-                .map_err(err)?;
-            frame
-                .WriteSource(&converter, std::ptr::null())
-                .map_err(err)?;
-        }
-        frame.Commit().map_err(err)?;
-        encoder.Commit().map_err(err)?;
+        encode(factory, source, &stream, options)?;
     }
     std::fs::OpenOptions::new()
         .read(true)
@@ -595,21 +791,27 @@ unsafe fn write_source(
         .open(&temp.0)
         .and_then(|file| file.sync_all())
         .map_err(|e| e.to_string())?;
-    let check_path = wide(&temp.0);
-    let check = factory
-        .CreateDecoderFromFilename(
-            PCWSTR(check_path.as_ptr()),
-            None,
-            GENERIC_READ,
-            WICDecodeMetadataCacheOnDemand,
-        )
-        .map_err(err)?;
-    let check_frame: IWICBitmapSource = check.GetFrame(0).map_err(err)?.cast().map_err(err)?;
-    if size(&check_frame)? != size(source)? {
+    let written = if options.format == ImageFormat::WebP {
+        let file = std::fs::File::open(&temp.0).map_err(|e| e.to_string())?;
+        image_webp::WebPDecoder::new(std::io::BufReader::new(file))
+            .map_err(|e| e.to_string())?
+            .dimensions()
+    } else {
+        let check_path = wide(&temp.0);
+        let check = factory
+            .CreateDecoderFromFilename(
+                PCWSTR(check_path.as_ptr()),
+                None,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnDemand,
+            )
+            .map_err(err)?;
+        let frame = check.GetFrame(0).map_err(err)?;
+        size(&frame)?
+    };
+    if written != size(source)? {
         return Err("The exported image dimensions did not match. No output was saved.".into());
     }
-    drop(check_frame);
-    drop(check);
     let from = wide(&temp.0);
     let to = wide(output);
     MoveFileExW(
@@ -618,15 +820,166 @@ unsafe fn write_source(
         MOVE_FILE_FLAGS(0),
     )
     .map_err(err)?;
-    Ok(())
+    std::fs::metadata(output)
+        .map(|m| m.len())
+        .map_err(|e| e.to_string())
 }
-
-unsafe fn write_webp(
+/// Encode `source` into `stream` in the chosen format.
+unsafe fn encode(
     factory: &IWICImagingFactory,
     source: &IWICBitmapSource,
-    output: &Path,
+    stream: &IStream,
+    options: &ExportOptions,
 ) -> Result<(), String> {
+    if !(0.0..=1.0).contains(&options.quality) {
+        return Err("Choose a quality from 0 to 100 percent.".into());
+    }
+    if options.format == ImageFormat::WebP {
+        let bytes = webp_bytes(factory, source, options)?;
+        let length = u32::try_from(bytes.len()).map_err(|e| e.to_string())?;
+        let mut written = 0;
+        stream
+            .Write(bytes.as_ptr().cast(), length, Some(&mut written))
+            .ok()
+            .map_err(err)?;
+        return if written == length {
+            Ok(())
+        } else {
+            Err("Could not write the whole image.".into())
+        };
+    }
+    let result = encode_wic(factory, source, stream, options);
+    if options.format == ImageFormat::Heic {
+        result.map_err(|e| format!("Windows cannot save HEIC on this PC. {HEIC_HELP} ({e})"))
+    } else {
+        result
+    }
+}
+unsafe fn encode_wic(
+    factory: &IWICImagingFactory,
+    source: &IWICBitmapSource,
+    stream: &IStream,
+    options: &ExportOptions,
+) -> Result<(), String> {
+    let (container, mut pixel_format) = match options.format {
+        ImageFormat::Jpeg => (GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR),
+        ImageFormat::Heic => (GUID_ContainerFormatHeif, GUID_WICPixelFormat24bppBGR),
+        ImageFormat::Png => (GUID_ContainerFormatPng, GUID_WICPixelFormat32bppBGRA),
+        ImageFormat::Tiff => (GUID_ContainerFormatTiff, GUID_WICPixelFormat32bppBGRA),
+        ImageFormat::Bmp => (GUID_ContainerFormatBmp, GUID_WICPixelFormat32bppBGRA),
+        ImageFormat::WebP => return Err("WebP does not use a Windows encoder.".into()),
+    };
+    let encoder = factory
+        .CreateEncoder(&container, std::ptr::null())
+        .map_err(err)?;
+    encoder
+        .Initialize(stream, WICBitmapEncoderNoCache)
+        .map_err(err)?;
+    let (mut frame, mut bag) = (None, None);
+    encoder.CreateNewFrame(&mut frame, &mut bag).map_err(err)?;
+    // Option names: https://learn.microsoft.com/windows/win32/wic/-wic-creating-encoder
+    if let Some(bag) = &bag {
+        let mut value = VARIANT::default();
+        let inner = &mut *value.Anonymous.Anonymous;
+        let name = match options.format {
+            ImageFormat::Jpeg | ImageFormat::Heic => {
+                inner.vt = VT_R4;
+                inner.Anonymous.fltVal = options.quality;
+                Some("ImageQuality")
+            }
+            ImageFormat::Bmp => {
+                inner.vt = VT_BOOL;
+                inner.Anonymous.boolVal = VARIANT_TRUE;
+                Some("EnableV5Header32bppBGRA")
+            }
+            _ => None,
+        };
+        if let Some(name) = name {
+            let mut name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            let property = PROPBAG2 {
+                pstrName: PWSTR(name.as_mut_ptr()),
+                ..Default::default()
+            };
+            bag.Write(1, &property, &value).map_err(err)?;
+        }
+    }
+    let frame = frame.ok_or("Windows did not create an output encoder.")?;
+    frame.Initialize(bag.as_ref()).map_err(err)?;
     let (width, height) = size(source)?;
+    frame.SetSize(width, height).map_err(err)?;
+    frame.SetPixelFormat(&mut pixel_format).map_err(err)?;
+    let converter = factory.CreateFormatConverter().map_err(err)?;
+    if pixel_format == GUID_WICPixelFormat24bppBGR {
+        // The output has no alpha: composite onto white, one band of rows at a time.
+        converter
+            .Initialize(
+                source,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )
+            .map_err(err)?;
+        let band = 64u32;
+        let mut bgra = vec![0u8; frame_bytes(width, 1)? * band as usize];
+        let mut bgr = vec![0u8; width as usize * 3 * band as usize];
+        for top in (0..height).step_by(band as usize) {
+            let rows = band.min(height - top);
+            let count = width as usize * rows as usize;
+            let rect = WICRect {
+                X: 0,
+                Y: top as i32,
+                Width: width as i32,
+                Height: rows as i32,
+            };
+            converter
+                .CopyPixels(&rect, width * 4, &mut bgra[..count * 4])
+                .map_err(err)?;
+            for (input, output) in bgra[..count * 4]
+                .chunks_exact(4)
+                .zip(bgr[..count * 3].chunks_exact_mut(3))
+            {
+                let white = 255 - input[3];
+                for channel in 0..3 {
+                    output[channel] = input[channel].saturating_add(white);
+                }
+            }
+            frame
+                .WritePixels(rows, width * 3, &bgr[..count * 3])
+                .map_err(err)?;
+        }
+    } else {
+        converter
+            .Initialize(
+                source,
+                &pixel_format,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )
+            .map_err(err)?;
+        frame
+            .WriteSource(&converter, std::ptr::null())
+            .map_err(err)?;
+    }
+    frame.Commit().map_err(err)?;
+    encoder.Commit().map_err(err)
+}
+/// WIC has no WebP encoder. libwebp encodes lossy WebP; image-webp encodes lossless.
+unsafe fn webp_bytes(
+    factory: &IWICImagingFactory,
+    source: &IWICBitmapSource,
+    options: &ExportOptions,
+) -> Result<Vec<u8>, String> {
+    let (width, height) = size(source)?;
+    if width > 16383 || height > 16383 {
+        return Err(
+            "WebP allows at most 16383 pixels on each side. Resize the image, then try again."
+                .into(),
+        );
+    }
     let length = (width as usize)
         .checked_mul(height as usize)
         .and_then(|n| n.checked_mul(4))
@@ -647,43 +1000,30 @@ unsafe fn write_webp(
     converter
         .CopyPixels(std::ptr::null(), width * 4, &mut pixels)
         .map_err(err)?;
-    let parent = output
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let path = parent.join(format!(
-        ".preview-{}-{}.tmp",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-    let temp = TempFile(path);
-    image_webp::WebPEncoder::new(&mut file)
-        .encode(&pixels, width, height, image_webp::ColorType::Rgba8)
-        .map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    drop(file);
-    let check = image_webp::WebPDecoder::new(std::io::BufReader::new(
-        std::fs::File::open(&temp.0).map_err(|e| e.to_string())?,
-    ))
-    .map_err(|e| e.to_string())?;
-    if check.dimensions() != (width, height) {
-        return Err("WebP verification failed. No output was saved.".into());
+    if options.lossless {
+        // image-webp: 221 ms and 11.7 MB for a 12 MP photo; libwebp took 13.6 s for 10.3 MB.
+        let mut bytes = Vec::new();
+        image_webp::WebPEncoder::new(&mut bytes)
+            .encode(&pixels, width, height, image_webp::ColorType::Rgba8)
+            .map_err(|e| e.to_string())?;
+        return Ok(bytes);
     }
-    drop(check);
-    let from = wide(&temp.0);
-    let to = wide(output);
-    MoveFileExW(
-        PCWSTR(from.as_ptr()),
-        PCWSTR(to.as_ptr()),
-        MOVE_FILE_FLAGS(0),
-    )
-    .map_err(err)?;
-    Ok(())
+    let mut output = std::ptr::null_mut();
+    // Simple encoding API: https://developers.google.com/speed/webp/docs/api#simple_encoding_api
+    let written = libwebp_sys::WebPEncodeRGBA(
+        pixels.as_ptr(),
+        width as i32,
+        height as i32,
+        width as i32 * 4,
+        options.quality * 100.0,
+        &mut output,
+    );
+    if written == 0 || output.is_null() {
+        return Err("Could not encode this image as WebP.".into());
+    }
+    let bytes = std::slice::from_raw_parts(output, written).to_vec();
+    libwebp_sys::WebPFree(output.cast());
+    Ok(bytes)
 }
 unsafe fn read_orientation(frame: &IWICBitmapFrameDecode) -> u16 {
     let Ok(reader) = frame.GetMetadataQueryReader() else {
