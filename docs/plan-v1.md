@@ -67,8 +67,8 @@ These rules bind every wave-1 agent. Change them only through the orchestrator.
 | --- | --- |
 | W1-A to W1-E | Merged into `v1`. Reviewed; fixes merged or in progress (W1-C fixes). |
 | W2-1 Viewer | Merged into `v1`. Verifier running. |
-| W2-2 Text | Implementing |
-| W2-3 Save model | Implementing |
+| W2-2 Text | Partial, merged: tested selection, copy, and search logic in `src/ui/text.rs`, not wired into the app. To do: PDF text fetch and drag selection, Ctrl+F search UI, OCR on hover for images, Narrator text runs. Then delete the old `page_text`, `find`, and `recognize` paths. |
+| W2-3 Save model | Partial, merged: tested disk layer in `src/ui/disk.rs` (snapshot, atomic replace with ReplaceFileW, external-change check, copy naming, writability, remembered choice), not wired. Files are still only written by "Save a copy". To do: first-edit sheet with checkbox, autosave jobs (PDF via `save_incremental` from the snapshot, images via `export_with`), revert, redo, edited marker, progress and error bars, save on close and shutdown, crash recovery. Engine requests: forget saved size and times after the app rewrites a file; keep EXIF on export; detect JPEG quality and WebP lossless to keep original quality. |
 | W2-4 to W2-7 | Not started |
 
 ## Open findings (verified, not fixed yet)
@@ -81,3 +81,14 @@ From the W2-1 verifier, 2026-10-07. Failing tests: `scratchpad/review-w2-1/repo`
 4. Minor. `actions.rs:107`: closing the sidebar leaves focus on a thumbnail, so arrow keys change pages. Fix: move focus to the document.
 5. Minor. A running pre-decode cannot be interrupted, so Right arrow in the first 200 ms can miss 50 ms. Fix: pre-decode the next image first, the previous one later.
 6. Simplify. `actions.rs:557` `civil()` re-implements `FileTimeToSystemTime`; `received()` deep-compares edit lists per tile (use `Arc::ptr_eq`).
+
+From the W1-C review, still open after branch `w1c-fix` (items 1 and 2 fixed: AI pack signature and hash checks, OCR column order):
+
+7. Minor. `src/background.rs` `run()`: check model output dimensions before indexing.
+8. Minor. `src/imaging.rs` size estimate: apply export limits (WebP 16383 px, 64 MP) before estimating.
+9. Minor. `src/imaging.rs` batch names: compare case-insensitively.
+10. Minor. `src/ocr.rs` `.min(4096)` cap shrinks tall screenshots (engine max is 10000 per side); 24 MP cut-outs rejected by the 64 MB frame cap.
+11. Minor. `THIRD-PARTY-NOTICES.md`: add libwebp-sys, libwebp (BSD-3 plus PATENTS), Snap, Depth Anything V2 Small caveat, AccessKit crates; remove BiRefNet lite.
+12. Minor. `src/imaging.rs` export drops ICC profiles.
+13. Simplify. One composite-onto-white helper; share `decode_memory` and `decode_edited` code; allow AI pack retry after a failed load; remove the `hevc_mft_experiment` test.
+14. Perf. Keep recently used PDF pages loaded across tiles. Harness: add next-image and scroll scenarios to the suite and gate.
