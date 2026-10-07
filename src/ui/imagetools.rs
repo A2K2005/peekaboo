@@ -335,7 +335,7 @@ fn options(format: ImageFormat, quality: usize) -> ExportOptions {
 /// A free "name (edited).ext" path beside `path`, for a save dialog.
 fn suggested(path: &Path, extension: &str) -> String {
     disk::copy_name(path, Some(OsStr::new(extension)))
-        .map(|p| p.display().to_string())
+        .map(|p| super::app::display_path(&p))
         .unwrap_or_else(|| format!("Edited copy.{extension}"))
 }
 
@@ -598,7 +598,7 @@ unsafe fn start_batch(hwnd: HWND, files: Vec<PathBuf>, output: Output, job: Batc
 
 unsafe fn show_summary(hwnd: HWND, summary: BatchSummary) {
     let files = if summary.saved == 1 { "file" } else { "files" };
-    let mut message = format!("{} new {files} in {}.", summary.saved, summary.folder.display());
+    let mut message = format!("{} new {files} in {}.", summary.saved, super::app::display_path(&summary.folder));
     if !summary.failed.is_empty() {
         message += &format!("\n\n{} could not be converted:", summary.failed.len());
         for line in summary.failed.iter().take(8) {

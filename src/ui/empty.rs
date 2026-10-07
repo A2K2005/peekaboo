@@ -1,7 +1,7 @@
 //! The empty window: Open, New from clipboard, a drop hint, and the recent
 //! files list. The list is one Tab stop; arrow keys move between rows.
 use super::{
-    app::{add_tabs, file_name, invalidate, open, with_state, State},
+    app::{add_tabs, display_path, file_name, invalidate, open, with_state, State},
     commands::Command,
     infobar,
     paint::Look,
@@ -178,10 +178,10 @@ pub(super) fn add(state: &State, layout: &mut Layout) {
         _ => 0,
     };
     for (index, path) in state.recent.iter().take(rows).enumerate() {
-        let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let folder = path.parent().map(display_path).unwrap_or_default();
         let rect = Rect::new(list_x, list_y + index as f32 * control, list_width, control);
         let mut row = plain_widget(WidgetId::Recent(index), Role::ListItem, Region::Document, rect, format!("{}, {folder}", file_name(path)));
-        row.tooltip = path.display().to_string();
+        row.tooltip = display_path(path);
         row.focusable = index == active && state.sheet.is_none();
         layout.widgets.push(row);
     }
@@ -208,7 +208,7 @@ pub(super) fn paint_recent(l: &Look, state: &State, layout: &Layout, list: Rect)
         let name = file_name(path);
         let name_width = (measure(&name, &l.f.body, inner.width()).0 + s).min(inner.width() * 0.6);
         l.p.text(&name, Rect { x1: inner.x0 + name_width, ..inner }, &l.f.body, l.t.text, Align::Leading);
-        let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let folder = path.parent().map(display_path).unwrap_or_default();
         l.p.text(&folder, Rect { x0: inner.x0 + name_width + 16.0 * s, ..inner }, &l.f.caption, l.t.text_secondary, Align::Leading);
     }
     if !any {

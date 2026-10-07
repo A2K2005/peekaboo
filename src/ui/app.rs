@@ -30,9 +30,7 @@ use windows::{
 
 pub(super) const EMPTY_STATUS: &str = "Open a PDF or image with Ctrl+O.";
 const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
-/// Fluent "fast" duration for entering and exiting elements.
-/// https://learn.microsoft.com/windows/apps/design/motion/timing-and-easing
-const SLIDE: Duration = Duration::from_millis(167);
+const SLIDE: Duration = super::theme::motion::FAST;
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
 
 /// Linear slide progress from `from` toward open (1) or closed (0).
@@ -255,10 +253,19 @@ pub(super) struct State {
     pub(super) maximized: bool,
     pub(super) active: bool,
     pub(super) sidebar_open: bool,
+    /// Index into `widgets::SIDEBAR_TABS`.
     pub(super) sidebar_tab: usize,
-    /// Scroll offset and last used row of each sidebar tab.
-    pub(super) sidebar_scroll: [f32; 3],
-    pub(super) sidebar_rows: [usize; 3],
+    /// Scroll offset and last used row of each sidebar view.
+    pub(super) sidebar_scroll: [f32; 4],
+    pub(super) sidebar_rows: [usize; 4],
+    /// Sidebar width in epx, and the pointer dragging its edge.
+    pub(super) sidebar_width: f32,
+    pub(super) sidebar_resize: Option<u32>,
+    /// Whether each PDF had its sidebar open, so switching tabs keeps it.
+    pub(super) sidebars: HashMap<PathBuf, bool>,
+    /// Full screen hides the bar until the pointer reaches the top edge.
+    pub(super) full_screen: bool,
+    pub(super) bar_peek: bool,
     pub(super) organize: super::organize::Organize,
     pub(super) markup_open: bool,
     /// Markup bar slide: when it started and the progress it started from.
@@ -308,6 +315,19 @@ pub(super) fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 
 pub(super) fn file_name(path: &std::path::Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// A path as people write it. `fs::canonicalize` returns verbatim paths
+/// (`\\?\C:\...`, `\\?\UNC\server\share`), which Explorer never shows.
+pub(super) fn display_path(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => rest.to_string(),
+        },
+        None => text,
+    }
 }
 
 impl State {
@@ -377,8 +397,13 @@ impl State {
             active: true,
             sidebar_open: false,
             sidebar_tab: 0,
-            sidebar_scroll: [0.0; 3],
-            sidebar_rows: [0; 3],
+            sidebar_scroll: [0.0; 4],
+            sidebar_rows: [0; 4],
+            sidebar_width: super::theme::size::SIDEBAR,
+            sidebar_resize: None,
+            sidebars: HashMap::new(),
+            full_screen: false,
+            bar_peek: false,
             organize: Default::default(),
             markup_open: false,
             markup_since: None,
@@ -418,8 +443,8 @@ impl State {
             save.edited(now);
         }
     }
+    /// Save state shows in the editor bar, so nothing here touches `status`.
     fn autosaved(&mut self, event: Autosaved) -> bool {
-        let active = self.path.as_ref() == Some(&event.path);
         let Some(save) = self.saves.get_mut(&event.path) else {
             return false;
         };
@@ -430,16 +455,6 @@ impl State {
             if let Some(edits) = self.sessions.get_mut(&event.path) {
                 edits.dirty = false;
             }
-        }
-        if active {
-            self.status = match &save.status {
-                SaveStatus::Saved => "Saved".into(),
-                SaveStatus::Edited => "Edited".into(),
-                SaveStatus::Conflict => "Autosave paused because the file changed outside Preview.".into(),
-                SaveStatus::Failed(error) => format!("Save failed: {error}"),
-                SaveStatus::Saving => "Saving...".into(),
-                SaveStatus::Clean => self.status.clone(),
-            };
         }
         super::infobar::save_problem(self, &event.path);
         true
@@ -458,7 +473,7 @@ impl State {
             return Some(Command::PlaceSignature);
         }
         let kind = self.markup?;
-        commands::MARKUP_TOOLS.iter().copied().find(|c| commands::annotation(*c) == Some(kind))
+        commands::ALL.iter().copied().find(|c| commands::annotation(*c) == Some(kind))
     }
     fn markup_progress(&self) -> f32 {
         match self.markup_since {
@@ -467,8 +482,16 @@ impl State {
             None => 0.0,
         }
     }
-    /// Opens or closes the markup bar with a slide.
+    /// Opens or closes the markup bar with a slide. Closing it also turns
+    /// off its tool, so a later drag selects text instead of marking.
     pub(super) fn set_markup(&mut self, open: bool) {
+        if !open {
+            self.markup = None;
+            self.signature = None;
+            self.ink.clear();
+            self.crop = false;
+            self.tools.crop = None;
+        }
         if open != self.markup_open {
             self.markup_from = self.markup_progress();
             self.markup_open = open;
@@ -494,13 +517,32 @@ impl State {
             can_next: !pdf || self.page + 1 < self.page_count(),
             tabs: self.tabs.len(),
             sidebar_open: self.sidebar_visible(),
+            sidebar_tab: self.sidebar_tab,
             markup_open: self.markup_open,
+            full_screen: self.full_screen,
             crop: self.crop,
             tool: self.tool(),
             zoom: self.zoom,
             view: self.view_mode,
             zoom_select: self.zoom_select,
+            can_undo: self
+                .path
+                .as_ref()
+                .and_then(|path| self.sessions.get(path))
+                .is_some_and(|edits| !edits.image.is_empty() || !edits.pdf.is_empty()),
         }
+    }
+    /// The editor bar's second line: the page count of a PDF and whether
+    /// edits are still saving.
+    pub(super) fn title_detail(&self) -> String {
+        let page = if self.is_pdf() { self.subtitle() } else { String::new() };
+        let save = match self.path.as_ref().and_then(|path| self.saves.get(path)).map(|save| &save.status) {
+            Some(SaveStatus::Edited | SaveStatus::Saving) => "Edited",
+            Some(SaveStatus::Conflict) => "Autosave paused",
+            Some(SaveStatus::Failed(_)) => "Not saved",
+            _ => "",
+        };
+        [page.as_str(), save].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ")
     }
     /// "Page 3 of 20" or "1920 × 1080 pixels".
     pub(super) fn subtitle(&self) -> String {
@@ -509,19 +551,6 @@ impl State {
             (None, Some(frame)) if self.is_pdf() => format!("Page {} of {}", self.page + 1, frame.page_count),
             (None, Some(frame)) => format!("{} × {} pixels", frame.source_width, frame.source_height),
             _ => String::new(),
-        }
-    }
-    pub(super) fn visible_status(&self) -> String {
-        let Some(save) = self.path.as_ref().and_then(|path| self.saves.get(path)) else {
-            return self.status.clone();
-        };
-        match &save.status {
-            SaveStatus::Clean => self.status.clone(),
-            SaveStatus::Edited => "Edited".into(),
-            SaveStatus::Saving => "Saving...".into(),
-            SaveStatus::Saved => "Saved".into(),
-            SaveStatus::Conflict => "Autosave paused because the file changed outside Preview.".into(),
-            SaveStatus::Failed(error) => format!("Save failed: {error}"),
         }
     }
     pub(super) fn tab_close_state(&self, path: &PathBuf) -> (bool, bool) {
@@ -587,6 +616,7 @@ impl State {
         };
         match self.sidebar_tab {
             0 => SidebarList::Thumbnails(&v.sizes),
+            widgets::SHEET_TAB => SidebarList::Sheet(&v.sizes),
             1 => match &v.outline {
                 Some(Ok(items)) if !items.is_empty() => SidebarList::Contents(items),
                 Some(Ok(_)) => SidebarList::Message("No contents"),
@@ -634,19 +664,25 @@ impl State {
             tabs: &titles,
             active_tab: self.active_tab(),
             maximized: self.maximized,
+            chrome: !self.full_screen || self.bar_peek,
             has_document: self.path.is_some(),
             title: &label,
             sidebar_open: self.sidebar_visible(),
+            sidebar_width: self.sidebar_width,
             sidebar_tab: self.sidebar_tab,
             sidebar_list: self.sidebar_list(),
-            sidebar_scroll: self.sidebar_scroll[self.sidebar_tab.min(2)],
-            sidebar_active: if self.sidebar_tab == 0 { self.page as usize } else { self.sidebar_rows[self.sidebar_tab.min(2)] },
+            sidebar_scroll: self.sidebar_scroll[self.sidebar_tab.min(3)],
+            sidebar_active: if matches!(self.sidebar_tab, 0 | widgets::SHEET_TAB) {
+                self.page as usize
+            } else {
+                self.sidebar_rows[self.sidebar_tab.min(3)]
+            },
             markup: ease(self.markup_progress()),
             ctx: self.ctx(),
             sheet,
         });
-        super::empty::add(self, &mut layout);
         super::infobar::add(self, &mut layout);
+        super::empty::add(self, &mut layout);
         super::findbar::add(self, &mut layout);
         layout
     }
@@ -933,6 +969,8 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                                     v.reveal = Some(state.page);
                                 }
                                 None => {
+                                    // Preview opens the sidebar for multi-page PDFs only.
+                                    state.sidebar_open = state.sidebars.get(&opened.path).copied().unwrap_or(sizes.len() > 1);
                                     state.pdf = Some(PdfView::new(opened.path, sizes, opened.edits, state.page));
                                     state.frame = None;
                                     if let Some(renderer) = state.renderer.as_mut() {

@@ -103,7 +103,7 @@ Mac behavior marked "observed" is from use, not from Apple docs, so it is unveri
 | [ ] | Remove background | Shift-Cmd-K | Ctrl+Shift+K | None |
 | [ ] | Inspector | Cmd-I | Ctrl+I | None |
 | [ ] | Tabs | Control-Tab; tabs only when windows merge | Ctrl+Tab; tab strip only with 2+ documents | None |
-| [ ] | Autosave | Saves as you work | Saves as you work after one first-edit choice | PRD and D19 keep first-edit consent; owner approval needed to drop it |
+| [ ] | Autosave | Saves as you work | Saves as you work; a file Preview cannot write asks where to save a copy | Owner dropped the first-edit consent on Oct 7, 2026 |
 | [ ] | Versions | Browse All Versions | Revert to opened only | Windows has no per-document version store |
 | [ ] | Status bar | None | None | None |
 | [ ] | Window size | Fits content; last state remembered (observed) | Fits content; remember zoom, page, sidebar per file | None |

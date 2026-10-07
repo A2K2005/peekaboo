@@ -8,7 +8,7 @@ use windows::{
             Dwm::*,
             Gdi::{COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX},
         },
-        System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
+        System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RegGetValueW},
         UI::{
             Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
             Controls::MARGINS,
@@ -89,8 +89,33 @@ pub(super) struct Theme {
     pub(super) border_width: f32,
 }
 
-/// Values follow the Fluent 2 Windows color tokens (SolidBackgroundFillColorBase,
-/// TextFillColorPrimary, SubtleFillColorSecondary, AccentFillColorDefault).
+/// Sizes in epx from docs/quicklook-spec.md section 5.
+pub(super) mod size {
+    pub(in crate::ui) const BAR: f32 = 48.0;
+    pub(in crate::ui) const BAR_PAD: f32 = 12.0;
+    pub(in crate::ui) const BAR_BUTTON: f32 = 36.0;
+    pub(in crate::ui) const BAR_GAP: f32 = 4.0;
+    pub(in crate::ui) const GROUP_GAP: f32 = 12.0;
+    pub(in crate::ui) const MARKUP_BAR: f32 = 40.0;
+    pub(in crate::ui) const MARKUP_BUTTON: f32 = 32.0;
+    pub(in crate::ui) const SIDEBAR: f32 = 200.0;
+    pub(in crate::ui) const SIDEBAR_MIN: f32 = 140.0;
+    pub(in crate::ui) const SIDEBAR_MAX: f32 = 480.0;
+    pub(in crate::ui) const TOAST: f32 = 32.0;
+    pub(in crate::ui) const TOAST_MARGIN: f32 = 16.0;
+}
+
+/// Fluent's "fast" duration for entering and exiting elements, and how long
+/// a toast stays.
+/// https://learn.microsoft.com/windows/apps/design/motion/timing-and-easing
+pub(super) mod motion {
+    use std::time::Duration;
+    pub(in crate::ui) const FAST: Duration = Duration::from_millis(167);
+    pub(in crate::ui) const TOAST: Duration = Duration::from_secs(2);
+}
+
+/// Canvas, bar, text, and border values come from docs/quicklook-spec.md
+/// section 5; the rest follow the Fluent 2 Windows color tokens.
 /// https://learn.microsoft.com/windows/apps/design/style/color
 pub(super) fn palette(mode: Mode) -> Theme {
     match mode {
@@ -98,21 +123,21 @@ pub(super) fn palette(mode: Mode) -> Theme {
             mode,
             mica: false,
             chrome: Rgba::hex(0xf3f3f3),
-            bar: Rgba::hex(0xffffff),
+            bar: Rgba::hex(0xffffff).alpha(0.85),
             surface: Rgba::hex(0xf9f9f9),
             content_layer: Rgba::hex(0xf9f9f9),
-            canvas: Rgba::hex(0xe7e7e7),
-            text: Rgba::hex(0x1b1b1b),
-            text_secondary: Rgba::hex(0x5f5f5f),
+            canvas: Rgba::hex(0xf3f3f3),
+            text: Rgba::hex(0x1a1a1a),
+            text_secondary: Rgba::hex(0x5c5c5c),
             text_disabled: Rgba::hex(0xa0a0a0),
             hover: Rgba(0.0, 0.0, 0.0, 0.06),
-            hover_text: Rgba::hex(0x1b1b1b),
+            hover_text: Rgba::hex(0x1a1a1a),
             pressed: Rgba(0.0, 0.0, 0.0, 0.035),
             selected: Rgba::hex(0xffffff),
-            selected_text: Rgba::hex(0x1b1b1b),
+            selected_text: Rgba::hex(0x1a1a1a),
             accent: Rgba::hex(0x005fb8),
             on_accent: Rgba::hex(0xffffff),
-            divider: Rgba(0.0, 0.0, 0.0, 0.1),
+            divider: Rgba(0.0, 0.0, 0.0, 0.08),
             control_border: Rgba(0.0, 0.0, 0.0, 0.14),
             border: Rgba::hex(0xd9d9d9),
             image_outline: Rgba(0.0, 0.0, 0.0, 0.12),
@@ -128,12 +153,12 @@ pub(super) fn palette(mode: Mode) -> Theme {
             mode,
             mica: false,
             chrome: Rgba::hex(0x202020),
-            bar: Rgba::hex(0x2b2b2b),
+            bar: Rgba::hex(0x2b2b2b).alpha(0.85),
             surface: Rgba::hex(0x2c2c2c),
             content_layer: Rgba::hex(0x272727),
-            canvas: Rgba::hex(0x151515),
-            text: Rgba::hex(0xf5f5f5),
-            text_secondary: Rgba::hex(0xc8c8c8),
+            canvas: Rgba::hex(0x1c1c1c),
+            text: Rgba::hex(0xffffff),
+            text_secondary: Rgba::hex(0xc5c5c5),
             text_disabled: Rgba::hex(0x777777),
             hover: Rgba(1.0, 1.0, 1.0, 0.07),
             hover_text: Rgba::hex(0xffffff),
@@ -234,7 +259,40 @@ pub(super) fn current() -> Theme {
         let sys = |i: SYS_COLOR_INDEX| unsafe { Rgba::from_colorref(GetSysColor(i)) };
         return contrast([sys(COLOR_WINDOW), sys(COLOR_WINDOWTEXT), sys(COLOR_HIGHLIGHT), sys(COLOR_HIGHLIGHTTEXT), sys(COLOR_GRAYTEXT)]);
     }
-    palette(mode)
+    let mut theme = palette(mode);
+    if let Some(accent) = system_accent(mode) {
+        theme.accent = accent;
+    }
+    theme
+}
+
+/// The user's accent color in the shade WinUI uses for accent fills:
+/// SystemAccentColorDark1 on light, SystemAccentColorLight2 on dark. The
+/// AccentPalette value holds 8 RGBA shades from Light3 to Dark3 (layout
+/// unverified against Microsoft docs; it is what Windows Settings writes).
+fn system_accent(mode: Mode) -> Option<Rgba> {
+    let index = match mode {
+        Mode::Light => 4,
+        Mode::Dark => 1,
+        Mode::Contrast => return None,
+    };
+    let mut bytes = [0u8; 32];
+    let mut size = bytes.len() as u32;
+    unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
+            w!("AccentPalette"),
+            RRF_RT_REG_BINARY,
+            None,
+            Some(bytes.as_mut_ptr() as _),
+            Some(&mut size),
+        )
+    }
+    .ok()
+    .ok()?;
+    let [r, g, b, _]: [u8; 4] = bytes.get(index * 4..index * 4 + 4).filter(|_| size as usize >= bytes.len())?.try_into().ok()?;
+    Some(Rgba::hex(u32::from_be_bytes([0, r, g, b])))
 }
 
 /// Windows "Animation effects" setting; apps skip motion when it is off.

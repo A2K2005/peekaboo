@@ -35,6 +35,8 @@ const WM_APP_TEXT_SCALE: u32 = WM_APP + 3;
 
 thread_local! {
     static SETTINGS: RefCell<Option<UISettings>> = const { RefCell::new(None) };
+    /// The window's place before full screen.
+    static PLACEMENT: RefCell<Option<WINDOWPLACEMENT>> = const { RefCell::new(None) };
 }
 
 pub fn run() -> Result<()> {
@@ -171,6 +173,10 @@ unsafe fn frame_thickness(hwnd: HWND) -> i32 {
 /// snapping, and shadows stay native.
 /// https://learn.microsoft.com/windows/win32/dwm/customframe
 unsafe fn nc_calc_size(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    if PLACEMENT.with(|p| p.borrow().is_some()) {
+        // Full screen: the client area is the whole window.
+        return LRESULT(0);
+    }
     let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
     let top = params.rgrc[0].top;
     DefWindowProcW(hwnd, WM_NCCALCSIZE, WPARAM(1), lparam);
@@ -208,7 +214,11 @@ unsafe fn nc_hit_test(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let mut point = lparam_point(lparam);
     let _ = ScreenToClient(hwnd, &mut point);
     let border = frame_thickness(hwnd) as f32;
-    let code = with_state(|s| hit_code(&s.layout(), point.x as f32, point.y as f32, s.maximized, border));
+    let code = with_state(|s| match hit_code(&s.layout(), point.x as f32, point.y as f32, s.maximized || s.full_screen, border) {
+        // A full-screen window does not move.
+        HTCAPTION if s.full_screen => HTCLIENT,
+        code => code,
+    });
     LRESULT(code.unwrap_or(HTCLIENT) as isize)
 }
 
@@ -287,10 +297,7 @@ pub(super) unsafe fn activate(hwnd: HWND, id: WidgetId, keyboard: bool) {
         WidgetId::Command(command) => actions::execute(hwnd, command, keyboard),
         WidgetId::Minimize | WidgetId::Maximize | WidgetId::Close => caption_command(hwnd, id),
         WidgetId::SidebarTab(index) => {
-            with_state(|s| {
-                s.sidebar_tab = index;
-                sidebar::follow_page(s);
-            });
+            with_state(|s| sidebar::show(s, index));
         }
         WidgetId::SidebarItem(index) => {
             with_state(|s| sidebar::activate(s, index));
@@ -357,13 +364,94 @@ unsafe fn read_pointer(hwnd: HWND, message: u32, wparam: WPARAM) -> Option<(Poin
     Some((event, change == POINTER_CHANGE_SECONDBUTTON_UP))
 }
 
+/// Drags of the sidebar's edge, and the bar showing at the top edge in full
+/// screen. Returns true when the event resized the sidebar.
+unsafe fn chrome_pointer(hwnd: HWND, e: &PointerEvent) -> bool {
+    let Some((resized, repaint)) = with_state(|s| {
+        let layout = s.layout();
+        let mut repaint = false;
+        if s.full_screen && s.sidebar_resize.is_none() {
+            let edge = if s.bar_peek { layout.tab_strip.map_or(layout.title_bar.y1, |r| r.y1) } else { 2.0 * s.scale };
+            let peek = e.y < edge;
+            if peek != s.bar_peek {
+                s.bar_peek = peek;
+                s.due = Some(Instant::now() + document::SETTLE);
+                repaint = true;
+            }
+        }
+        let on_edge = s.sheet.is_none() && layout.sidebar_edge.is_some_and(|r| r.contains(e.x, e.y));
+        let resized = match (e.phase, s.sidebar_resize) {
+            (Phase::Down, None) if on_edge => {
+                s.sidebar_resize = Some(e.id);
+                true
+            }
+            (Phase::Move, Some(id)) if id == e.id => {
+                sidebar::resize(s, e.x);
+                true
+            }
+            (Phase::Up | Phase::Cancel, Some(id)) if id == e.id => {
+                s.sidebar_resize = None;
+                s.due = Some(Instant::now() + document::SETTLE);
+                true
+            }
+            _ => false,
+        };
+        (resized, repaint || resized)
+    }) else {
+        return false;
+    };
+    match e.phase {
+        Phase::Down if resized => {
+            SetCapture(hwnd);
+        }
+        Phase::Up | Phase::Cancel if resized => {
+            let _ = ReleaseCapture();
+        }
+        _ => {}
+    }
+    if repaint {
+        invalidate(hwnd);
+    }
+    resized
+}
+
+/// F11: the window covers its monitor without a frame, and back. The
+/// placement before full screen is restored on the way out.
+/// https://devblogs.microsoft.com/oldnewthing/20100412-00/?p=14353
+pub(super) unsafe fn toggle_full_screen(hwnd: HWND) {
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    let overlapped = WS_OVERLAPPEDWINDOW.0 as isize;
+    match PLACEMENT.with(|p| p.borrow_mut().take()) {
+        Some(placement) => {
+            with_state(|s| s.full_screen = false);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style | overlapped);
+            let _ = SetWindowPlacement(hwnd, &placement);
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+        }
+        None => {
+            let mut placement = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            let mut monitor = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetWindowPlacement(hwnd, &mut placement).is_err() || !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut monitor).as_bool() {
+                return;
+            }
+            PLACEMENT.with(|p| *p.borrow_mut() = Some(placement));
+            with_state(|s| s.full_screen = true);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style & !overlapped);
+            let r = monitor.rcMonitor;
+            let _ = SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+        }
+    }
+    with_state(|s| s.bar_peek = false);
+    invalidate(hwnd);
+}
+
 /// Routes one pointer event to the sheet, a widget, or the document.
 unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
     if secondary_up {
         actions::context_menu(hwnd, Some((e.x, e.y)));
         return;
     }
-    if super::organize::pointer(hwnd, &e) {
+    if chrome_pointer(hwnd, &e) || super::organize::pointer(hwnd, &e) {
         return;
     }
     let mut activate_id = None;
@@ -572,6 +660,10 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
         }
         with_state(|s| s.keytips = None);
         invalidate(hwnd);
+    }
+    if vk == VK_ESCAPE.0 && with_state(|s| s.full_screen) == Some(true) {
+        toggle_full_screen(hwnd);
+        return true;
     }
     if vk == VK_TAB.0 && !ctrl && !alt {
         with_state(|s| {
@@ -817,13 +909,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
                 return LRESULT(1);
             }
             let mut point = POINT::default();
-            let text = GetCursorPos(&mut point).is_ok() && ScreenToClient(hwnd, &mut point).as_bool() && with_state(|s| {
-                document::text_point(s, point.x as f32, point.y as f32).is_some_and(|(page, at, size)| {
-                    s.text_layers.get(&page).is_some_and(|layer| super::text::over_text(layer, at, size))
-                })
-            }) == Some(true);
-            if text {
-                let _ = SetCursor(Some(LoadCursorW(None, IDC_IBEAM).unwrap_or_default()));
+            let at = GetCursorPos(&mut point).is_ok() && ScreenToClient(hwnd, &mut point).as_bool();
+            let (x, y) = (point.x as f32, point.y as f32);
+            let edge = at
+                && with_state(|s| s.sidebar_resize.is_some() || s.layout().sidebar_edge.is_some_and(|r| r.contains(x, y))) == Some(true);
+            let text = at
+                && !edge
+                && with_state(|s| {
+                    document::text_point(s, x, y).is_some_and(|(page, at, size)| {
+                        s.text_layers.get(&page).is_some_and(|layer| super::text::over_text(layer, at, size))
+                    })
+                }) == Some(true);
+            if edge || text {
+                let _ = SetCursor(Some(LoadCursorW(None, if edge { IDC_SIZEWE } else { IDC_IBEAM }).unwrap_or_default()));
                 LRESULT(1)
             } else {
                 DefWindowProcW(hwnd, message, wparam, lparam)
@@ -996,7 +1094,7 @@ mod tests {
     }
 
     fn layout(maximized: bool) -> Layout {
-        let tabs = vec!["a.pdf".to_string()];
+        let tabs = vec!["a.pdf".to_string(), "b.pdf".to_string()];
         widgets::layout(&widgets::Input {
             width: 1000.0,
             height: 700.0,
@@ -1005,9 +1103,11 @@ mod tests {
             tabs: &tabs,
             active_tab: Some(0),
             maximized,
+            chrome: true,
             has_document: true,
             title: "a.pdf",
             sidebar_open: false,
+            sidebar_width: theme::size::SIDEBAR,
             sidebar_tab: 0,
             sidebar_list: widgets::SidebarList::Message(""),
             sidebar_scroll: 0.0,
@@ -1025,10 +1125,11 @@ mod tests {
         assert_eq!(hit_code(&l, max.x0 + 5.0, 20.0, false, 8.0), HTMAXBUTTON);
         assert_eq!(hit_code(&l, 995.0, 20.0, false, 8.0), HTCLOSE);
         assert_eq!(hit_code(&l, max.x0 - 20.0, 20.0, false, 8.0), HTMINBUTTON);
-        assert_eq!(hit_code(&l, 30.0, 20.0, false, 8.0), HTCLIENT, "a tab");
-        assert_eq!(hit_code(&l, 600.0, 20.0, false, 8.0), HTCAPTION, "empty title bar drags");
-        assert_eq!(hit_code(&l, 600.0, 3.0, false, 8.0), HTTOP, "top resize border");
-        assert_eq!(hit_code(&l, 600.0, 3.0, true, 8.0), HTCAPTION, "no resize border when maximized");
+        assert_eq!(hit_code(&l, 30.0, l.tab_strip.unwrap().y0 + 10.0, false, 8.0), HTCLIENT, "a tab");
+        assert_eq!(hit_code(&l, 30.0, 20.0, false, 8.0), HTCLIENT, "the sidebar button");
+        assert_eq!(hit_code(&l, 300.0, 20.0, false, 8.0), HTCAPTION, "the title drags the window");
+        assert_eq!(hit_code(&l, 300.0, 3.0, false, 8.0), HTTOP, "top resize border");
+        assert_eq!(hit_code(&l, 300.0, 3.0, true, 8.0), HTCAPTION, "no resize border when maximized");
         assert_eq!(hit_code(&l, 500.0, 400.0, false, 8.0), HTCLIENT);
     }
 

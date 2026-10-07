@@ -4,7 +4,7 @@ use super::{
     commands::{self, Command, MenuItem, Pick},
     document,
     files::{choose, choose_many, destination},
-    disk::{self, Choice}, menu, sheet,
+    disk, menu, sheet,
     view::{ViewMode, Zoom},
     widgets::{self, WidgetId},
     worker::{Job, Request, SaveKind},
@@ -49,10 +49,18 @@ fn relayout(state: &mut super::app::State) {
 }
 
 fn toggle_sidebar(state: &mut super::app::State) {
+    set_sidebar(state, !state.sidebar_open);
+}
+
+/// Shows or hides the PDF sidebar and remembers the choice for this file.
+fn set_sidebar(state: &mut super::app::State, open: bool) {
     if state.path.is_some() && !state.is_pdf() {
         return;
     }
-    state.sidebar_open = !state.sidebar_open;
+    state.sidebar_open = open;
+    if let Some(path) = state.path.clone() {
+        state.sidebars.insert(path, open);
+    }
     if !state.sidebar_open && matches!(state.focus, Some(WidgetId::SidebarTab(_) | WidgetId::SidebarItem(_))) {
         let layout = state.layout();
         state.focus = [WidgetId::Document, WidgetId::Command(Command::Open), WidgetId::Command(Command::ToggleSidebar)]
@@ -107,7 +115,6 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
                 match command {
                     NextTab => (current + 1) % count,
                     PreviousTab => (current + count - 1) % count,
-                    Tab(8) => count - 1,
                     Tab(n) => n as usize,
                     _ => current,
                 }
@@ -121,16 +128,23 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
             navigate(hwnd, if command == Previous { -1 } else { 1 });
             return;
         }
-        ToggleSidebar | ToggleMarkup => {
-            with_state(|s| {
-                if command == ToggleSidebar {
-                    toggle_sidebar(s);
-                } else {
-                    // The document renders again when the slide ends (tick).
-                    s.set_markup(!s.markup_open);
+        ToggleSidebar | ToggleMarkup | SidebarHide | SidebarThumbnails | SidebarContents | SidebarNotes | SidebarSheet => {
+            with_state(|s| match command {
+                ToggleSidebar => toggle_sidebar(s),
+                SidebarHide => set_sidebar(s, false),
+                // The document renders again when the slide ends (tick).
+                ToggleMarkup => s.set_markup(!s.markup_open),
+                mode => {
+                    let index = commands::SIDEBAR_MODES.iter().position(|m| *m == mode).unwrap_or(0);
+                    set_sidebar(s, true);
+                    super::sidebar::show(s, index);
                 }
             });
             invalidate(hwnd);
+            return;
+        }
+        FullScreen => {
+            super::window::toggle_full_screen(hwnd);
             return;
         }
         NextPane | PreviousPane => {
@@ -143,16 +157,16 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
             invalidate(hwnd);
             return;
         }
-        ZoomMenu | AppMenu | MoreTools => {
+        AppMenu | MoreTools | ShapesMenu | HighlightMenu | SignMenu => {
             let overflow = with_state(|s| {
                 let layout = s.layout();
                 (layout.toolbar_overflow, layout.markup_overflow)
             })
             .unwrap_or_default();
             let items = match command {
-                ZoomMenu => commands::zoom_menu(&ctx),
                 AppMenu => commands::app_menu(&ctx, &overflow.0),
-                _ => commands::markup_overflow_menu(&overflow.1, &ctx),
+                MoreTools => commands::markup_overflow_menu(&overflow.1, &ctx),
+                _ => commands::tool_menu(command, &ctx),
             };
             if let Some(Pick::Command(chosen)) = popup(hwnd, items, Some(WidgetId::Command(command)), None, keyboard) {
                 execute(hwnd, chosen, keyboard);
@@ -254,6 +268,16 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
         PlaceSignature | Draw | Highlight | Underline | Strikethrough | Note | TextBox | Rectangle | Ellipse | Arrow => {
             choose_tool(hwnd, command)
         }
+        SelectText => {
+            with_state(|s| {
+                s.markup = None;
+                s.signature = None;
+                s.crop = false;
+                s.tools.crop = None;
+                s.zoom_select = false;
+            });
+            invalidate(hwnd);
+        }
         SaveCopy | ExtractPage | Combine => {
             let kind = match command {
                 ExtractPage => SaveKind::ExtractPage,
@@ -320,7 +344,7 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
                 || !sheet::confirm(
                     hwnd,
                     "Delete this page?",
-                    "The page is removed from your working copy. The original file stays unchanged until you save a copy.",
+                    "The page is removed and the file saves automatically. Revert to opened brings it back.",
                     "Delete page",
                 )
             {
@@ -442,14 +466,8 @@ pub(super) unsafe fn edit_same_page(hwnd: HWND, request: &Request, change: impl 
     edit(hwnd, change);
 }
 
-fn choice_from_button(button: usize) -> Option<(Choice, bool)> {
-    match button {
-        0 => Some((Choice::Overwrite, false)),
-        1 => Some((Choice::Copy, false)),
-        _ => None,
-    }
-}
-
+/// Points autosave at the file itself on the first edit. A file Preview
+/// cannot write asks where to save a copy instead.
 pub(super) unsafe fn prepare_save(hwnd: HWND, path: &std::path::Path) -> bool {
     let Some((session_id, opened, configured)) = with_state(|s| {
         s.saves.get(path).map(|save| (save.id, save.opened, save.target.is_some()))
@@ -462,80 +480,26 @@ pub(super) unsafe fn prepare_save(hwnd: HWND, path: &std::path::Path) -> bool {
     if configured {
         return true;
     }
-
-    let preference_dir = disk::app_dir();
-    let mut remembered = preference_dir.as_deref().and_then(disk::remembered);
-    if remembered == Some(Choice::Overwrite) && disk::can_overwrite(path).is_err() {
-        if let Some(dir) = &preference_dir {
-            let _ = disk::remember(dir, None);
-        }
-        remembered = None;
-    }
-    let (choice, remember) = match remembered {
-        Some(choice) => (choice, false),
-        None => {
-            let message = format!("Choose how Preview should save edits to {}.", super::app::file_name(path));
-            let Some((button, _)) = sheet::ask(
-                hwnd,
-                "Save edits",
-                &message,
-                &[],
-                false,
-                &["Overwrite", "Save copy"],
-                usize::MAX,
-                Some(1),
-            ) else {
-                return false;
-            };
-            let Some(choice) = choice_from_button(button) else {
-                return false;
-            };
-            let remember = sheet::ask(
-                hwnd,
-                "Remember this choice?",
-                "Preview can use this choice automatically the next time you edit a file.",
-                &[],
-                false,
-                &["Remember", "This file only"],
-                usize::MAX,
-                Some(1),
-            )
-            .is_some_and(|(button, _)| button == 0);
-            (choice.0, remember)
-        }
-    };
-
-    let (target, expected) = match choice {
-        Choice::Overwrite => {
-            if let Err(error) = disk::can_overwrite(path) {
-                sheet::alert(hwnd, "Cannot overwrite this file", &format!("{error} Choose Save a copy instead."));
+    let (target, expected) = match disk::can_overwrite(path) {
+        Ok(()) => (path.to_path_buf(), Some(opened)),
+        Err(error) => {
+            let message = format!("{error} Choose where to save a copy with your edits.");
+            if !sheet::confirm(hwnd, "Save edits to a copy", &message, "Choose location") {
                 return false;
             }
-            (path.to_path_buf(), Some(opened))
-        }
-        Choice::Copy => {
-            let Some(target) = disk::copy_name(path, None) else {
-                sheet::alert(hwnd, "Cannot save a copy", "Choose a file inside a writable folder.");
+            let Some(target) = destination(hwnd, super::worker::is_pdf(path)) else {
                 return false;
             };
             (target, None)
         }
     };
-    let configured = with_state(|s| {
+    with_state(|s| {
         let Some(save) = s.saves.get_mut(path).filter(|save| save.id == session_id) else {
             return false;
         };
         save.configure(target, expected);
         true
-    }) == Some(true);
-    if configured && remember {
-        if let Some(dir) = preference_dir {
-            if let Err(error) = disk::remember(&dir, Some(choice)) {
-                sheet::alert(hwnd, "Choice not remembered", &format!("Preview will use this choice once. {error}"));
-            }
-        }
-    }
-    configured
+    }) == Some(true)
 }
 
 pub(super) unsafe fn resolve_save_conflict(hwnd: HWND, path: std::path::PathBuf) {
@@ -658,7 +622,10 @@ unsafe fn choose_tool(hwnd: HWND, command: Command) {
         s.markup = Some(kind);
         s.markup_text = text;
         s.signature = None;
-        s.set_markup(true);
+        // The bar's Highlight button works without the markup bar, as in Preview.
+        if command != Command::Highlight {
+            s.set_markup(true);
+        }
         s.status = if kind == AnnotationKind::Text {
             "Click where the text goes, or click a text box to change it. Escape returns to navigation."
         } else {
@@ -748,7 +715,7 @@ fn image_info(path: &std::path::Path, width: u32, height: u32) -> String {
             ("File size", meta.as_ref().map(|m| file_size(m.len())).unwrap_or_default()),
             ("Created", meta.as_ref().map(|m| local_time(m.created())).unwrap_or_default()),
             ("Modified", meta.as_ref().map(|m| local_time(m.modified())).unwrap_or_default()),
-            ("Folder", path.parent().map(|p| p.display().to_string()).unwrap_or_default()),
+            ("Folder", path.parent().map(super::app::display_path).unwrap_or_default()),
         ],
     )
 }
@@ -835,13 +802,6 @@ pub(super) unsafe fn context_menu(hwnd: HWND, at: Option<(f32, f32)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn first_edit_buttons_encode_choice_and_memory_explicitly() {
-        assert_eq!(choice_from_button(0), Some((Choice::Overwrite, false)));
-        assert_eq!(choice_from_button(1), Some((Choice::Copy, false)));
-        assert_eq!(choice_from_button(2), None);
-    }
 
     #[test]
     fn closing_sidebar_rehomes_focus_without_stealing_other_focus() {
