@@ -75,7 +75,7 @@ pub fn recognize_layer(path: &Path, edits: &[ImageEdit]) -> Result<TextLayer, St
         .map_err(|e| format!("Windows could not return the recognized text: {e}"))?;
     lines.retain(|(text, _)| !text.is_empty());
     let mut layer = TextLayer::default();
-    for (text, boxes) in reading_order(lines) {
+    for (text, boxes) in reading_order(lines, width, height) {
         if let Some(last) = layer.boxes.last().copied() {
             layer.text.push('\n');
             layer.boxes.push([last[2], last[1], last[2], last[3]]);
@@ -86,33 +86,39 @@ pub fn recognize_layer(path: &Path, edits: &[ImageEdit]) -> Result<TextLayer, St
     Ok(layer)
 }
 
-/// Lines top to bottom. A line whose middle falls inside the previous line's
-/// height shares its row, and a row reads left to right.
-fn reading_order(mut lines: Vec<(String, Vec<NormRect>)>) -> Vec<(String, Vec<NormRect>)> {
-    let extent = |boxes: &[NormRect]| {
-        boxes
-            .iter()
-            .fold((f32::MAX, f32::MIN), |(t, b), r| (t.min(r[1]), b.max(r[3])))
+/// Lines in the engine's order: Windows already reads columns one at a
+/// time. A line joins the previous row only when its middle falls inside
+/// that row's height and the horizontal gap is under one line height, as
+/// when Windows splits one line in two. A row reads left to right.
+fn reading_order(
+    lines: Vec<(String, Vec<NormRect>)>,
+    width: f32,
+    height: f32,
+) -> Vec<(String, Vec<NormRect>)> {
+    let bounds = |boxes: &[NormRect]| {
+        boxes.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, r| {
+            [b[0].min(r[0]), b[1].min(r[1]), b[2].max(r[2]), b[3].max(r[3])]
+        })
     };
-    lines.sort_by(|a, b| extent(&a.1).0.total_cmp(&extent(&b.1).0));
-    let mut rows: Vec<Vec<(String, Vec<NormRect>)>> = Vec::new();
+    let mut rows: Vec<(NormRect, Vec<(String, Vec<NormRect>)>)> = Vec::new();
     for line in lines {
-        let (top, bottom) = extent(&line.1);
-        let middle = (top + bottom) / 2.0;
+        let b = bounds(&line.1);
         match rows.last_mut() {
-            Some(row)
-                if (extent(&row[row.len() - 1].1).0..=extent(&row[row.len() - 1].1).1)
-                    .contains(&middle) =>
+            Some((r, row))
+                if (r[1]..=r[3]).contains(&((b[1] + b[3]) / 2.0))
+                    && (b[0] - r[2]).max(r[0] - b[2]) * width
+                        < (b[3] - b[1]).max(r[3] - r[1]) * height =>
             {
-                row.push(line)
+                *r = bounds(&[*r, b]);
+                row.push(line);
             }
-            _ => rows.push(vec![line]),
+            _ => rows.push((b, vec![line])),
         }
     }
-    for row in &mut rows {
+    for (_, row) in &mut rows {
         row.sort_by(|a, b| a.1[0][0].total_cmp(&b.1[0][0]));
     }
-    rows.into_iter().flatten().collect()
+    rows.into_iter().flat_map(|(_, row)| row).collect()
 }
 
 /// The engine for the user's profile languages, or else the first installed
