@@ -1,0 +1,9 @@
+{
+  "name": "pdf-check",
+  "private": true,
+  "description": "Independent pdf.js renderer for PDF engine tests.",
+  "type": "module",
+  "dependencies": {
+    "pdfjs-dist": "6.4.299"
+  }
+}

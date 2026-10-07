@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+#[path = "../src/imaging.rs"]
+mod imaging;
 #[path = "../src/model.rs"]
 mod model;
 #[path = "../src/pdf.rs"]
