@@ -27,6 +27,7 @@ mod app;
 mod bench;
 mod cache;
 mod commands;
+mod disk;
 mod document;
 mod files;
 mod menu;
