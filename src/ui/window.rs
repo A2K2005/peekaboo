@@ -5,14 +5,12 @@ use super::{
     app::{close_tab, install, invalidate, select_tab, tick, uninstall, with_state, State},
     commands::{self, Chord, Command},
     document::{self, Phase, PointerEvent, PointerKind},
-    paint, sheet, sidebar, theme,
+    imagetools, paint, sheet, sidebar, theme,
     widgets::{self, Layout, Scope, WidgetId},
     worker::{Workers, WM_APP_WAKE},
 };
 use std::{
     cell::RefCell,
-
-    path::PathBuf,
     time::{Duration, Instant},
 };
 use windows::{
@@ -49,12 +47,16 @@ pub fn run() -> Result<()> {
         // OLE, not only COM: drag-out and the share sheet (W1-D) need it.
         // https://learn.microsoft.com/windows/win32/api/ole2/nf-ole2-oleinitialize
         OleInitialize(None)?;
+        let command = crate::integration::parse_args(std::env::args_os().skip(1));
         let mut paths = Vec::new();
-        for path in std::env::args_os().skip(1).map(PathBuf::from).map(|p| std::fs::canonicalize(&p).unwrap_or(p)) {
+        for path in command.paths.into_iter().map(|p| std::fs::canonicalize(&p).unwrap_or(p)) {
             if !paths.contains(&path) {
                 paths.push(path);
             }
         }
+        use crate::integration::Action;
+        let verb = matches!(command.action, Action::Convert | Action::Resize)
+            .then(|| (command.action == Action::Resize, std::mem::take(&mut paths)));
         let instance = GetModuleHandleW(None)?;
         let wc = WNDCLASSW {
             hCursor: LoadCursorW(None, IDC_ARROW)?,
@@ -93,6 +95,7 @@ pub fn run() -> Result<()> {
             theme::apply(hwnd, theme::current()),
         );
         state.bench = super::bench::Bench::from_env();
+        state.tools.verb = verb;
         install(state);
         // Apply WM_NCCALCSIZE now that the state exists, so the caption goes.
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -290,6 +293,7 @@ pub(super) unsafe fn activate(hwnd: HWND, id: WidgetId, keyboard: bool) {
             with_state(|s| sidebar::activate(s, index));
         }
         WidgetId::SheetButton(index) => sheet::finish(Some(index)),
+        WidgetId::SheetControl(index) => sheet::activate_control(hwnd, index, keyboard),
         WidgetId::SheetField(index) => {
             let edit = with_state(|s| s.sheet.as_ref().and_then(|x| x.fields.get(index)).map(|f| f.edit)).flatten();
             if let Some(edit) = edit {
@@ -414,6 +418,9 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
             }
         }
     });
+    if matches!(e.phase, Phase::Down | Phase::Move) {
+        sheet::slide(hwnd, e.x);
+    }
     if to_document && e.phase == Phase::Down {
         let edit_path = with_state(|s| {
             (s.crop || s.markup.is_some()).then(|| s.path.clone()).flatten()
@@ -500,6 +507,9 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
         return false;
     }
     if with_state(|s| s.sheet.is_some()).unwrap_or(false) {
+        if sheet::control_key(hwnd, VIRTUAL_KEY(vk)) {
+            return true;
+        }
         let focus = with_state(|s| s.focus).flatten();
         match VIRTUAL_KEY(vk) {
             VK_TAB => sheet::move_focus(hwnd, shift),
@@ -578,6 +588,9 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
             invalidate(hwnd);
             return true;
         }
+    }
+    if !ctrl && !alt && imagetools::crop_key(hwnd, vk) {
+        return true;
     }
     // Scroll keys go to the focused sidebar list or the document.
     if !ctrl && !alt {
@@ -857,6 +870,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             }
             if code == EN_SETFOCUS || code == EN_KILLFOCUS {
                 invalidate(hwnd);
+            }
+            if code == EN_CHANGE {
+                sheet::changed(hwnd, HWND(lparam.0 as *mut _));
             }
             LRESULT(0)
         }

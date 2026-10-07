@@ -44,6 +44,7 @@ pub(super) enum WidgetId {
     SidebarTab(usize),
     SheetButton(usize),
     SheetField(usize),
+    SheetControl(usize),
     Document,
     /// A row of the open sidebar list: a page thumbnail, an outline entry,
     /// or a note.
@@ -57,6 +58,7 @@ pub(super) enum Role {
     Caption,
     SidebarTab,
     Field,
+    Slider,
     Document,
     ListItem,
 }
@@ -102,6 +104,7 @@ pub(super) struct SheetView<'a> {
     pub(super) fields: Vec<&'a str>,
     /// The first button is the primary (accent) button.
     pub(super) buttons: Vec<&'a str>,
+    pub(super) controls: &'a [super::sheet::Control],
 }
 
 /// What the sidebar panel lists. Only rows in view become widgets.
@@ -538,7 +541,8 @@ pub(super) fn layout(input: &Input) -> Layout {
         let label_h = 20.0 * ts * s;
         let title_line = 28.0 * ts * s;
         let message_h = sheet.message_height * s;
-        let fields_h: f32 = sheet.fields.len() as f32 * (label_h + 4.0 * s + control + 12.0 * s);
+        let fields_h: f32 = sheet.fields.len() as f32 * (label_h + 4.0 * s + control + 12.0 * s)
+            + sheet.controls.len() as f32 * (control + 12.0 * s);
         let card_h = pad + title_line + 12.0 * s + message_h + if message_h > 0.0 { 16.0 * s } else { 0.0 } + fields_h + 12.0 * s + control + pad;
         let card = Rect::new((width - card_w) / 2.0, ((height - card_h) / 2.0).max(title_h), card_w, card_h);
         let mut y = card.y0 + pad;
@@ -547,6 +551,17 @@ pub(super) fn layout(input: &Input) -> Layout {
         let message = Rect::new(card.x0 + pad, y, inner, message_h);
         y += message_h + if message_h > 0.0 { 16.0 * s } else { 0.0 };
         let mut layout = SheetLayout { card, title, message, ..Default::default() };
+        for (index, c) in sheet.controls.iter().enumerate() {
+            let rect = Rect::new(card.x0 + pad, y, inner, control);
+            y += control + 12.0 * s;
+            let role = if c.kind == super::sheet::Kind::Slider { Role::Slider } else { Role::Button };
+            let mut widget = plain_widget(WidgetId::SheetControl(index), role, Region::Sheet, rect, c.text());
+            widget.enabled = c.enabled;
+            if c.kind == super::sheet::Kind::Toggle {
+                widget.checked = Some(c.value == 1);
+            }
+            w.push(widget);
+        }
         for (index, label) in sheet.fields.iter().enumerate() {
             let label_rect = Rect::new(card.x0 + pad, y, inner, label_h);
             y += label_h + 4.0 * s;
@@ -797,7 +812,7 @@ mod tests {
         let (x, y) = (close_tab.rect.x0 + 2.0, close_tab.rect.y0 + 2.0);
         assert_eq!(hit(&plain.widgets, x, y).unwrap().id, WidgetId::TabClose(0));
         assert_eq!(hit(&plain.widgets, 600.0, 400.0).unwrap().id, WidgetId::Document);
-        i.sheet = Some(SheetView { message_height: 0.0, fields: vec!["Text"], buttons: vec!["OK", "Cancel"] });
+        i.sheet = Some(SheetView { message_height: 0.0, fields: vec!["Text"], buttons: vec!["OK", "Cancel"], controls: &[] });
         let modal = layout(&i);
         assert!(hit(&modal.widgets, x, y).is_none());
         let ok = modal.widgets.iter().find(|w| w.id == WidgetId::SheetButton(0)).unwrap();
@@ -837,7 +852,7 @@ mod tests {
     fn sheet_limits_tab_order_to_its_fields_and_buttons() {
         let tabs = vec!["a.png".to_string()];
         let mut i = input(1100.0, &tabs);
-        i.sheet = Some(SheetView { message_height: 20.0, fields: vec!["Width", "Height"], buttons: vec!["OK", "Cancel"] });
+        i.sheet = Some(SheetView { message_height: 20.0, fields: vec!["Width", "Height"], buttons: vec!["OK", "Cancel"], controls: &[] });
         let layout = layout(&i);
         let mut order = vec![];
         let mut current = None;

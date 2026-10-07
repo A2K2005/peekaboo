@@ -23,6 +23,7 @@
 //! | sheet | In-window dialogs with EDIT text fields |
 //! | a11y | UI Automation through AccessKit |
 //! | files | File dialogs, clipboard, saved signature |
+//! | imagetools | Image crop handles, resize, export, batch, and background removal results |
 //! | text | Text selection, copy, and image search over text layers |
 mod a11y;
 mod actions;
@@ -34,6 +35,7 @@ mod disk;
 mod document;
 mod drop;
 mod files;
+mod imagetools;
 mod menu;
 mod organize;
 mod paint;

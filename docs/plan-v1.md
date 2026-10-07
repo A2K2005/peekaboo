@@ -84,11 +84,11 @@ The following W2-1 findings were recorded before the current worktree fixes. Ite
 
 From the W1-C review, still open after branch `w1c-fix` (items 1 and 2 fixed: AI pack signature and hash checks, OCR column order):
 
-7. Minor. `src/background.rs` `run()`: check model output dimensions before indexing.
-8. Minor. `src/imaging.rs` size estimate: apply export limits (WebP 16383 px, 64 MP) before estimating.
-9. Minor. `src/imaging.rs` batch names: compare case-insensitively.
+7. Fixed in `8c0ca65`. Model output dimensions are checked.
+8. Fixed in `8c0ca65`. Export limits apply before estimating.
+9. Fixed in `8c0ca65`. Batch names compare case-insensitively.
 10. Minor. `src/ocr.rs` `.min(4096)` cap shrinks tall screenshots (engine max is 10000 per side); 24 MP cut-outs rejected by the 64 MB frame cap.
 11. Minor. `THIRD-PARTY-NOTICES.md`: add libwebp-sys, libwebp (BSD-3 plus PATENTS), Snap, Depth Anything V2 Small caveat, AccessKit crates; remove BiRefNet lite.
-12. Minor. `src/imaging.rs` export drops ICC profiles.
+12. Fixed in `w2-6` for RGB profiles. Lossy WebP still drops the profile.
 13. Simplify. One composite-onto-white helper; share `decode_memory` and `decode_edited` code; allow AI pack retry after a failed load; remove the `hevc_mft_experiment` test.
 14. Perf. Keep recently used PDF pages loaded across tiles. Harness: add next-image and scroll scenarios to the suite and gate.

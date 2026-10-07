@@ -109,6 +109,41 @@ pub(super) unsafe fn destination(hwnd: HWND, pdf: bool) -> Option<PathBuf> {
     }
 }
 
+/// A save dialog for one file type. The name always gets `extension`.
+/// None when cancelled or when the file exists.
+pub(super) unsafe fn save_as(hwnd: HWND, name: &str, label: &str, extension: &str) -> Option<PathBuf> {
+    let mut buffer = vec![0u16; 32768];
+    let name: Vec<u16> = name.encode_utf16().take(buffer.len() - 1).collect();
+    buffer[..name.len()].copy_from_slice(&name);
+    let filter = wide(&format!("{label}\0*.{extension}\0"));
+    let default = wide(extension);
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: hwnd,
+        lpstrFile: PWSTR(buffer.as_mut_ptr()),
+        nMaxFile: buffer.len() as u32,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrDefExt: PCWSTR(default.as_ptr()),
+        Flags: OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !GetSaveFileNameW(&mut dialog).as_bool() {
+        return None;
+    }
+    let length = buffer.iter().position(|v| *v == 0).unwrap_or(0);
+    let mut path = PathBuf::from(String::from_utf16_lossy(&buffer[..length]));
+    let jpeg = extension == "jpg" && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpeg"));
+    if !jpeg && !path.extension().is_some_and(|e| e.eq_ignore_ascii_case(extension)) {
+        path.set_extension(extension);
+    }
+    if path.exists() {
+        sheet::alert(hwnd, "Choose a new name", "Preview saves a copy and never replaces an existing file.");
+        None
+    } else {
+        Some(path)
+    }
+}
+
 pub(super) unsafe fn folder(hwnd: HWND) -> Option<PathBuf> {
     let mut display = vec![0u16; 260];
     let info = BROWSEINFOW {

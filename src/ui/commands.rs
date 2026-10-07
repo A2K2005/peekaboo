@@ -115,6 +115,7 @@ pub(super) mod glyph {
     pub(in crate::ui) const PRINT: u16 = 0xE749;
     pub(in crate::ui) const CHECK: u16 = 0xE73E;
     pub(in crate::ui) const CHEVRON_RIGHT: u16 = 0xE76C;
+    pub(in crate::ui) const CHEVRON_DOWN: u16 = 0xE70D;
     pub(in crate::ui) const MINIMIZE: u16 = 0xE921;
     pub(in crate::ui) const MAXIMIZE: u16 = 0xE922;
     pub(in crate::ui) const RESTORE: u16 = 0xE923;
@@ -125,7 +126,7 @@ pub(super) mod glyph {
     pub(in crate::ui) const ALL: &[u16] = &[
         OPEN_PANE, ZOOM, EDIT, ROTATE, SHARE, SEARCH, MORE, HIGHLIGHT, UNDERLINE, STRIKETHROUGH, COMMENT,
         INKING, CROP, RESIZE, SIGNATURE, FONT_SIZE, SQUARE, CIRCLE, ARROW, SAVE, DOCUMENT, ERASE, FLIP,
-        FOLDER_OPEN, PRINT, CHECK, CHEVRON_RIGHT, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, ADD, CANCEL,
+        FOLDER_OPEN, PRINT, CHECK, CHEVRON_RIGHT, CHEVRON_DOWN, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, ADD, CANCEL,
     ];
 }
 
@@ -359,14 +360,14 @@ pub(super) struct Ctx {
 pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
     let ready = x.has_frame && !x.pending && !x.failed;
     match command {
-        Open | Exit | ToggleSidebar | ToggleMarkup | AppMenu | MoreTools | NextPane | PreviousPane => true,
+        Open | Exit | ToggleSidebar | ToggleMarkup | AppMenu | MoreTools | NextPane | PreviousPane | BatchSelected => true,
         NextTab | PreviousTab => x.tabs > 1,
         Tab(_) | CloseTab => x.tabs > 0,
         Undo | Revert => x.has_frame && !x.pending,
         // The Windows share sheet arrives with W1-D in wave 2.
         Share => false,
         _ if !ready => false,
-        Flip | Resize | RemoveBackground | BatchFolder | BatchSelected => !x.pdf,
+        Flip | Resize | RemoveBackground | BatchFolder => !x.pdf,
         ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | InsertImagePage | ViewContinuous | ViewSingle | ViewTwoPages => x.pdf,
         MovePageUp => x.pdf && x.can_previous,
         MovePageDown => x.pdf && x.can_next,

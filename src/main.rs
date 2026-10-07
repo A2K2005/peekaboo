@@ -2,7 +2,7 @@
 
 mod background;
 mod imaging;
-// The shell uses only drag out so far.
+// The shell uses only argument parsing and drag out so far.
 #[allow(dead_code)]
 mod integration;
 mod model;

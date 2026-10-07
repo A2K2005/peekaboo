@@ -283,6 +283,7 @@ pub(super) struct State {
     pub(super) sheet: Option<Sheet>,
     /// Accessibility and UISettings start after first content (see tick).
     pub(super) started: bool,
+    pub(super) tools: super::imagetools::Tools,
 }
 
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
@@ -391,6 +392,7 @@ impl State {
             pinch: None,
             sheet: None,
             started: false,
+            tools: Default::default(),
         };
         add_tabs(&mut state, paths);
         state
@@ -611,6 +613,7 @@ impl State {
                 message_height,
                 fields: sheet.fields.iter().map(|f| f.label.as_str()).collect(),
                 buttons: sheet.buttons.iter().map(String::as_str).collect(),
+                controls: &sheet.controls,
             }
         });
         widgets::layout(&widgets::Input {
@@ -1067,6 +1070,11 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                     invalidate(hwnd);
                     continue;
                 }
+                Event::Tool(done) => {
+                    super::imagetools::received(hwnd, state, done);
+                    invalidate(hwnd);
+                    continue;
+                }
             };
             if completed.generation != state.generation {
                 continue;
@@ -1190,6 +1198,7 @@ pub(super) unsafe fn tick(hwnd: HWND) {
     if advance {
         navigate(hwnd, 1);
     }
+    super::imagetools::tick(hwnd);
 }
 
 /// A file is on screen: tabs, title, and history follow it. Next or

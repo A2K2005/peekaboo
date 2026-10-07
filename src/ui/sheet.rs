@@ -2,7 +2,11 @@
 //! Text fields are Win32 EDIT children, so IME and text services work
 //! (CLAUDE.md D11). `ask` runs a nested message loop, like DialogBox, so
 //! callers keep a simple call-and-return flow.
-use super::{app::with_state, widgets::WidgetId};
+use super::{
+    app::{with_state, State},
+    commands::{MenuItem, Pick},
+    widgets::{Rect, WidgetId},
+};
 use std::cell::RefCell;
 use windows::{
     core::*,
@@ -28,11 +32,71 @@ pub(super) struct Sheet {
     pub(super) cancel: usize,
     /// None while open; Some(None) when cancelled.
     pub(super) result: Option<Option<usize>>,
+    /// Drawn above the fields, in this order.
+    pub(super) controls: Vec<Control>,
+    pub(super) live: Option<Live>,
 }
 
 pub(super) struct Field {
     pub(super) label: String,
     pub(super) edit: HWND,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// A dropdown: `value` is the chosen option.
+    Choice,
+    /// `value` is 1 when on.
+    Toggle,
+    /// `value` is a percent from 1 to 100.
+    Slider,
+}
+
+pub(super) struct Control {
+    pub(super) kind: Kind,
+    pub(super) label: String,
+    pub(super) options: Vec<String>,
+    pub(super) value: usize,
+    pub(super) enabled: bool,
+}
+
+impl Control {
+    pub(super) fn choice(label: &str, options: &[&str], chosen: usize) -> Self {
+        let options = options.iter().map(|o| (*o).into()).collect();
+        Self { kind: Kind::Choice, label: label.into(), options, value: chosen, enabled: true }
+    }
+    pub(super) fn toggle(label: &str, on: bool) -> Self {
+        Self { kind: Kind::Toggle, label: label.into(), options: Vec::new(), value: on.into(), enabled: true }
+    }
+    pub(super) fn slider(label: &str, value: usize) -> Self {
+        Self { kind: Kind::Slider, label: label.into(), options: Vec::new(), value: value.clamp(1, 100), enabled: true }
+    }
+    /// Visible and accessible text, such as "Format: PNG".
+    pub(super) fn text(&self) -> String {
+        match self.kind {
+            Kind::Choice => format!("{}: {}", self.label, self.options.get(self.value).map_or("", String::as_str)),
+            Kind::Toggle => self.label.clone(),
+            Kind::Slider => format!("{}: {}%", self.label, self.value),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Change {
+    Opened,
+    Field(usize),
+    Control(usize),
+    /// Something outside the sheet changed, such as a size estimate.
+    Refresh,
+}
+
+/// Runs when a live sheet opens and after each change. It may set the
+/// message, field text, and control state.
+pub(super) type Live = Box<dyn FnMut(&mut State, Change)>;
+
+/// The slider's track: the part of its row right of the label.
+pub(super) fn track(row: Rect, scale: f32) -> Rect {
+    Rect { x0: row.x0 + row.width() * 0.45 + 8.0 * scale, x1: row.x1 - 10.0 * scale, ..row }
 }
 
 thread_local! {
@@ -121,6 +185,35 @@ pub(super) unsafe fn ask(
     cancel: usize,
     focus_button: Option<usize>,
 ) -> Option<(usize, Vec<String>)> {
+    show(hwnd, title, message, fields, password, Vec::new(), None, buttons, cancel, focus_button).map(|(b, v, _)| (b, v))
+}
+
+/// A sheet with controls whose message follows its input. The last button
+/// cancels. Returns the button, the field text, and each control's value.
+pub(super) unsafe fn ask_live(
+    hwnd: HWND,
+    title: &str,
+    fields: &[(&str, String)],
+    controls: Vec<Control>,
+    buttons: &[&str],
+    live: Live,
+) -> Option<(usize, Vec<String>, Vec<usize>)> {
+    show(hwnd, title, "", fields, false, controls, Some(live), buttons, buttons.len().saturating_sub(1), None)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn show(
+    hwnd: HWND,
+    title: &str,
+    message: &str,
+    fields: &[(&str, String)],
+    password: bool,
+    controls: Vec<Control>,
+    live: Option<Live>,
+    buttons: &[&str],
+    cancel: usize,
+    focus_button: Option<usize>,
+) -> Option<(usize, Vec<String>, Vec<usize>)> {
     if is_open() || buttons.is_empty() {
         return None;
     }
@@ -155,8 +248,10 @@ pub(super) unsafe fn ask(
     let focus = match (first_edit, focus_button) {
         (Some(_), _) => WidgetId::SheetField(0),
         (None, Some(b)) => WidgetId::SheetButton(b),
+        (None, None) if !controls.is_empty() => WidgetId::SheetControl(0),
         (None, None) => WidgetId::SheetButton(0),
     };
+    let has_live = live.is_some();
     with_state(|s| {
         s.sheet = Some(Sheet {
             title: title.into(),
@@ -165,6 +260,8 @@ pub(super) unsafe fn ask(
             buttons: buttons.iter().map(|b| (*b).into()).collect(),
             cancel,
             result: None,
+            controls,
+            live,
         });
         s.focus = Some(focus);
         s.focus_visible = first_edit.is_none();
@@ -172,6 +269,9 @@ pub(super) unsafe fn ask(
         s.tooltip = None;
         s.pressed = None;
     });
+    if has_live {
+        refresh(hwnd, Change::Opened);
+    }
     position_fields(hwnd);
     let _ = SetFocus(Some(first_edit.unwrap_or(hwnd)));
     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -222,9 +322,158 @@ pub(super) unsafe fn ask(
     }
     let _ = SetFocus(Some(hwnd));
     let _ = InvalidateRect(Some(hwnd), None, false);
+    let controls = sheet.controls.iter().map(|c| c.value).collect();
     match sheet.result.flatten() {
-        Some(index) if index != sheet.cancel => Some((index, values)),
+        Some(index) if index != sheet.cancel => Some((index, values, controls)),
         _ => None,
+    }
+}
+
+/// Runs the live update, then fits the EDIT children to the new layout.
+pub(super) unsafe fn refresh(hwnd: HWND, change: Change) {
+    with_state(|s| {
+        let Some(mut live) = s.sheet.as_mut().and_then(|x| x.live.take()) else {
+            return;
+        };
+        live(s, change);
+        if let Some(sheet) = s.sheet.as_mut() {
+            sheet.live = Some(live);
+        }
+    });
+    position_fields(hwnd);
+}
+
+/// EN_CHANGE from a field. Text set by a live update arrives while the
+/// state is borrowed, so it does not run the update again.
+pub(super) unsafe fn changed(hwnd: HWND, edit: HWND) {
+    if let Some(index) = field_index(edit) {
+        refresh(hwnd, Change::Field(index));
+    }
+}
+
+pub(super) unsafe fn field(s: &State, index: usize) -> String {
+    let Some(edit) = s.sheet.as_ref().and_then(|x| x.fields.get(index)).map(|f| f.edit) else {
+        return String::new();
+    };
+    let mut text = vec![0u16; GetWindowTextLengthW(edit).max(0) as usize + 1];
+    let n = GetWindowTextW(edit, &mut text);
+    String::from_utf16_lossy(&text[..n.max(0) as usize])
+}
+
+pub(super) unsafe fn set_field(s: &State, index: usize, text: &str) {
+    if let Some(edit) = s.sheet.as_ref().and_then(|x| x.fields.get(index)).map(|f| f.edit) {
+        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let _ = SetWindowTextW(edit, PCWSTR(text.as_ptr()));
+    }
+}
+
+pub(super) unsafe fn set_field_label(s: &mut State, index: usize, label: &str) {
+    if let Some(field) = s.sheet.as_mut().and_then(|x| x.fields.get_mut(index)).filter(|f| f.label != label) {
+        field.label = label.into();
+        name_field(field.edit, label);
+    }
+}
+
+pub(super) fn control(s: &State, index: usize) -> usize {
+    s.sheet.as_ref().and_then(|x| x.controls.get(index)).map_or(0, |c| c.value)
+}
+
+pub(super) fn enable_control(s: &mut State, index: usize, enabled: bool) {
+    if let Some(c) = s.sheet.as_mut().and_then(|x| x.controls.get_mut(index)) {
+        c.enabled = enabled;
+    }
+}
+
+pub(super) fn set_message(s: &mut State, message: String) {
+    if let Some(sheet) = s.sheet.as_mut() {
+        sheet.message = message;
+    }
+}
+
+unsafe fn set_control(hwnd: HWND, index: usize, value: usize) {
+    let changed = with_state(|s| {
+        let c = s.sheet.as_mut()?.controls.get_mut(index)?;
+        Some(std::mem::replace(&mut c.value, value) != value)
+    })
+    .flatten();
+    if changed == Some(true) {
+        refresh(hwnd, Change::Control(index));
+    }
+    let _ = InvalidateRect(Some(hwnd), None, false);
+}
+
+/// Click, Enter, Space, or UI Automation Invoke on a control.
+pub(super) unsafe fn activate_control(hwnd: HWND, index: usize, keyboard: bool) {
+    let Some((kind, options, value)) = with_state(|s| {
+        s.sheet.as_ref()?.controls.get(index).filter(|c| c.enabled).map(|c| (c.kind, c.options.clone(), c.value))
+    })
+    .flatten() else {
+        return;
+    };
+    let value = match kind {
+        Kind::Slider => return,
+        Kind::Toggle => usize::from(value == 0),
+        Kind::Choice => {
+            let items = options
+                .iter()
+                .enumerate()
+                .map(|(i, option)| MenuItem { checked: Some(i == value), ..MenuItem::choice(option, i) })
+                .collect();
+            match super::actions::popup(hwnd, items, Some(WidgetId::SheetControl(index)), None, keyboard) {
+                Some(Pick::Index(i)) => i,
+                _ => return,
+            }
+        }
+    };
+    set_control(hwnd, index, value);
+}
+
+/// Keys on a focused control. Returns true when handled.
+pub(super) unsafe fn control_key(hwnd: HWND, key: VIRTUAL_KEY) -> bool {
+    let Some((index, kind, value, count)) = with_state(|s| match s.focus {
+        Some(WidgetId::SheetControl(i)) => s.sheet.as_ref()?.controls.get(i).map(|c| (i, c.kind, c.value, c.options.len())),
+        _ => None,
+    })
+    .flatten() else {
+        return false;
+    };
+    let step: i64 = match key {
+        VK_RETURN | VK_SPACE if kind != Kind::Slider => {
+            activate_control(hwnd, index, true);
+            return true;
+        }
+        VK_LEFT | VK_DOWN => -1,
+        VK_RIGHT | VK_UP => 1,
+        VK_NEXT => -10,
+        VK_PRIOR => 10,
+        VK_HOME => -1000,
+        VK_END => 1000,
+        _ => return false,
+    };
+    let (low, high) = match kind {
+        Kind::Slider => (1, 100),
+        Kind::Choice => (0, count as i64 - 1),
+        Kind::Toggle => return false,
+    };
+    set_control(hwnd, index, (value as i64 + step).clamp(low, high.max(low)) as usize);
+    true
+}
+
+/// A pointer pressed on a slider sets its value from the pointer position.
+pub(super) unsafe fn slide(hwnd: HWND, x: f32) {
+    let target = with_state(|s| {
+        let Some(WidgetId::SheetControl(index)) = s.pressed else {
+            return None;
+        };
+        s.sheet.as_ref()?.controls.get(index).filter(|c| c.kind == Kind::Slider && c.enabled)?;
+        let row = s.layout().widgets.iter().find(|w| w.id == WidgetId::SheetControl(index))?.rect;
+        let track = track(row, s.scale);
+        let at = ((x - track.x0) / track.width().max(1.0)).clamp(0.0, 1.0);
+        Some((index, (1.0 + at * 99.0).round() as usize))
+    })
+    .flatten();
+    if let Some((index, value)) = target {
+        set_control(hwnd, index, value);
     }
 }
 
