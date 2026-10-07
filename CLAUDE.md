@@ -44,7 +44,7 @@ Cargo: `C:\Users\Armaan\.cargo\bin\cargo.exe`.
 | Optional real OCR test | `cargo test --release --test ocr_smoke -- --ignored --nocapture` |
 | Package ZIP | `powershell -File tools/package.ps1` |
 
-`runtime/` (PDFium, ONNX Runtime, model) and `fixtures/` are not in git. In a git worktree, link them to the main checkout: `cmd /c mklink /J runtime C:\Users\Armaan\Desktop\extension\preview-for-windows\runtime` (same for `fixtures`).
+`runtime/` (PDFium, ONNX Runtime, model) and `fixtures/` are not in git. In a git worktree, link them to the main checkout: `cmd /c mklink /J runtime C:\Users\Armaan\Desktop\extension\preview-for-windows\runtime` (same for `fixtures`). Before removing a worktree, remove its links first with `cmd /c rmdir <worktree>\runtime` (same for `fixtures`): `git worktree remove` and recursive deletes follow junctions and empty the main checkout's folders. This happened twice. If it happens again, restore from `Desktop/Portfolio/preview-for-windows` (no Snap model there; run `tools/fetch-model.ps1`).
 
 ## Conventions
 
