@@ -107,6 +107,15 @@ impl PdfEngine {
         edits: &[PdfEdit],
     ) -> Result<FormFeedback, String> {
         self.ensure(path, edits)?;
+        let result = self.session_event(page, input);
+        if result.is_err() {
+            // The open document may hold values the recipe lacks; reopen it next time.
+            self.document = None;
+        }
+        result
+    }
+
+    fn session_event(&mut self, page: u32, input: FormInput) -> Result<FormFeedback, String> {
         let api = &self.api;
         let document = self.document.as_mut().ok_or("No PDF is open.")?;
         match unsafe { (api.form_type)(document.native.handle) } {

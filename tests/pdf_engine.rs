@@ -202,6 +202,10 @@ fn text_layer_puts_columns_in_reading_order() {
     let pdfium = engine.page_text(&path, 1).unwrap().replace("\r\n", "\n");
     assert_eq!(single_layer.text, pdfium.trim());
     assert_eq!(single_layer.text, single.join("\n"));
+    let blank = engine
+        .text_layer(&path, 1, &[PdfEdit::InsertBlank { at: 1 }])
+        .unwrap();
+    assert!(blank.text.is_empty() && blank.boxes.is_empty());
     // Boxes land on the rendered glyphs, also on a rotated page.
     for (edits, size) in [
         (vec![], (612, 792)),
@@ -645,6 +649,14 @@ fn inline_form_session_fills_every_field_kind_and_commits_recipes() {
     assert_eq!(previous.focus.unwrap().0, 0);
     send(&mut engine, 0, Blur, &mut edits);
     assert!(fill(&edits).contains(&(1, 0, "Page two".to_string())));
+    // After a failed event the session restarts from the recipe, so text
+    // typed but not committed is not committed later.
+    let committed = edits.len();
+    click(&mut engine, &mut edits, 180.0, 80.0);
+    send(&mut engine, 0, Char('Z'), &mut edits);
+    assert!(engine.form_event(&path, 99, Blur, &edits).is_err());
+    send(&mut engine, 0, Blur, &mut edits);
+    assert_eq!(edits.len(), committed);
     // The recipe replays on a fresh document: saved values match.
     let saved = dir.join("filled.pdf");
     engine.save_copy(&path, &saved, &edits).unwrap();
@@ -676,6 +688,12 @@ fn inline_form_session_fills_every_field_kind_and_commits_recipes() {
         engine.metadata(&xfa, &[]).unwrap().form,
         model::PdfFormType::XfaFull
     );
+    // Viewing still works, with the AcroForm fields drawn.
+    let xfa_page = engine
+        .render_region(&xfa, 0, 1.0, [0, 0, 612, 792], &[])
+        .unwrap();
+    let combo = [60.0 / 612.0, 232.0 / 792.0, 200.0 / 612.0, 252.0 / 792.0];
+    assert!(dark_in(&xfa_page.pixels, 612, 792, combo) > 20);
     let plain = dir.join("plain.pdf");
     text_pdf(&plain, &[text_at(72.0, 700.0, 12.0, "No fields")]);
     assert!(engine.form_event(&plain, 0, Blur, &[]).is_err());
