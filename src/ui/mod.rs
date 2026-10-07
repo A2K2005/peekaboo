@@ -21,6 +21,7 @@
 //! | sheet | In-window dialogs with EDIT text fields |
 //! | a11y | UI Automation through AccessKit |
 //! | files | File dialogs, clipboard, saved signature |
+//! | text | Text selection, copy, and image search over text layers |
 mod a11y;
 mod actions;
 mod app;
@@ -34,6 +35,9 @@ mod paint;
 mod render;
 mod sheet;
 mod sidebar;
+// W2-2: tested core only; the shell does not call it yet.
+#[allow(dead_code)]
+mod text;
 mod theme;
 mod view;
 mod widgets;
