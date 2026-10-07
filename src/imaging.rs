@@ -649,6 +649,29 @@ pub fn export_frame(frame: &Frame, output: &Path) -> Result<(), String> {
         write_source(&factory, &bitmap, output, &default_options(output)?).map(|_| ())
     }
 }
+/// Scale `frame` to `width` x `height` with WIC's Fant filter.
+pub fn resize_frame(frame: &Frame, width: u32, height: u32) -> Result<Frame, String> {
+    let mut pixels = vec![0; frame_bytes(width, height)?];
+    unsafe {
+        let factory = factory()?;
+        let bitmap = frame_bitmap(&factory, frame)?;
+        let scaler = factory.CreateBitmapScaler().map_err(err)?;
+        scaler
+            .Initialize(&bitmap, width, height, WICBitmapInterpolationModeFant)
+            .map_err(err)?;
+        scaler
+            .CopyPixels(std::ptr::null(), width * 4, &mut pixels)
+            .map_err(err)?;
+    }
+    Ok(Frame {
+        width,
+        height,
+        pixels,
+        page_count: 1,
+        source_width: width,
+        source_height: height,
+    })
+}
 unsafe fn frame_bitmap(
     factory: &IWICImagingFactory,
     frame: &Frame,
