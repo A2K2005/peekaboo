@@ -9,7 +9,7 @@ Run these in Windows PowerShell 5.1. PowerShell 7 is not needed.
 1. `C:\Users\Armaan\.cargo\bin\cargo.exe build --release`
 2. `powershell -NoProfile -ExecutionPolicy Bypass -File tools\package.ps1`
 
-Options: `-SkipSign` leaves the MSIX unsigned. `-SkipMsix` builds only the ZIP. `-WindowsSdkBin` points to another SDK `bin\<version>\x64` folder.
+Options: `-Sign` signs the MSIX with a local test certificate; without it the MSIX stays unsigned. `-SkipMsix` builds only the ZIP. `-WindowsSdkBin` points to another SDK `bin\<version>\x64` folder.
 
 The script never deletes an earlier output. If `dist\Preview` exists, it adds a UTC time stamp to every name below.
 
@@ -18,7 +18,7 @@ The script never deletes an earlier output. If `dist\Preview` exists, it adds a 
 | `dist\Preview\` | ZIP payload: exe, `pdfium.dll`, README, notices, `register-file-associations.ps1`, `licenses\`, `manifest.json` (SHA256 per file) |
 | `dist\Preview-Windows-x64.zip` | The folder above |
 | `dist\Preview-msix-layout\` | MSIX payload: exe, `pdfium.dll`, notices, `licenses\`, `Assets\` (generated logos), `AppxManifest.xml` |
-| `dist\Preview-x64.msix` | Packed, schema-checked, and test-signed package |
+| `dist\Preview-x64.msix` | Packed and schema-checked package; test-signed only with `-Sign` |
 | `dist\Preview-msix-check\` | The MSIX unpacked again for the file-list check |
 
 What the script does:
@@ -31,7 +31,7 @@ What the script does:
 6. Draws three placeholder logos with System.Drawing: 44, 50, and 150 px.
 7. Copies `packaging\AppxManifest.xml` with `Identity/@Version` set from `Cargo.toml` (0.1.0 becomes 0.1.0.0).
 8. Runs `makeappx pack /h SHA256` from SDK 10.0.26100 [1]. Packing fails on a manifest that breaks the schema (measured below).
-9. Signs with SignTool and a self-signed certificate in `Cert:\CurrentUser\My` [2][3].
+9. With `-Sign` only: signs with SignTool and a self-signed certificate in `Cert:\CurrentUser\My` [2][3].
 10. Unpacks the MSIX and compares its file list with the layout.
 
 ### Measured results (2026-10-07)
@@ -49,7 +49,7 @@ Sizes exclude the optional AI pack. The release exe in both packages does not ye
 
 ### Test certificate
 
-The script creates `CN=Preview for Windows Test` in `Cert:\CurrentUser\My` with the code-signing EKU, as Microsoft documents [3]. It needs no admin rights. Later runs reuse it. Windows does not trust it, so the MSIX does not install as is. To remove it:
+With `-Sign`, the script creates `CN=Preview for Windows Test` in `Cert:\CurrentUser\My` with the code-signing EKU, as Microsoft documents [3]. It needs no admin rights. Later runs reuse it. Windows does not trust it, so the MSIX does not install as is. To remove it:
 
 ```powershell
 Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -eq 'CN=Preview for Windows Test' | Remove-Item
@@ -86,7 +86,7 @@ The module is not in `src/main.rs` yet. The tests include it with `#[path = "../
 | `share_files(HWND, &[PathBuf]) -> Result<(), String>` | Windows share sheet | Compiles. Pending GUI check. |
 | `file_data_object(&[PathBuf]) -> Result<IDataObject, String>` | CF_HDROP and shell ID lists for files in any folders | `drag_data_object_carries_files_from_two_folders` |
 | `drag_files(HWND, &[PathBuf]) -> Result<DROPEFFECT, String>` | OLE drag of copies | Refusal without a pressed button tested. Drag loop pending GUI check. |
-| `recent_dir()`, `load_recent(dir)`, `add_recent(dir, path)`, `note_recent(path)` | Recent files and jump list feed | `recent_files_are_newest_first_capped_and_pruned` |
+| `recent_dir()`, `load_recent(dir)`, `prune_recent(dir)`, `add_recent(dir, path)`, `note_recent(path)` | Recent files and jump list feed | `recent_files_are_newest_first_capped_and_pruned` |
 
 ### Single instance
 
@@ -157,7 +157,7 @@ If selections over 100 files matter, build route 1.
 
 ### Recent files
 
-`recent.txt` in `%LOCALAPPDATA%\PreviewForWindows\` holds one full path per line, newest first, at most 20. `load_recent` drops lines for missing files. `add_recent` matches paths without case, writes a temp file, then renames it. `note_recent` also calls `SHAddToRecentDocs(SHARD_PATHW)`, which feeds the Recent list in the app's jump list [23]. Tests use a scratch folder and never call `note_recent`, because it writes the user's real Recent items. Jump list display: pending GUI check.
+`recent.txt` in `%LOCALAPPDATA%\PreviewForWindows\` holds one full path per line, newest first, at most 20. `load_recent` returns the list without touching the disk, so an offline network path cannot stall it. `prune_recent` drops missing files; call it on a worker thread. `add_recent` matches paths without case, writes a temp file, then renames it. `note_recent` also calls `SHAddToRecentDocs(SHARD_PATHW)`, which feeds the Recent list in the app's jump list [23]. Tests use a scratch folder and never call `note_recent`, because it writes the user's real Recent items. Jump list display: pending GUI check.
 
 ## Wave 2 wiring
 
@@ -165,7 +165,7 @@ If selections over 100 files matter, build route 1.
 2. At start: `let command = integration::parse_args(std::env::args_os().skip(1));` then `let Some(_guard) = integration::hand_off(integration::WINDOW_CLASS, &command) else { return };`. Keep the guard alive until exit.
 3. In the window procedure, on WM_COPYDATA: `if let Some(command) = unsafe { integration::decode_copydata(lparam) } { ...; return LRESULT(1) }`, else return 0. Restore the window if it is minimized and call `SetForegroundWindow`. For Open, add tabs and skip paths already open. For Convert, Resize, and Combine, `merge` commands that arrive within a short window (suggested 300 ms, unmeasured), then start one job.
 4. Call `OleInitialize` instead of `CoInitializeEx` on the UI thread, for `drag_files`.
-5. Call `note_recent` after each successful open. Show `load_recent` in the empty window.
+5. Call `note_recent` after each successful open. Show `load_recent` in the empty window, then run `prune_recent` on the task worker.
 6. First run: offer to become the default. On yes, call `register(current_exe)` and then `open_default_apps()`.
 7. Share button and right-click Share: `share_files(hwnd, &[path])`.
 
