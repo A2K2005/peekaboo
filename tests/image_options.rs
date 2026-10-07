@@ -337,4 +337,13 @@ fn display_decode_uses_native_scale_without_changing_the_picture() {
             "Native scaling changed the picture by {difference}"
         );
     }
+    // Other formats take the native path only when their codec offers it.
+    let small = fixture("image-small.png");
+    for extension in ["tif", "bmp", "webp", "png"] {
+        let path = out.join(format!("small.{extension}"));
+        imaging::export(&small, &path, &[]).unwrap();
+        let fast = imaging::decode(&path, 320, 240).unwrap();
+        let slow = imaging::decode_edited(&path, 320, 240, &reference).unwrap();
+        assert!(mean_difference(&fast, &slow) < 1.5, "{extension} changed");
+    }
 }

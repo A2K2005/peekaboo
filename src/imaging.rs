@@ -265,6 +265,17 @@ unsafe fn reduced_frame(
     }
     let mut format = GUID_WICPixelFormat32bppPBGRA;
     transform.GetClosestPixelFormat(&mut format).ok()?;
+    // Indexed and other formats need a palette or a color context; skip them.
+    let plain = [
+        GUID_WICPixelFormat24bppBGR,
+        GUID_WICPixelFormat32bppBGR,
+        GUID_WICPixelFormat32bppBGRA,
+        GUID_WICPixelFormat32bppPBGRA,
+        GUID_WICPixelFormat8bppGray,
+    ];
+    if !plain.contains(&format) {
+        return None;
+    }
     let bitmap = factory
         .CreateBitmap(width, height, &format, WICBitmapCacheOnLoad)
         .ok()?;
