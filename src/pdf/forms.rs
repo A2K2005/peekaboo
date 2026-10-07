@@ -95,9 +95,10 @@ impl PdfEngine {
 
     /// Sends one input event to the inline form session on `page`. Returns
     /// the focused field, whether to redraw, and FillField recipes for values
-    /// the user committed. Append those commits to `edits` before the next
-    /// call, or the session restarts from the recipe. Call with
-    /// `FormInput::Blur` before saving, so a field being typed in commits.
+    /// the user committed, including text kept by `take_form_commits`.
+    /// Append those commits to `edits` before the next call, or the session
+    /// restarts from the recipe. Call with `FormInput::Blur` before saving,
+    /// so a field being typed in commits.
     #[allow(dead_code)]
     pub fn form_event(
         &mut self,
@@ -110,9 +111,50 @@ impl PdfEngine {
         let result = self.session_event(page, input);
         if result.is_err() {
             // The open document may hold values the recipe lacks; reopen it next time.
-            self.document = None;
+            self.close_document();
         }
-        result
+        let mut feedback = result?;
+        let mut commits = self.take_form_commits(path);
+        feedback.redraw |= !commits.is_empty();
+        commits.append(&mut feedback.commits);
+        feedback.commits = commits;
+        Ok(feedback)
+    }
+
+    /// FillField recipes for text typed into a focused field of `path` that
+    /// was not committed when its document closed. Any call with a changed
+    /// recipe or another file closes the document, as does a failed
+    /// `form_event`. Call after each request that passes a new recipe, and
+    /// append the result to `path`'s recipe; it is empty when nothing was
+    /// typed. Each commit is returned once.
+    #[allow(dead_code)]
+    pub fn take_form_commits(&mut self, path: &Path) -> Vec<PdfEdit> {
+        let Ok(path) = path.canonicalize() else {
+            return Vec::new();
+        };
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.form_commits)
+            .into_iter()
+            .partition(|(p, _)| *p == path);
+        self.form_commits = rest;
+        mine.into_iter().map(|(_, edit)| edit).collect()
+    }
+
+    /// Closes the open document. Text typed into its focused field is in no
+    /// recipe yet, so the field is committed first and the result kept for
+    /// `take_form_commits`.
+    pub(super) fn close_document(&mut self) {
+        let Some(mut document) = self.document.take() else {
+            return;
+        };
+        let form = document.form.as_ref().map(|f| f.handle);
+        if let (Some(form), Some(_)) = (form, document.focus.as_ref()) {
+            let mut commits = Vec::new();
+            unsafe { (self.api.form_blur)(form) };
+            self.api.track(&mut document, &mut commits);
+            let path = &document.path;
+            self.form_commits
+                .extend(commits.into_iter().map(|edit| (path.clone(), edit)));
+        }
     }
 
     fn session_event(&mut self, page: u32, input: FormInput) -> Result<FormFeedback, String> {

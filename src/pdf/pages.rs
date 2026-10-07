@@ -240,10 +240,10 @@ impl PdfEngine {
         Ok(())
     }
 
-    /// Adds an image file as a page at `at`. JPEG bytes are embedded as they
-    /// are (DCTDecode), with the EXIF orientation applied by the image
-    /// matrix. Other formats decode through WIC, so COM must be initialized
-    /// on this thread.
+    /// Adds an image file's bytes as a page at `at`. JPEG bytes are embedded
+    /// as they are (DCTDecode), with the EXIF orientation applied by the
+    /// image matrix. Other formats decode through WIC, so COM must be
+    /// initialized on this thread.
     ///
     /// The page is built in a scratch document and imported. Generating page
     /// content inside `document` makes PDFium append every page's content
@@ -253,7 +253,7 @@ impl PdfEngine {
         &self,
         document: Handle,
         at: u32,
-        path: &Path,
+        bytes: &[u8],
         fit: ImageFit,
     ) -> Result<(), String> {
         let count = unsafe { (self.api.count)(document) }.max(0) as u32;
@@ -265,7 +265,7 @@ impl PdfEngine {
             _ => None,
         };
         let scratch = self.new_document()?;
-        self.image_page(scratch.handle, path, neighbor)?;
+        self.image_page(scratch.handle, bytes, neighbor)?;
         let first = 0;
         unsafe {
             if (self.api.import)(document, scratch.handle, &first, 1, at as i32) == 0
@@ -277,27 +277,22 @@ impl PdfEngine {
         Ok(())
     }
 
-    /// Makes page 0 of an empty `document` from an image file. `neighbor`
-    /// is the page size to fit into; `None` sizes the page to the image.
+    /// Makes page 0 of an empty `document` from an image file's bytes.
+    /// `neighbor` is the page size to fit into; `None` sizes the page to the
+    /// image.
     fn image_page(
         &self,
         document: Handle,
-        path: &Path,
+        bytes: &[u8],
         neighbor: Option<(f32, f32)>,
     ) -> Result<(), String> {
-        let unreadable = |e: std::io::Error| format!("Cannot read the image file: {e}");
-        let mut file = File::open(path).map_err(unreadable)?;
-        let mut head = vec![0; 128 * 1024];
-        let read = read_up_to(&mut file, &mut head).map_err(unreadable)?;
-        head.truncate(read);
-        let (image, width, height, orientation) = if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
-            let (image, width, height) = self.jpeg_image(document, file)?;
-            (image, width, height, exif_orientation(&head))
+        let (image, width, height, orientation) = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            let (image, width, height) = self.jpeg_image(document, bytes)?;
+            (image, width, height, exif_orientation(bytes))
         } else {
-            drop(file);
-            let frame = crate::imaging::decode(path, 4096, 4096)?;
+            let (frame, orientation) = decode_image(bytes)?;
             let image = self.image_from_frame(document, &frame)?;
-            (image, frame.width, frame.height, 1)
+            (image, frame.width, frame.height, orientation)
         };
         // Width and height as displayed, after the EXIF rotation.
         let (width, height) = if orientation >= 5 {
@@ -348,16 +343,18 @@ impl PdfEngine {
     }
 
     /// An image object holding the JPEG file's bytes unchanged.
-    fn jpeg_image(&self, document: Handle, file: File) -> Result<(NativeHandle, u32, u32), String> {
-        let length = file.metadata().map_err(|e| e.to_string())?.len();
-        if length == 0 || length > u32::MAX as u64 {
-            return Err("The image file is empty or too large.".into());
-        }
-        let mut file = Box::new(file);
+    fn jpeg_image(
+        &self,
+        document: Handle,
+        bytes: &[u8],
+    ) -> Result<(NativeHandle, u32, u32), String> {
+        let length = u32::try_from(bytes.len()).map_err(|_| "The image file is too large.")?;
+        let mut source = bytes;
+        // The inline load copies the data, so `source` only has to outlive the call.
         let mut access = FileAccess {
-            length: length as u32,
-            read: read_block,
-            context: (&mut *file as *mut File).cast(),
+            length,
+            read: read_bytes,
+            context: (&mut source as *mut &[u8]).cast(),
         };
         let image = self.new_image(document)?;
         let (mut width, mut height) = (0, 0);
@@ -467,16 +464,115 @@ impl Api {
     }
 }
 
-fn read_up_to(file: &mut File, buffer: &mut [u8]) -> std::io::Result<usize> {
-    let mut total = 0;
-    while total < buffer.len() {
-        match file.read(&mut buffer[total..])? {
-            0 => break,
-            n => total += n,
-        }
+/// The FileAccess reader for a byte slice. `context` points to the `&[u8]`.
+unsafe extern "C" fn read_bytes(
+    context: *mut c_void,
+    position: u32,
+    buffer: *mut u8,
+    size: u32,
+) -> i32 {
+    if context.is_null() || (buffer.is_null() && size != 0) {
+        return 0;
     }
-    file.seek(SeekFrom::Start(0))?;
-    Ok(total)
+    if size == 0 {
+        return 1;
+    }
+    let bytes: &[u8] = *(context as *const &[u8]);
+    match bytes
+        .get(position as usize..)
+        .and_then(|rest| rest.get(..size as usize))
+    {
+        Some(part) => {
+            std::ptr::copy_nonoverlapping(part.as_ptr(), buffer, part.len());
+            1
+        }
+        None => 0,
+    }
+}
+
+const TOO_LARGE: &str = "Resize images above 16 megapixels before adding them to a PDF.";
+
+/// Decodes a non-JPEG image at full size with WIC, and reads its EXIF
+/// orientation. Images over the frame limit (64 MiB of pixels) are refused,
+/// never scaled down. COM must be initialized on this thread.
+fn decode_image(bytes: &[u8]) -> Result<(Frame, u16), String> {
+    use windows::core::w;
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::{
+        CoCreateInstance,
+        StructuredStorage::{PropVariantClear, PropVariantToUInt16, PROPVARIANT},
+        CLSCTX_INPROC_SERVER,
+    };
+    let damaged = |e: windows::core::Error| {
+        format!(
+            "This image is damaged or needs a Windows codec. {}",
+            e.message()
+        )
+    };
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
+                .map_err(damaged)?;
+        let stream = factory.CreateStream().map_err(damaged)?;
+        stream.InitializeFromMemory(bytes).map_err(damaged)?;
+        let decoded = factory
+            .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+            .and_then(|decoder| decoder.GetFrame(0));
+        let frame = match decoded {
+            Ok(frame) => frame,
+            // Without the Windows WebP codec, imaging decodes WebP files itself.
+            Err(_) if bytes.get(8..12) == Some(&b"WEBP"[..]) => {
+                let file = Temporary(
+                    std::env::temp_dir().join(format!(".preview-{}.webp", std::process::id())),
+                );
+                std::fs::write(&file.0, bytes)
+                    .map_err(|e| format!("Cannot read the image file: {e}"))?;
+                return Ok((crate::imaging::decode(&file.0, u32::MAX, u32::MAX)?, 1));
+            }
+            Err(e) => return Err(damaged(e)),
+        };
+        // TIFF orientation; JPEG files never reach this decoder.
+        let mut orientation = 1;
+        if let Ok(reader) = frame.GetMetadataQueryReader() {
+            let mut value = PROPVARIANT::default();
+            if reader
+                .GetMetadataByName(w!("/ifd/{ushort=274}"), &mut value)
+                .is_ok()
+            {
+                if let Ok(n @ 1..=8) = PropVariantToUInt16(&value) {
+                    orientation = n;
+                }
+            }
+            let _ = PropVariantClear(&mut value);
+        }
+        let (mut width, mut height) = (0, 0);
+        frame.GetSize(&mut width, &mut height).map_err(damaged)?;
+        let length = frame_bytes(width, height).map_err(|_| TOO_LARGE)?;
+        let converter = factory.CreateFormatConverter().map_err(damaged)?;
+        converter
+            .Initialize(
+                &frame,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )
+            .map_err(damaged)?;
+        let mut pixels = vec![0; length];
+        converter
+            .CopyPixels(std::ptr::null(), width * 4, &mut pixels)
+            .map_err(damaged)?;
+        let image = Frame {
+            width,
+            height,
+            pixels,
+            page_count: 1,
+            source_width: width,
+            source_height: height,
+        };
+        Ok((image, orientation))
+    }
 }
 
 /// The EXIF orientation (1 to 8) of a JPEG, or 1 when it has none.

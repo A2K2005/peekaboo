@@ -90,7 +90,7 @@ Notes on the mapping:
 - **First content is a proxy.** The marker is written after `DwmFlush` returns. That shows DWM composed the frame, not that the display scanned it out. Add up to one vsync (research estimate).
 - **Not the reference hardware.** See "Environment".
 - **Synthetic fixtures.** The 500-page PDF reaches 50 MB with whitespace padding. It is not complex production content.
-- **Package size depends on `tools/package.ps1`.** That script currently starts with `#requires -Version 7.0`, and PowerShell 7 is not installed. Until W1-D ports it to 5.1, the suite records `package_zip_bytes` as not measured, with the reason. The package is built from `target/release`, not from `-Executable`.
+- **Package size depends on `tools/package.ps1`.** The suite runs it with Windows PowerShell 5.1 (`#requires -Version 5.1`) and `-SkipMsix`, so it builds only the ZIP and never builds or signs an MSIX. If the script fails, the suite records `package_zip_bytes` as not measured, with the reason. The package is built from `target/release`, not from `-Executable`.
 - **Harness load.** The harness waits on the process handle in 10 ms steps (a kernel wait, not a busy loop). In idle mode, it checks for the marker file every 10 ms.
 - **Contended runs are not baselines.** Measurements taken while other builds run are only harness checks.
 

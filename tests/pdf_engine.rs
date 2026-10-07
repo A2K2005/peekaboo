@@ -237,6 +237,49 @@ fn text_layer_puts_columns_in_reading_order() {
     }
 }
 
+/// A one-page PDF with permission flags `p`. Its standard security handler
+/// uses the Identity crypt filter, so nothing is encrypted and no password is
+/// needed, but PDFium still reports the flags.
+fn permissions_pdf(path: &std::path::Path, p: i32) {
+    let zeros = "00".repeat(32);
+    let objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        stream("", &text_at(72.0, 700.0, 12.0, "Readable text")),
+        format!("<< /Filter /Standard /V 4 /R 4 /Length 128 /P {p} /O <{zeros}> /U <{zeros}> /CF << /StdCF << /CFM /V2 >> >> /StmF /Identity /StrF /Identity >>"),
+    ];
+    let id = "<00112233445566778899AABBCCDDEEFF>";
+    write_pdf(
+        path,
+        "1.7",
+        &objects,
+        &format!("/Encrypt 6 0 R /ID [{id} {id}]"),
+    );
+}
+
+#[test]
+fn text_layer_needs_only_the_accessibility_permission() {
+    let dir = out_dir("permissions");
+    // Every permission except copying (bit 5), so accessibility (bit 10) is on.
+    let accessible = dir.join("accessible.pdf");
+    permissions_pdf(&accessible, !16);
+    let locked = dir.join("locked.pdf");
+    permissions_pdf(&locked, !(16 | 512));
+    let plain = dir.join("plain.pdf");
+    text_pdf(&plain, &[text_at(72.0, 700.0, 12.0, "Plain")]);
+    let mut engine = PdfEngine::new().unwrap();
+    assert_eq!(
+        engine.text_layer(&accessible, 0, &[]).unwrap().text,
+        "Readable text"
+    );
+    assert!(!engine.can_copy(&accessible, &[]).unwrap());
+    assert!(engine.page_text(&accessible, 0).is_err());
+    assert!(engine.text_layer(&locked, 0, &[]).is_err());
+    assert!(engine.can_copy(&plain, &[]).unwrap());
+}
+
 #[test]
 fn search_finds_every_hit_in_500_pages_quickly() {
     let source = fixture("500-pages-50mb.pdf");
@@ -649,21 +692,32 @@ fn inline_form_session_fills_every_field_kind_and_commits_recipes() {
     assert_eq!(previous.focus.unwrap().0, 0);
     send(&mut engine, 0, Blur, &mut edits);
     assert!(fill(&edits).contains(&(1, 0, "Page two".to_string())));
-    // After a failed event the session restarts from the recipe, so text
-    // typed but not committed is not committed later.
+    // A failed event closes the document. Text typed but not committed yet
+    // comes back as a commit with the next event.
     let committed = edits.len();
     click(&mut engine, &mut edits, 180.0, 80.0);
     send(&mut engine, 0, Char('Z'), &mut edits);
     assert!(engine.form_event(&path, 99, Blur, &edits).is_err());
     send(&mut engine, 0, Blur, &mut edits);
-    assert_eq!(edits.len(), committed);
+    assert_eq!(fill(&edits[committed..]), [(0, 0, "AdaZ".to_string())]);
+    // A changed recipe (Rotate, Undo) also closes the document; the typed
+    // text comes back from take_form_commits, once.
+    click(&mut engine, &mut edits, 180.0, 80.0);
+    send(&mut engine, 0, Char('!'), &mut edits);
+    let rotated = [edits.clone(), vec![PdfEdit::RotateRight { page: 1 }]].concat();
+    engine.render_edited(&path, 0, 100, 100, &rotated).unwrap();
+    assert_eq!(
+        fill(&engine.take_form_commits(&path)),
+        [(0, 0, "AdaZ!".to_string())]
+    );
+    assert!(engine.take_form_commits(&path).is_empty());
     // The recipe replays on a fresh document: saved values match.
     let saved = dir.join("filled.pdf");
     engine.save_copy(&path, &saved, &edits).unwrap();
     let fields = engine.form_fields(&saved, 0, &[]).unwrap();
     let values: Vec<&str> = fields.iter().map(|f| f.value.as_str()).collect();
     println!("saved field values: {values:?}");
-    assert_eq!(&values[..3], ["Ada", "e@x.io", "true"]);
+    assert_eq!(&values[..3], ["AdaZ", "e@x.io", "true"]);
     assert_eq!(values[4], "M");
     assert_eq!(values[5], "Green");
     assert_eq!(
@@ -825,8 +879,14 @@ fn image_pages_keep_jpeg_bytes_orientation_and_page_size_rules() {
     );
     let insert = [PdfEdit::InsertImage {
         at: 1,
-        path: png.clone(),
+        name: "wide.png".into(),
+        bytes: std::fs::read(&png).unwrap().into(),
     }];
+    // The recipe holds the image, so it replays and saves the same after the
+    // file is replaced or removed.
+    let gray = dir.join("gray.png");
+    imaging::export_frame(&image(100, 300, |_, _| GRAY), &gray).unwrap();
+    std::fs::rename(&gray, &png).unwrap();
     assert_eq!(
         engine.page_sizes(&letter, &insert).unwrap(),
         vec![[612.0, 792.0], [792.0, 612.0], [612.0, 792.0]]
@@ -839,9 +899,12 @@ fn image_pages_keep_jpeg_bytes_orientation_and_page_size_rules() {
         .page_text_edited(&letter, 2, &insert)
         .unwrap()
         .contains("Two"));
+    std::fs::remove_file(&png).unwrap();
     let out = dir.join("inserted.pdf");
     engine.save_copy(&letter, &out, &insert).unwrap();
     assert_eq!(engine.page_sizes(&out, &[]).unwrap().len(), 3);
+    let saved = engine.render(&out, 1, 792, 612).unwrap();
+    assert_eq!(changed(&saved.pixels, &inserted.pixels), 0);
 
     assert!(engine
         .create_from_images(&[], &dir.join("none.pdf"))
@@ -852,6 +915,48 @@ fn image_pages_keep_jpeg_bytes_orientation_and_page_size_rules() {
         .create_from_images(&[broken], &dir.join("broken.pdf"))
         .is_err());
     assert!(!dir.join("broken.pdf").exists());
+}
+
+/// Writes a black 1-bit BMP. It stays small however many pixels it has.
+fn bmp(path: &std::path::Path, width: u32, height: u32) {
+    let size = width.div_ceil(32) * 4 * height;
+    let mut data = b"BM".to_vec();
+    for value in [62 + size, 0, 62, 40, width, height] {
+        data.extend(value.to_le_bytes());
+    }
+    data.extend([1, 0, 1, 0]); // one plane, one bit per pixel
+    for value in [0, size, 2835, 2835, 2, 0] {
+        data.extend(value.to_le_bytes());
+    }
+    data.extend([0, 0, 0, 0, 255, 255, 255, 0]);
+    data.resize(data.len() + size as usize, 0);
+    std::fs::write(path, data).unwrap();
+}
+
+#[test]
+fn image_pages_keep_full_resolution_and_refuse_oversized_images() {
+    let _com = Com::new();
+    let dir = out_dir("full-size");
+    let png = dir.join("wide.png");
+    imaging::export_frame(
+        &image(5000, 1000, |x, _| if x < 2500 { RED } else { BLUE }),
+        &png,
+    )
+    .unwrap();
+    let mut engine = PdfEngine::new().unwrap();
+    let combined = dir.join("combined.pdf");
+    engine.create_from_images(&[png], &combined).unwrap();
+    // 0.75 points per pixel: all 5000 pixels are kept, not 4096.
+    assert_eq!(
+        engine.page_sizes(&combined, &[]).unwrap(),
+        vec![[3750.0, 750.0]]
+    );
+    let huge = dir.join("huge.bmp");
+    bmp(&huge, 4200, 4200);
+    let error = engine
+        .create_from_images(&[huge], &dir.join("huge.pdf"))
+        .unwrap_err();
+    assert!(error.contains("16 megapixels"), "{error}");
 }
 
 #[test]
@@ -982,7 +1087,8 @@ fn incremental_save_appends_only_the_update() {
             "image",
             vec![PdfEdit::InsertImage {
                 at: 2,
-                path: png.clone(),
+                name: "page.png".into(),
+                bytes: std::fs::read(&png).unwrap().into(),
             }],
             vec![(2, ""), (3, "page 3 of")],
         ),

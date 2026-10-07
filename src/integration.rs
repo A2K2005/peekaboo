@@ -533,6 +533,11 @@ pub fn share_files(hwnd: HWND, paths: &[PathBuf]) -> Result<(), String> {
     let handler_token = token.clone();
     let handler = TypedEventHandler::<DataTransferManager, DataRequestedEventArgs>::new(
         move |sender, args| {
+            // One share per call; the next call registers fresh items. Remove
+            // the handler first, so a failure below cannot leave it registered.
+            sender
+                .ok()?
+                .RemoveDataRequested(handler_token.load(Ordering::SeqCst))?;
             let data = args.ok()?.Request()?.Data()?;
             data.Properties()?.SetTitle(&HSTRING::from(&title))?;
             let items = files
@@ -541,11 +546,7 @@ pub fn share_files(hwnd: HWND, paths: &[PathBuf]) -> Result<(), String> {
                 .collect::<Result<Vec<_>, _>>()?;
             data.SetStorageItemsReadOnly(&windows_collections::IIterable::<IStorageItem>::from(
                 items,
-            ))?;
-            // One share per call; the next call registers fresh items.
-            sender
-                .ok()?
-                .RemoveDataRequested(handler_token.load(Ordering::SeqCst))
+            ))
         },
     );
     token.store(
@@ -615,16 +616,28 @@ pub fn recent_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join(APP_KEY))
 }
 
-/// Newest first. Files that no longer exist are left out.
+/// Newest first, as saved. It reads one small file and checks no paths, so it
+/// is safe on the launch path. `prune_recent` drops files that no longer exist.
 pub fn load_recent(dir: &Path) -> Vec<PathBuf> {
-    // ponytail: exists() can stall on an offline network share; check off the UI thread if that bites.
     std::fs::read_to_string(dir.join(RECENT_FILE))
         .unwrap_or_default()
         .lines()
         .map(PathBuf::from)
-        .filter(|p| p.is_absolute() && p.exists())
+        .filter(|p| p.is_absolute())
         .take(RECENT_LIMIT)
         .collect()
+}
+
+/// Removes files that no longer exist from the list in `dir` and returns the
+/// new list. A check on an offline network share can take seconds, so call
+/// this on a worker thread, never on the UI thread.
+pub fn prune_recent(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let saved = load_recent(dir);
+    let missing: Vec<PathBuf> = saved.iter().filter(|p| !p.exists()).cloned().collect();
+    if missing.is_empty() {
+        return Ok(saved);
+    }
+    update_recent(dir, |list| list.retain(|p| !missing.contains(p)))
 }
 
 /// Moves `path` to the top of the list in `dir` and saves it. Returns the new list.
@@ -636,10 +649,20 @@ pub fn add_recent(dir: &Path, path: &Path) -> io::Result<Vec<PathBuf>> {
         ));
     };
     let key = text.to_lowercase();
+    update_recent(dir, |list| {
+        list.retain(|p| p.to_string_lossy().to_lowercase() != key);
+        list.insert(0, path.to_path_buf());
+        list.truncate(RECENT_LIMIT);
+    })
+}
+
+/// Changes the saved list and saves it. The lock keeps a worker's prune and
+/// the UI thread's add from writing the same temporary file.
+fn update_recent(dir: &Path, change: impl FnOnce(&mut Vec<PathBuf>)) -> io::Result<Vec<PathBuf>> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load_recent(dir);
-    list.retain(|p| p.to_string_lossy().to_lowercase() != key);
-    list.insert(0, path.to_path_buf());
-    list.truncate(RECENT_LIMIT);
+    change(&mut list);
     let lines: String = list
         .iter()
         .filter_map(|p| p.to_str())

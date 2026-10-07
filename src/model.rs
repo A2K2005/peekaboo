@@ -68,12 +68,15 @@ pub enum PdfEdit {
         index: u32,
         text: String,
     },
-    /// Inserts an image file as a new page at `at`. The page takes the size
-    /// of its neighbor page, turned to match the image orientation.
+    /// Inserts an image as a new page at `at`. The page takes the size of
+    /// its neighbor page, turned to match the image orientation. `bytes` is
+    /// the image file as read at insert time, so the recipe does not change
+    /// when the file moves or changes. `name` (the file name) is for display.
     #[allow(dead_code)]
     InsertImage {
         at: u32,
-        path: std::path::PathBuf,
+        name: String,
+        bytes: std::sync::Arc<[u8]>,
     },
 }
 

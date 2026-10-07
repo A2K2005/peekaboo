@@ -90,13 +90,13 @@ impl PdfEngine {
         }
         let document = self.new_document()?;
         for (index, image) in images.iter().enumerate() {
-            self.insert_image(
-                document.handle,
-                index as u32,
-                image,
-                pages::ImageFit::Natural,
-            )
-            .map_err(|e| format!("{e} ({})", image.display()))?;
+            std::fs::read(image)
+                .map_err(|e| format!("Cannot read the image file: {e}"))
+                .and_then(|bytes| {
+                    let fit = pages::ImageFit::Natural;
+                    self.insert_image(document.handle, index as u32, &bytes, fit)
+                })
+                .map_err(|e| format!("{e} ({})", image.display()))?;
         }
         self.write_new(document.handle, output, FULL_SAVE)
     }

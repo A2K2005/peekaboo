@@ -245,10 +245,12 @@ fn recent_files_are_newest_first_capped_and_pruned() {
     );
 
     std::fs::remove_file(&files[24]).unwrap();
-    assert!(
-        !integration::load_recent(&store).contains(&files[24]),
-        "missing files are pruned"
-    );
+    // Loading checks no paths, so it cannot stall on an offline share.
+    assert!(integration::load_recent(&store).contains(&files[24]));
+    let pruned = integration::prune_recent(&store).unwrap();
+    assert!(!pruned.contains(&files[24]), "missing files are pruned");
+    assert_eq!(pruned.len(), 19);
+    assert_eq!(integration::load_recent(&store), pruned);
     assert!(integration::add_recent(&store, Path::new("relative.png")).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
