@@ -60,7 +60,8 @@ Add-Metric 'memory_20_pages_pdf_working_set_max' 'bytes' $(if (-not $memoryNote)
 Add-Metric 'exe_bytes' 'bytes' (Get-Item -LiteralPath $exe).Length 'none (part of the 30 MB download)' $null
 
 # package.ps1 builds dist/ from target/release, so its size matches -Executable only for the default path.
-$packageOutput = & { $ErrorActionPreference = 'Continue'; & (Join-Path $PSHOME 'powershell.exe') -NoProfile -File (Join-Path $root 'tools\package.ps1') 2>&1 | ForEach-Object { "$_" } }
+# -SkipMsix: the suite needs only the ZIP, and the MSIX step needs the Windows SDK.
+$packageOutput = & { $ErrorActionPreference = 'Continue'; & (Join-Path $PSHOME 'powershell.exe') -NoProfile -File (Join-Path $root 'tools\package.ps1') -SkipMsix 2>&1 | ForEach-Object { "$_" } }
 $packageText = $packageOutput -join "`n"
 if ($LASTEXITCODE -eq 0 -and $packageText -match '"zip_bytes":\s*(\d+)') {
     Add-Metric 'package_zip_bytes' 'bytes' ([long]$Matches[1]) 'under 30 MB (download without AI model)' $null

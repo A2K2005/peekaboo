@@ -1,12 +1,13 @@
 #requires -Version 5.1
-# Builds dist\Preview-*-Windows-x64.zip and a test-signed dist\Preview-*-x64.msix from the release build.
+# Builds dist\Preview-*-Windows-x64.zip and an unsigned dist\Preview-*-x64.msix from the release build.
 # Steps and owner tasks: docs/packaging.md.
 [CmdletBinding()]
 param(
     [switch]$IncludeAiPack,
     [switch]$SkipMsix,
-    # Leaves the MSIX unsigned. By default it is signed with a self-signed test certificate in CurrentUser\My.
-    [switch]$SkipSign,
+    # Signs the MSIX with a self-signed test certificate in Cert:\CurrentUser\My, created on first use.
+    # Without this switch, the script never reads or creates a certificate.
+    [switch]$Sign,
     [string]$WindowsSdkBin = 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64'
 )
 $ErrorActionPreference = 'Stop'
@@ -120,7 +121,7 @@ $msix = $destination + '-x64.msix'
 & $makeappx pack /o /h SHA256 /d $layout /p $msix | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'makeappx could not pack or validate the MSIX.' }
 $signed = $false
-if (-not $SkipSign) {
+if ($Sign) {
     $publisher = $appx.Package.Identity.Publisher
     $certificate = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $publisher -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date).AddDays(1) } | Select-Object -First 1
     if (-not $certificate) {
