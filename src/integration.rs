@@ -44,6 +44,9 @@ pub const COPYDATA_TAG: usize = 0x5046_5731;
 /// Command lines are at most 32,767 characters, so 1 MiB is ample.
 const MAX_PAYLOAD: u32 = 1 << 20;
 const HANDOFF_WAIT: Duration = Duration::from_secs(5);
+/// Starts the process that stays running after sign-in and opens Quick view.
+pub const RESIDENT_FLAG: &str = "--resident";
+const RUN_KEY: &str = "Microsoft\\Windows\\CurrentVersion\\Run";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -51,6 +54,7 @@ pub enum Action {
     Convert,
     Resize,
     Combine,
+    Peek,
 }
 
 impl Action {
@@ -60,6 +64,7 @@ impl Action {
             Action::Convert => "--convert",
             Action::Resize => "--resize",
             Action::Combine => "--combine",
+            Action::Peek => "--peek",
         }
     }
 
@@ -69,6 +74,7 @@ impl Action {
             Action::Convert,
             Action::Resize,
             Action::Combine,
+            Action::Peek,
         ]
         .into_iter()
         .find(|a| a.flag() == flag)
@@ -81,7 +87,7 @@ pub struct Command {
     pub paths: Vec<PathBuf>,
 }
 
-/// Reads `[--convert | --resize | --combine] path...` (arguments after the
+/// Reads `[--convert | --resize | --combine | --peek] path...` (arguments after the
 /// program name). Relative paths resolve against the current folder.
 /// Other flags are ignored.
 pub fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Command {
@@ -283,7 +289,8 @@ pub const FILE_TYPES: [(&str, &str, &str); 11] = [
     (".bmp", "PreviewForWindows.Bmp", "BMP image"),
 ];
 /// Explorer verb key, menu text, action, and whether PDFs get it.
-pub const VERBS: [(&str, &str, Action, bool); 3] = [
+pub const VERBS: [(&str, &str, Action, bool); 4] = [
+    ("PreviewForWindows.Peek", "Quick view", Action::Peek, true),
     (
         "PreviewForWindows.Convert",
         "Convert",
@@ -300,7 +307,8 @@ pub const VERBS: [(&str, &str, Action, bool); 3] = [
 ];
 
 /// Registers the app for this Windows user: ProgIDs, "Open with", Default
-/// apps, and the Explorer verbs. It never changes a default app.
+/// apps, the Explorer verbs, and the sign-in start of the resident process.
+/// It never changes a default app.
 pub fn register(exe: &Path) -> Result<(), String> {
     register_at("Software", exe)?;
     notify_associations_changed();
@@ -361,6 +369,11 @@ pub fn register_at(base: &str, exe: &Path) -> Result<(), String> {
         "Player",
     )?;
     set(&format!("{application}\\shell\\open\\command"), "", &open)?;
+    set(
+        &format!("{base}\\{RUN_KEY}"),
+        APP_KEY,
+        &format!("\"{exe}\" {RESIDENT_FLAG}"),
+    )?;
     set(&capabilities, "ApplicationName", APP_NAME)?;
     set(
         &capabilities,
@@ -399,6 +412,7 @@ pub fn unregister_at(base: &str, exe: &Path) -> Result<(), String> {
     keep_first_error(delete_tree(&format!("{classes}\\Applications\\{exe_name}")));
     keep_first_error(delete_tree(&format!("{base}\\{APP_KEY}\\Capabilities")));
     keep_first_error(delete_tree(&format!("{base}\\{APP_KEY}\\{PRESERVED_KEY}")));
+    keep_first_error(delete_value(&format!("{base}\\{RUN_KEY}"), APP_KEY));
     keep_first_error(delete_value(
         &format!("{base}\\RegisteredApplications"),
         APP_NAME,

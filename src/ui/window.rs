@@ -11,6 +11,7 @@ use super::{
 };
 use std::{
     cell::RefCell,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 use windows::{
@@ -38,6 +39,26 @@ thread_local! {
 }
 
 pub fn run() -> Result<()> {
+    prepare()?;
+    let command = crate::integration::parse_args(std::env::args_os().skip(1));
+    let mut paths = Vec::new();
+    for path in command.paths.into_iter().map(|p| std::fs::canonicalize(&p).unwrap_or(p)) {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    use crate::integration::Action;
+    let verb = matches!(command.action, Action::Convert | Action::Resize)
+        .then(|| (command.action == Action::Resize, std::mem::take(&mut paths)));
+    unsafe {
+        let result = main_window(&paths, verb, true);
+        OleUninitialize();
+        result
+    }
+}
+
+/// Process-wide setup. Call once, before this process creates any window.
+pub fn prepare() -> Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Mouse input arrives as WM_POINTER, like pen and touch. It is
@@ -47,20 +68,9 @@ pub fn run() -> Result<()> {
         // OLE, not only COM: drag-out and the share sheet need it.
         // https://learn.microsoft.com/windows/win32/api/ole2/nf-ole2-oleinitialize
         OleInitialize(None)?;
-        let command = crate::integration::parse_args(std::env::args_os().skip(1));
-        let mut paths = Vec::new();
-        for path in command.paths.into_iter().map(|p| std::fs::canonicalize(&p).unwrap_or(p)) {
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-        use crate::integration::Action;
-        let verb = matches!(command.action, Action::Convert | Action::Resize)
-            .then(|| (command.action == Action::Resize, std::mem::take(&mut paths)));
-        let instance = GetModuleHandleW(None)?;
         let wc = WNDCLASSW {
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hInstance: instance.into(),
+            hInstance: GetModuleHandleW(None)?.into(),
             lpszClassName: CLASS,
             lpfnWndProc: Some(wndproc),
             ..Default::default()
@@ -68,60 +78,75 @@ pub fn run() -> Result<()> {
         if RegisterClassW(&wc) == 0 {
             return Err(Error::from_thread());
         }
-        let system = GetDpiForSystem() as f32 / 96.0;
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
-            CLASS,
-            w!("Preview for Windows"),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            (1100.0 * system) as i32,
-            (800.0 * system) as i32,
-            None,
-            None,
-            Some(instance.into()),
-            None,
-        )?;
-        let workers = Workers::start(hwnd).map_err(|_| Error::from_thread())?;
-        let mut client = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client);
-        let mut state = State::new(
-            workers,
-            &paths,
-            (client.right as f32, client.bottom as f32),
-            GetDpiForWindow(hwnd) as f32 / 96.0,
-            theme::text_scale_from_registry(),
-            theme::apply(hwnd, theme::current()),
-        );
-        state.bench = super::bench::Bench::from_env();
-        state.tools.verb = verb;
-        install(state);
-        // Apply WM_NCCALCSIZE now that the state exists, so the caption goes.
-        let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        super::drop::register(hwnd);
+        Ok(())
+    }
+}
+
+/// Creates the main window hidden and handles messages until the window is destroyed.
+pub fn standby() -> Result<()> {
+    unsafe { main_window(&[], None, false) }
+}
+
+unsafe fn main_window(paths: &[PathBuf], verb: Option<(bool, Vec<PathBuf>)>, show: bool) -> Result<()> {
+    let instance = GetModuleHandleW(None)?;
+    let system = GetDpiForSystem() as f32 / 96.0;
+    let hwnd = CreateWindowExW(
+        WINDOW_EX_STYLE::default(),
+        CLASS,
+        w!("Preview for Windows"),
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        (1100.0 * system) as i32,
+        (800.0 * system) as i32,
+        None,
+        None,
+        Some(instance.into()),
+        None,
+    )?;
+    let workers = Workers::start(hwnd).map_err(|_| Error::from_thread())?;
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let mut state = State::new(
+        workers,
+        paths,
+        (client.right as f32, client.bottom as f32),
+        GetDpiForWindow(hwnd) as f32 / 96.0,
+        theme::text_scale_from_registry(),
+        theme::apply(hwnd, theme::current()),
+    );
+    state.bench = super::bench::Bench::from_env();
+    state.tools.verb = verb;
+    install(state);
+    super::WINDOW.set(hwnd);
+    super::PEEKING.set(false);
+    // Apply WM_NCCALCSIZE now that the state exists, so the caption goes.
+    let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    super::drop::register(hwnd);
+    if show {
         SetTimer(Some(hwnd), 1, 10, None);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
-        let mut message = MSG::default();
-        loop {
-            let result = GetMessageW(&mut message, None, 0, 0).0;
-            if result == -1 {
-                return Err(Error::from_thread());
-            }
-            if result == 0 {
-                break;
-            }
-            if super::findbar::pre_dispatch(hwnd, &message) {
-                continue;
-            }
-            let _ = TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-        uninstall();
-        OleUninitialize();
-        Ok(())
     }
+    let mut message = MSG::default();
+    loop {
+        let result = GetMessageW(&mut message, None, 0, 0).0;
+        if result == -1 {
+            return Err(Error::from_thread());
+        }
+        if result == 0 {
+            break;
+        }
+        if super::findbar::pre_dispatch(hwnd, &message) {
+            continue;
+        }
+        let _ = TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    super::WINDOW.set(HWND::default());
+    a11y::stop();
+    uninstall();
+    Ok(())
 }
 
 /// Starts UISettings after first content: it is the documented source of
@@ -504,6 +529,9 @@ unsafe fn escape(hwnd: HWND) {
 unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
     let down = |key: VIRTUAL_KEY| GetKeyState(key.0 as i32) < 0;
     let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
+    if !ctrl && !shift && !alt && matches!(VIRTUAL_KEY(vk), VK_SPACE | VK_ESCAPE) && super::dismiss(hwnd) {
+        return true;
+    }
     if vk == VK_MENU.0 {
         with_state(|s| s.alt_armed = true);
         return true;

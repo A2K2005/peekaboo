@@ -162,7 +162,7 @@ fn register_writes_per_user_keys_and_unregister_removes_them() {
         ),
         Some(capabilities)
     );
-    assert_eq!(dump(&base).len(), 195, "values written");
+    assert_eq!(dump(&base).len(), 240, "values written");
 
     integration::unregister_at(&base, exe).unwrap();
     assert_eq!(
