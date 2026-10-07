@@ -392,6 +392,7 @@ unsafe fn leave(hwnd: HWND, back: bool) {
         let layout = s.layout();
         s.focus = widgets::next_focus(&layout.widgets, Some(WidgetId::FindField), back);
         s.focus_visible = true;
+        s.document_ring = s.focus == Some(WidgetId::Document);
         s.focus == Some(WidgetId::FindField)
     })
     .unwrap_or(true);

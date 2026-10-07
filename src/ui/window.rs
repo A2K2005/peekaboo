@@ -517,6 +517,7 @@ unsafe fn pointer(hwnd: HWND, e: PointerEvent, secondary_up: bool) {
         match e.phase {
             Phase::Down => {
                 s.focus_visible = false;
+                s.document_ring = false;
                 s.keytips = None;
                 s.tooltip = None;
                 s.hover_since = None;
@@ -726,6 +727,7 @@ unsafe fn key_down(hwnd: HWND, vk: u16, system: bool) -> bool {
             let layout = s.layout();
             s.focus = widgets::next_focus(&layout.widgets, s.focus, shift);
             s.focus_visible = true;
+            s.document_ring = s.focus == Some(WidgetId::Document);
         });
         super::findbar::follow_focus();
         invalidate(hwnd);

@@ -8,7 +8,7 @@ use super::{
     commands::{self, glyph, Chord, Command},
     document,
     paint::{icon_button, text_button, Look},
-    render::Align,
+    render::{measure, Align},
     theme::{Mode, Rgba, Theme},
     view::{self, ViewMode, Zoom},
     widgets::{self, plain_widget, Layout, Rect, Region, Role, WidgetId},
@@ -329,6 +329,7 @@ fn reset(s: &mut State) {
     s.selection = None;
     s.text_selection = None;
     s.focus = None;
+    s.document_ring = false;
     s.zoom = Zoom::Fit;
     s.pan = (0.0, 0.0);
     s.forms = Default::default();
@@ -990,8 +991,10 @@ pub(super) fn layout(s: &State, q: &Quick, layout: &mut Layout) {
             left = rect.x1;
         }
         strip_widgets.reverse();
-        let half = ((w / 2.0 - left).min(right - w / 2.0) - 8.0 * scale).max(0.0);
-        layout.title_text = Rect { x0: w / 2.0 - half, y0: 0.0, x1: w / 2.0 + half, y1: strip.y1 };
+        // The room between the buttons; paint centers the name in the
+        // window when it fits there, so a small window still shows it.
+        let gap = 8.0 * scale;
+        layout.title_text = Rect { x0: left + gap, y0: 0.0, x1: (right - gap).max(left + gap), y1: strip.y1 };
     }
     for widget in &mut strip_widgets {
         widget.focusable &= !modal;
@@ -1051,7 +1054,10 @@ pub(super) fn paint(l: &Look, bitmap: Option<&ID2D1Bitmap>, s: &mut State, layou
     l.p.fill(Rect { y0: strip.y1 - l.s, ..strip }, l.t.divider.alpha(l.t.divider.3 * alpha));
     let look = Look { p: l.p, t: faded(l.t, alpha), f: l.f, s: l.s };
     let name = q.files.get(q.index).map(|p| file_name(p)).unwrap_or_default();
-    l.p.text(&name, layout.title_text, &l.f.strong, look.t.text, Align::Center);
+    let room = layout.title_text;
+    let width = (measure(&name, &l.f.strong, 100_000.0).0.ceil() + l.s).min(room.width());
+    let x0 = (strip.width() / 2.0 - width / 2.0).min(room.x1 - width).max(room.x0);
+    l.p.text(&name, Rect { x0, x1: x0 + width, ..room }, &l.f.strong, look.t.text, Align::Center);
     for w in layout.widgets.iter().filter(|w| w.region == Region::TitleBar) {
         if w.id == WidgetId::Command(Command::OpenInEditor) {
             text_button(&look, s, w);

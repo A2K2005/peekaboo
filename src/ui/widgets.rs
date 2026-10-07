@@ -553,9 +553,10 @@ pub(super) fn layout(input: &Input) -> Layout {
         let tools: Vec<Command> =
             commands::MARKUP_TOOLS.iter().copied().filter(|c| !input.has_document || commands::for_type(*c, input.ctx.pdf)).collect();
         let drop: Vec<Command> = tools.iter().rev().copied().collect();
-        // Tools appear once the bar has slid fully open, so a half-open bar
-        // never takes clicks meant for the bar above.
-        if input.markup >= 1.0 {
+        // Tools appear once their row fits in the visible bar, so a half-open
+        // bar never takes clicks meant for the bar above. The slide eases
+        // out, so the bar looks open long before it reaches its full height.
+        if bar.height() >= (bar_h + small) / 2.0 {
             let (row, hidden) = fit_row(&tools, &drop, Command::MoreTools, false, width - 2.0 * pad, small, s);
             let x = ((width - row_width(&row, small, s)) / 2.0).max(pad);
             place_row(w, &row, Region::MarkupBar, x, top + bar_h / 2.0, small, s, &input.ctx);

@@ -152,6 +152,7 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
                 let layout = s.layout();
                 s.focus = widgets::next_region(&layout.widgets, s.focus, command == PreviousPane).or(s.focus);
                 s.focus_visible = true;
+                s.document_ring = s.focus == Some(WidgetId::Document);
             });
             super::findbar::follow_focus();
             invalidate(hwnd);

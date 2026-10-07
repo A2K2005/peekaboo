@@ -280,6 +280,9 @@ pub(super) struct State {
     pub(super) focus: Option<WidgetId>,
     /// Focus rectangles show after keyboard use only, as in Windows.
     pub(super) focus_visible: bool,
+    /// Tab or F6 moved focus to the document. Only then does the document
+    /// show a focus ring; Preview shows none after a click or on open.
+    pub(super) document_ring: bool,
     pub(super) keytips: Option<Scope>,
     /// Alt went down with no other key yet; releasing it shows keytips.
     pub(super) alt_armed: bool,
@@ -416,6 +419,7 @@ impl State {
             tooltip: None,
             pressed: None,
             focus_visible: false,
+            document_ring: false,
             keytips: None,
             alt_armed: false,
             caption_hover: None,

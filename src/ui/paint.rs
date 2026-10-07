@@ -361,10 +361,16 @@ fn focus_ring(l: &Look, state: &State, layout: &Layout) {
     if w.role == Role::Field {
         return;
     }
+    let s = l.s.floor().max(1.0);
+    if w.role == Role::Document {
+        if state.document_ring {
+            l.p.stroke_round(w.rect.inset(2.0 * s), 6.0 * l.s, l.t.focus_outer.alpha(l.t.focus_outer.3 * 0.5), s);
+        }
+        return;
+    }
     // Fluent focus visual: 2 px outer stroke, 1 px inner stroke.
     // https://learn.microsoft.com/windows/apps/design/input/guidelines-for-visualfocus
-    let s = l.s.floor().max(1.0);
-    let r = if w.role == Role::Document { w.rect.inset(2.0 * s) } else { w.rect.inset(-2.0 * s) };
+    let r = w.rect.inset(-2.0 * s);
     l.p.stroke_round(r, 6.0 * l.s, l.t.focus_outer, 2.0 * s);
     l.p.stroke_round(r.inset(2.0 * s), 4.0 * l.s, l.t.focus_inner, s);
 }
