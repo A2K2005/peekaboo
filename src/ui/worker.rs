@@ -10,6 +10,8 @@
 //! newest request runs first and work for pages that scrolled away is
 //! dropped before it starts (the SumatraPDF pattern in
 //! docs/research/reference-architecture.md, Q2). Jobs run before queued work.
+//! Long jobs (batches and printing) run one file or page per turn, after
+//! both, so they never hold up the view.
 use super::cache::Lru;
 use crate::model::{Frame, ImageEdit, OutlineItem, PdfEdit, PdfMetadata};
 use std::{
@@ -217,10 +219,29 @@ pub(super) fn sibling(path: &Path, delta: i32) -> std::result::Result<PathBuf, S
 /// and next image at display size.
 type Decoded = Lru<(PathBuf, u32, u32), Frame>;
 
+/// A batch conversion in progress.
+struct Batch {
+    files: Vec<PathBuf>,
+    next: usize,
+    good: usize,
+    errors: Vec<String>,
+    folder: PathBuf,
+    extension: String,
+    cancel: Arc<AtomicBool>,
+    edits: Vec<ImageEdit>,
+}
+
+/// Work that runs a step at a time between other jobs.
+enum Long {
+    Batch(Batch),
+    Print(crate::printing::Printing, PathBuf, Edits),
+}
+
 struct Worker {
     engine: Option<crate::pdf::PdfEngine>,
     decoded: Decoded,
     com: bool,
+    long: Option<Long>,
 }
 
 impl Worker {
@@ -356,6 +377,68 @@ impl Worker {
         sender.send(event).is_ok()
     }
 
+    /// Runs one file of a batch or one page of a print job. Returns false
+    /// when the window has gone.
+    fn step(&mut self, sender: &Events) -> bool {
+        let event = match self.long.take() {
+            None => return true,
+            Some(Long::Batch(mut batch)) => {
+                if batch.next >= batch.files.len() || batch.cancel.load(Ordering::Acquire) {
+                    let total = batch.files.len();
+                    let failed = batch.errors.len();
+                    Event::Finished(Ok(format!(
+                        "Batch finished: {} saved, {failed} failed, {} not processed.{}",
+                        batch.good,
+                        total - batch.good - failed,
+                        batch.errors.first().map(|e| format!(" First error: {e}")).unwrap_or_default()
+                    )))
+                } else {
+                    let path = batch.files[batch.next].clone();
+                    batch.next += 1;
+                    let progress = format!(
+                        "Converting image {} of {}. Escape cancels after the current file.",
+                        batch.next,
+                        batch.files.len()
+                    );
+                    if sender.send(Event::Progress(progress)).is_err() {
+                        return false;
+                    }
+                    let mut output = batch.folder.join(path.file_name().unwrap_or_default());
+                    output.set_extension(&batch.extension);
+                    let result = if batch.extension == "pdf" {
+                        self.pdf().and_then(|engine| {
+                            crate::imaging::decode_edited(&path, u32::MAX, u32::MAX, &batch.edits)
+                                .and_then(|frame| engine.create_from_image(&frame, &output))
+                        })
+                    } else {
+                        crate::imaging::export(&path, &output, &batch.edits)
+                    };
+                    match result {
+                        Ok(()) => batch.good += 1,
+                        Err(error) => {
+                            batch.errors.push(format!("{}: {error}", path.file_name().unwrap_or_default().to_string_lossy()))
+                        }
+                    }
+                    self.long = Some(Long::Batch(batch));
+                    return true;
+                }
+            }
+            Some(Long::Print(mut printing, path, edits)) => {
+                let result = self.pdf().and_then(|engine| printing.page(engine, &path, &edits.pdf, &edits.image));
+                match result {
+                    Ok(true) => {
+                        self.long = Some(Long::Print(printing, path, edits));
+                        return true;
+                    }
+                    Ok(false) => Event::Finished(printing.finish().map(|_| "Print job sent to Windows.".into())),
+                    // Dropping the job aborts the document.
+                    Err(error) => Event::Finished(Err(error)),
+                }
+            }
+        };
+        sender.send(event).is_ok()
+    }
+
     /// Saves, text, search, forms, printing, and batches.
     fn other(&mut self, job: Job, sender: &Events) -> bool {
         let request = match &job {
@@ -428,13 +511,16 @@ impl Worker {
                 let result = crate::background::remove(&request.path, &output, &edits.image);
                 Event::Background(output, result)
             }
-            Job::Print(_, job) => Event::Finished(
-                self.pdf()
-                    .and_then(|engine| {
-                        crate::printing::print(job, engine, &request.path, &edits.pdf, &edits.image, is_pdf(&request.path))
-                    })
-                    .map(|_| "Print job sent to Windows.".into()),
-            ),
+            Job::Print(..) | Job::Batch(..) if self.long.is_some() => {
+                Event::Finished(Err("Wait for the current print or conversion to finish, then try again.".into()))
+            }
+            Job::Print(_, job) => match crate::printing::start(job, &request.path, is_pdf(&request.path)) {
+                Ok(printing) => {
+                    self.long = Some(Long::Print(printing, request.path, edits));
+                    return true;
+                }
+                Err(error) => Event::Finished(Err(error)),
+            },
             Job::Batch(_, folder, extension, cancel, selected) => {
                 let files = match selected {
                     Some(selected) => Ok(selected),
@@ -458,40 +544,9 @@ impl Worker {
                     Err(error) => Event::Finished(Err(format!("Cannot read this folder: {error}"))),
                     Ok(mut files) => {
                         files.sort();
-                        let total = files.len();
-                        let (mut good, mut errors) = (0, Vec::new());
-                        for (index, path) in files.iter().enumerate() {
-                            if cancel.load(Ordering::Acquire) {
-                                break;
-                            }
-                            let _ = sender.send(Event::Progress(format!(
-                                "Converting image {} of {total}. Escape cancels after the current file.",
-                                index + 1
-                            )));
-                            let mut output = folder.join(path.file_name().unwrap_or_default());
-                            output.set_extension(&extension);
-                            let result = if extension == "pdf" {
-                                self.pdf().and_then(|engine| {
-                                    crate::imaging::decode_edited(path, u32::MAX, u32::MAX, &edits.image)
-                                        .and_then(|frame| engine.create_from_image(&frame, &output))
-                                })
-                            } else {
-                                crate::imaging::export(path, &output, &edits.image)
-                            };
-                            match result {
-                                Ok(()) => good += 1,
-                                Err(error) => errors.push(format!(
-                                    "{}: {error}",
-                                    path.file_name().unwrap_or_default().to_string_lossy()
-                                )),
-                            }
-                        }
-                        Event::Finished(Ok(format!(
-                            "Batch finished: {good} saved, {} failed, {} not processed.{}",
-                            errors.len(),
-                            total - good - errors.len(),
-                            errors.first().map(|e| format!(" First error: {e}")).unwrap_or_default()
-                        )))
+                        let batch = Batch { files, next: 0, good: 0, errors: Vec::new(), folder, extension, cancel, edits: edits.image };
+                        self.long = Some(Long::Batch(batch));
+                        return true;
                     }
                 }
             }
@@ -504,7 +559,7 @@ impl Worker {
 fn worker(receiver: mpsc::Receiver<Job>, sender: Events, queue: Arc<Mutex<Queue>>) {
     unsafe {
         let com = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-        let mut state = Worker { engine: None, decoded: Lru::new(0), com };
+        let mut state = Worker { engine: None, decoded: Lru::new(0), com, long: None };
         loop {
             let job = match receiver.try_recv() {
                 Ok(job) => job,
@@ -514,6 +569,12 @@ fn worker(receiver: mpsc::Receiver<Job>, sender: Events, queue: Arc<Mutex<Queue>
                     if let Some(item) = item {
                         let outcome = state.queued(&item);
                         if sender.send(Event::Done(item, outcome)).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    if state.long.is_some() {
+                        if !state.step(&sender) {
                             break;
                         }
                         continue;
@@ -696,6 +757,64 @@ mod tests {
         q.delivered(&first.key);
         q.set(vec![item(1)]);
         assert_eq!(q.pop().unwrap().key, item(1).key, "asked again after delivery");
+    }
+
+    /// A batch of 30 images into PDFs runs on the document worker. A PDF
+    /// opened right after it must not wait for the whole batch.
+    #[test]
+    fn batches_yield_to_the_view_between_files() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        if !fixtures.join("image-small.png").is_file() {
+            eprintln!("skipped: fixtures are missing; run tools/make-fixtures.ps1");
+            return;
+        }
+        let folder = std::env::temp_dir().join(format!("pfw-batch-{}", std::process::id()));
+        let out = folder.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let files: Vec<PathBuf> = (0..30)
+            .map(|n| {
+                let file = folder.join(format!("{n:02}.png"));
+                std::fs::copy(fixtures.join("image-small.png"), &file).unwrap();
+                file
+            })
+            .collect();
+        let pdf = std::fs::canonicalize(fixtures.join("20-pages.pdf")).unwrap();
+        let mut workers = Workers::start(HWND::default()).unwrap();
+        let request = |path: &Path| Request {
+            generation: 1,
+            path: path.to_path_buf(),
+            page: 0,
+            delta: 0,
+            width: 1,
+            height: 1,
+            sessions: HashMap::new(),
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(workers.send(Job::Batch(request(&files[0]), out.clone(), "pdf".into(), cancel, Some(files.clone()))));
+        let mut order = Vec::new();
+        loop {
+            match workers.receiver.recv_timeout(std::time::Duration::from_secs(60)).expect("the worker stopped") {
+                // Open the PDF once the batch is under way.
+                Event::Progress(_) if order.is_empty() => {
+                    assert!(workers.send(Job::Open(request(&pdf))));
+                    order.push("started");
+                }
+                Event::Pages(opened) => {
+                    assert_eq!(opened.result.unwrap().len(), 20);
+                    order.push("pages");
+                }
+                Event::Finished(result) => {
+                    assert!(result.unwrap().starts_with("Batch finished: 30 saved"));
+                    order.push("finished");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(order, vec!["started", "pages", "finished"], "the PDF opened before the batch ended");
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 30);
+        workers.stop();
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     /// Opens the 500-page fixture on a real document worker, renders tiles

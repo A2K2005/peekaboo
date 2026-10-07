@@ -141,15 +141,22 @@ impl Drop for CancelScope {
     }
 }
 
-/// Run on the existing decoder worker. No PDFium calls run outside its engine owner.
-pub fn print(
-    mut job: PrintJob,
-    engine: &mut PdfEngine,
-    path: &Path,
-    pdf_edits: &[PdfEdit],
-    image_edits: &[ImageEdit],
+/// A print job in progress. `page` prints one page per call, so the
+/// document worker can render pages for the window between them. Run on
+/// the existing decoder worker. No PDFium calls run outside its engine owner.
+pub struct Printing {
+    job: PrintJob,
+    next: u32,
     is_pdf: bool,
-) -> Result<(), String> {
+    /// Left and top margins, then the printable width and height, in printer pixels.
+    area: (i32, i32, i32, i32),
+    dpi: (u32, u32),
+    render: (u32, u32),
+    _cancel: CancelScope,
+}
+
+/// Checks the printer and starts the document.
+pub fn start(mut job: PrintJob, path: &Path, is_pdf: bool) -> Result<Printing, String> {
     job.check_cancelled()?;
     if !is_pdf && (job.first != 0 || job.last != 0) {
         return Err("An image has only one printable page.".into());
@@ -172,8 +179,7 @@ pub fn print(
     if width <= 0 || height <= 0 {
         return Err("The printable page is too small.".into());
     }
-    let (render_width, render_height) =
-        render_bounds(width as u32, height as u32, dpi_x as u32, dpi_y as u32)?;
+    let render = render_bounds(width as u32, height as u32, dpi_x as u32, dpi_y as u32)?;
     let name: Vec<u16> = path
         .file_name()
         .unwrap_or_default()
@@ -182,7 +188,7 @@ pub fn print(
         .chain(Some(0))
         .collect();
     CANCEL.with(|flag| *flag.borrow_mut() = Some(Arc::clone(&job.cancel)));
-    let _cancel_scope = CancelScope;
+    let cancel = CancelScope;
     unsafe {
         if SetAbortProc(job.dc, Some(abort_print)) <= 0 {
             return Err("The printer could not set up cancellation.".into());
@@ -197,10 +203,32 @@ pub fn print(
         }
         job.started = true;
     }
-    for page in job.first..=job.last {
+    Ok(Printing {
+        next: job.first,
+        job,
+        is_pdf,
+        area: (margin_x, margin_y, width, height),
+        dpi: (dpi_x as u32, dpi_y as u32),
+        render,
+        _cancel: cancel,
+    })
+}
+
+impl Printing {
+    /// Prints the next page. Returns true while pages remain.
+    pub fn page(
+        &mut self,
+        engine: &mut PdfEngine,
+        path: &Path,
+        pdf_edits: &[PdfEdit],
+        image_edits: &[ImageEdit],
+    ) -> Result<bool, String> {
+        let job = &self.job;
+        let (margin_x, margin_y, width, height) = self.area;
+        let (render_width, render_height) = self.render;
         job.check_cancelled()?;
-        let mut frame = if is_pdf {
-            engine.render_for_print(path, page, render_width, render_height, pdf_edits)?
+        let mut frame = if self.is_pdf {
+            engine.render_for_print(path, self.next, render_width, render_height, pdf_edits)?
         } else {
             imaging::decode_edited(path, render_width, render_height, image_edits)?
         };
@@ -215,8 +243,8 @@ pub fn print(
             frame.height,
             width as u32,
             height as u32,
-            dpi_x as u32,
-            dpi_y as u32,
+            self.dpi.0,
+            self.dpi.1,
         )?;
         let x = margin_x + (width - dest_width as i32) / 2;
         let y = margin_y + (height - dest_height as i32) / 2;
@@ -259,13 +287,19 @@ pub fn print(
                 return Err("The printer could not finish this page.".into());
             }
         }
+        self.next += 1;
+        Ok(self.next <= self.job.last)
     }
-    job.check_cancelled()?;
-    if unsafe { EndDoc(job.dc) } <= 0 {
-        return Err("The printer could not finish the document.".into());
+
+    /// Ends the document. Dropping an unfinished job aborts it.
+    pub fn finish(mut self) -> Result<(), String> {
+        self.job.check_cancelled()?;
+        if unsafe { EndDoc(self.job.dc) } <= 0 {
+            return Err("The printer could not finish the document.".into());
+        }
+        self.job.started = false;
+        Ok(())
     }
-    job.started = false;
-    Ok(())
 }
 
 fn checked_range(first: u32, last: u32, count: u32) -> Result<(u32, u32), String> {
