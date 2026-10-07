@@ -264,8 +264,8 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             };
             let to = values.first().and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| *v > 0 && *v <= count);
             match to {
-                Some(to) => edit(hwnd, |s, edits| {
-                    edits.pdf.push(PdfEdit::Move { from: s.page, to: to - 1 });
+                Some(to) => edit_same_page(hwnd, &request, |s, edits| {
+                    edits.pdf.push(PdfEdit::Move { from: request.page, to: to - 1 });
                     s.page = to - 1;
                 }),
                 None => sheet::alert(hwnd, "Move page", &format!("Enter a page number from 1 to {count}.")),
@@ -295,9 +295,9 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             {
                 return;
             }
-            edit(hwnd, |s, edits| {
-                edits.pdf.push(PdfEdit::Delete { page: s.page });
-                s.page = s.page.min(count.saturating_sub(2));
+            edit_same_page(hwnd, &request, |s, edits| {
+                edits.pdf.push(PdfEdit::Delete { page: request.page });
+                s.page = request.page.min(count.saturating_sub(2));
             });
         }
         Fit | ZoomIn | ZoomOut => {
@@ -353,6 +353,24 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
         }),
         _ => {}
     }
+}
+
+/// True while the file, page, and render generation still match a request
+/// captured before a sheet opened. A Find result or a slideshow step can
+/// move to another page while the sheet waits.
+pub(super) fn same_target(s: &super::app::State, request: &Request) -> bool {
+    s.generation == request.generation && s.page == request.page && s.path.as_ref() == Some(&request.path)
+}
+
+/// Applies a page edit chosen in a sheet, only if the page did not change
+/// while the sheet was open.
+unsafe fn edit_same_page(hwnd: HWND, request: &Request, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
+    if with_state(|s| same_target(s, request)) != Some(true) {
+        with_state(|s| s.status = "The page changed while the dialog was open. Nothing was edited.".into());
+        invalidate(hwnd);
+        return;
+    }
+    edit(hwnd, change);
 }
 
 /// Applies one recipe change to the open file and renders again.
@@ -556,6 +574,28 @@ pub(super) unsafe fn context_menu(hwnd: HWND, at: Option<(f32, f32)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_edits_from_a_sheet_need_the_same_page_and_generation() {
+        use super::super::{app::State, theme, worker::Workers};
+        use std::{collections::HashMap, path::PathBuf};
+        let path = PathBuf::from("report.pdf");
+        let workers = Workers::start(HWND::default()).unwrap();
+        let mut s = State::new(workers, &[], (800.0, 600.0), 1.0, 1.0, theme::palette(theme::Mode::Light));
+        s.path = Some(path.clone());
+        s.page = 3;
+        s.generation = 9;
+        let request = Request { generation: 9, path, page: 3, delta: 0, width: 1, height: 1, sessions: HashMap::new() };
+        assert!(same_target(&s, &request));
+        s.page = 7;
+        assert!(!same_target(&s, &request), "a Find result moved to page 8");
+        s.page = 3;
+        s.generation = 10;
+        assert!(!same_target(&s, &request), "a slideshow step rendered again");
+        s.generation = 9;
+        s.path = Some(PathBuf::from("other.pdf"));
+        assert!(!same_target(&s, &request), "another tab");
+    }
 
     #[test]
     fn resize_keeps_shape_when_height_is_empty_and_rejects_bad_sizes() {
