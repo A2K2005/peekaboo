@@ -1,0 +1,19 @@
+{
+    "recorded_utc": null,
+    "runs": null,
+    "commit": null,
+    "machine": null,
+    "executable_sha256": null,
+    "limits": "Placeholder. No baseline is recorded yet. To record one on a quiet machine, run tools/perf/run-suite.ps1 -Runs 59 and copy its results.json here.",
+    "evidence": null,
+    "metrics": [
+        { "name": "launch_20_pages_pdf_p95", "unit": "ms", "value": null, "prd_target_text": "under 400 ms (cold launch to first page, p95)", "note": null },
+        { "name": "launch_500_pages_pdf_p95", "unit": "ms", "value": null, "prd_target_text": "under 300 ms (500-page PDF, first page)", "note": null },
+        { "name": "launch_image_24mp_p95", "unit": "ms", "value": null, "prd_target_text": "under 400 ms (cold launch to first image, p95)", "note": null },
+        { "name": "launch_image_small_p95", "unit": "ms", "value": null, "prd_target_text": "under 400 ms (cold launch to first image, p95)", "note": null },
+        { "name": "memory_20_pages_pdf_private_bytes_max", "unit": "bytes", "value": null, "prd_target_text": "under 120 MB (one 20-page PDF open)", "note": null },
+        { "name": "memory_20_pages_pdf_working_set_max", "unit": "bytes", "value": null, "prd_target_text": "under 120 MB (one 20-page PDF open)", "note": null },
+        { "name": "exe_bytes", "unit": "bytes", "value": null, "prd_target_text": "none (part of the 30 MB download)", "note": null },
+        { "name": "package_zip_bytes", "unit": "bytes", "value": null, "prd_target_text": "under 30 MB (download without AI model)", "note": null }
+    ]
+}
