@@ -72,8 +72,14 @@ pub enum PdfEdit {
     /// its neighbor page, turned to match the image orientation. `bytes` is
     /// the image file as read at insert time, so the recipe does not change
     /// when the file moves or changes. `name` (the file name) is for display.
-    #[allow(dead_code)]
     InsertImage {
+        at: u32,
+        name: String,
+        bytes: std::sync::Arc<[u8]>,
+    },
+    /// Inserts every page of another PDF at `at`. As with `InsertImage`,
+    /// `bytes` is the file as read at insert time and `name` is for display.
+    InsertPdf {
         at: u32,
         name: String,
         bytes: std::sync::Arc<[u8]>,

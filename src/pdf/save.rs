@@ -103,6 +103,41 @@ impl PdfEngine {
 }
 
 impl PdfEngine {
+    /// Imports every page of the PDF in `bytes` at `at`. A page import drops
+    /// form fields, so PDFs with forms are refused, as in `merge`.
+    pub(super) fn insert_pdf(&self, document: Handle, at: u32, bytes: &[u8]) -> Result<(), String> {
+        let size = i32::try_from(bytes.len()).map_err(|_| "This PDF is too large to insert.")?;
+        // FPDF_ImportPagesByIndex deep-copies the pages, so the source can
+        // close (and its buffer go) once the import returns.
+        let source = unsafe { (self.api.load_memory)(bytes.as_ptr(), size, std::ptr::null()) };
+        if source.is_null() {
+            return Err(match unsafe { (self.api.error)() } {
+                4 => "This PDF is protected. Remove its password, then insert it.",
+                _ => "This PDF is damaged or uses an unsupported format.",
+            }
+            .into());
+        }
+        let source = NativeHandle {
+            handle: source,
+            close: self.api.close_doc,
+        };
+        self.reject_protected_export(source.handle)?;
+        self.reject_forms(source.handle)?;
+        unsafe {
+            let before = (self.api.count)(document);
+            let added = (self.api.count)(source.handle);
+            if added <= 0 {
+                return Err("This PDF has no pages to insert.".into());
+            }
+            if (self.api.import)(document, source.handle, std::ptr::null(), 0, at as i32) == 0
+                || (self.api.count)(document) != before + added
+            {
+                return Err("Cannot insert the PDF pages.".into());
+            }
+        }
+        Ok(())
+    }
+
     /// Flattens every page. Loading a page into the form environment first
     /// builds appearances for fields that lack them (NeedAppearances).
     fn flatten(&self, document: &mut Document) -> Result<(), String> {

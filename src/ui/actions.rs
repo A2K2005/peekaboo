@@ -410,6 +410,8 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             edits.pdf.push(PdfEdit::InsertBlank { at });
             s.page = at;
         }),
+        MovePageUp | MovePageDown => super::organize::step(hwnd, &request, count, command == MovePageDown),
+        InsertImagePage => super::organize::insert_images(hwnd, &request),
         Undo => edit(hwnd, |s, edits| {
             if pdf {
                 let undone = edits.pdf.pop();
@@ -447,7 +449,7 @@ pub(super) fn same_target(s: &super::app::State, request: &Request) -> bool {
 
 /// Applies a page edit chosen in a sheet, only if the page did not change
 /// while the sheet was open.
-unsafe fn edit_same_page(hwnd: HWND, request: &Request, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
+pub(super) unsafe fn edit_same_page(hwnd: HWND, request: &Request, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
     if with_state(|s| same_target(s, request)) != Some(true) {
         with_state(|s| s.status = "The page changed while the dialog was open. Nothing was edited.".into());
         invalidate(hwnd);
@@ -596,7 +598,7 @@ pub(super) unsafe fn resolve_save_conflict(hwnd: HWND, path: std::path::PathBuf)
 }
 
 /// Applies one recipe change to the open file and renders again.
-unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
+pub(super) unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut super::worker::Edits)) {
     let Some(path) = with_state(|s| s.path.clone()).flatten() else {
         return;
     };
@@ -911,13 +913,13 @@ pub(super) unsafe fn fill_field(hwnd: HWND, generation: u64, fields: Vec<crate::
 /// Right-click or the context menu key. `at` is in client pixels; None
 /// means the keyboard opened it, so the menu goes at the focused widget.
 pub(super) unsafe fn context_menu(hwnd: HWND, at: Option<(f32, f32)>) {
-    let Some((target, ctx)) = with_state(|s| {
+    let Some((target, ctx, thumbnails)) = with_state(|s| {
         let layout = s.layout();
         let target = match at {
             Some((x, y)) => widgets::hit(&layout.widgets, x, y).map(|w| w.id),
             None => s.focus,
         };
-        (target, s.ctx())
+        (target, s.ctx(), s.sidebar_tab == 0 && s.pdf.is_some())
     }) else {
         return;
     };
@@ -925,6 +927,14 @@ pub(super) unsafe fn context_menu(hwnd: HWND, at: Option<(f32, f32)>) {
         Some(WidgetId::Tab(index)) | Some(WidgetId::TabClose(index)) => {
             select_tab(hwnd, index);
             (commands::tab_menu(&ctx), Some(WidgetId::Tab(index)))
+        }
+        Some(WidgetId::SidebarItem(index)) if thumbnails => {
+            let ctx = with_state(|s| {
+                super::sidebar::activate(s, index);
+                s.ctx()
+            })
+            .unwrap_or(ctx);
+            (commands::page_menu(&ctx), Some(WidgetId::SidebarItem(index)))
         }
         Some(WidgetId::Document) => (commands::document_menu(&ctx), None),
         _ if at.is_none() => (commands::document_menu(&ctx), None),

@@ -361,6 +361,7 @@ pub(super) fn draw(p: &Painter, bitmap: Option<&ID2D1Bitmap>, fonts: &Fonts, sta
     title_bar(&look, state, layout);
     bars(&look, state, layout);
     sidebar_panel(&look, state, layout);
+    super::organize::paint(p, state, layout);
     let drew = if layout.empty.is_some() {
         p.fill(layout.document, state.theme.canvas);
         empty_state(&look, state, layout);

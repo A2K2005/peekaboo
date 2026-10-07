@@ -14,6 +14,8 @@
 //! | view | Page layout, tile grid, and zoom math |
 //! | cache | Byte-budgeted LRU cache for tiles and pre-decoded images |
 //! | sidebar | Thumbnails, contents, and notes lists |
+//! | organize | Thumbnail drag to reorder or drag out, page moves, page inserts |
+//! | drop | Files dropped on the window (OLE drop target) |
 //! | bench | Benchmark scenarios, only when their variables are set |
 //! | render | Direct2D device context, fonts, drawing helpers |
 //! | theme | Light, dark, and contrast colors; DWM attributes |
@@ -30,8 +32,10 @@ mod cache;
 mod commands;
 mod disk;
 mod document;
+mod drop;
 mod files;
 mod menu;
+mod organize;
 mod paint;
 mod render;
 mod sheet;
