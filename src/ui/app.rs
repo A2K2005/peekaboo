@@ -1,12 +1,15 @@
 //! Window-thread state, tabs, render scheduling, and worker results.
 use super::{
+    bench::Bench,
+    cache::{Lru, TILE_BUDGET},
     commands::{self, Command, Ctx},
-    document::Pinch,
+    document::{self, PdfView, Pinch, Stats, Tiles},
     render::{fonts, measure, Renderer},
     sheet::{self, Sheet},
     theme::Theme,
-    widgets::{self, Layout, Scope, SheetView, WidgetId},
-    worker::{is_pdf, Edits, Event, Job, Request, Workers},
+    view::{ViewMode, Zoom},
+    widgets::{self, Layout, Scope, SheetView, SidebarList, WidgetId},
+    worker::{is_pdf, Edits, Event, Job, Key, Outcome, Request, Work, Workers},
 };
 use crate::model::{AnnotationKind, Frame};
 use std::{
@@ -59,12 +62,27 @@ pub(super) struct State {
     pub(super) due: Option<Instant>,
     pub(super) marked: bool,
     pub(super) sessions: HashMap<PathBuf, Edits>,
-    pub(super) zoom: f32,
-    /// Zoom of the request in flight, and of the frame on screen. Pinch
-    /// zoom scales the old frame by `zoom / frame_zoom` until the new one lands.
-    pub(super) requested_zoom: f32,
-    pub(super) frame_zoom: f32,
+    /// Zoom for the open file. An image keeps its frame and draws it at the
+    /// new size until a frame decoded for that size arrives.
+    pub(super) zoom: Zoom,
+    pub(super) view_mode: ViewMode,
+    /// Image offset from the centered position.
     pub(super) pan: (f32, f32),
+    /// The open PDF; None while an image shows.
+    pub(super) pdf: Option<PdfView>,
+    /// Page tiles and thumbnails as bitmaps of the current renderer.
+    pub(super) cache: Tiles,
+    /// Rendered tiles waiting for upload in the next paint.
+    pub(super) arrived: Vec<(Key, Frame, bool)>,
+    /// Keys of the work list last sent to the document worker.
+    pub(super) sent: Vec<Key>,
+    pub(super) stats: Stats,
+    /// The view showed complete content at least once.
+    pub(super) content_drawn: bool,
+    /// The last image came from the neighbor pre-decode cache.
+    pub(super) from_predecode: bool,
+    pub(super) zoom_select: bool,
+    pub(super) bench: Option<Bench>,
     pub(super) drag: Option<(f32, f32)>,
     pub(super) crop: bool,
     pub(super) selection: Option<(f32, f32, f32, f32)>,
@@ -80,7 +98,7 @@ pub(super) struct State {
     pub(super) slideshow: Option<Instant>,
     pub(super) tabs: Vec<PathBuf>,
     pub(super) password_attempts: HashMap<PathBuf, u32>,
-    pub(super) views: HashMap<PathBuf, (u32, f32, (f32, f32))>,
+    pub(super) views: HashMap<PathBuf, (u32, Zoom, (f32, f32))>,
     // Window and chrome.
     pub(super) size: (f32, f32),
     pub(super) scale: f32,
@@ -91,6 +109,9 @@ pub(super) struct State {
     pub(super) active: bool,
     pub(super) sidebar_open: bool,
     pub(super) sidebar_tab: usize,
+    /// Scroll offset and last used row of each sidebar tab.
+    pub(super) sidebar_scroll: [f32; 3],
+    pub(super) sidebar_rows: [usize; 3],
     pub(super) markup_open: bool,
     /// Markup bar slide: when it started and the progress it started from.
     pub(super) markup_since: Option<Instant>,
@@ -153,10 +174,18 @@ impl State {
             due: Some(Instant::now()),
             marked: false,
             sessions: HashMap::new(),
-            zoom: 1.0,
-            requested_zoom: 1.0,
-            frame_zoom: 1.0,
+            zoom: Zoom::Fit,
+            view_mode: ViewMode::Continuous,
             pan: (0.0, 0.0),
+            pdf: None,
+            cache: Lru::new(TILE_BUDGET),
+            arrived: Vec::new(),
+            sent: Vec::new(),
+            stats: Stats::default(),
+            content_drawn: false,
+            from_predecode: false,
+            zoom_select: false,
+            bench: None,
             drag: None,
             crop: false,
             selection: None,
@@ -182,6 +211,8 @@ impl State {
             active: true,
             sidebar_open: false,
             sidebar_tab: 0,
+            sidebar_scroll: [0.0; 3],
+            sidebar_rows: [0; 3],
             markup_open: false,
             markup_since: None,
             markup_from: 0.0,
@@ -231,29 +262,58 @@ impl State {
             self.markup_since = Some(Instant::now());
         }
     }
+    pub(super) fn page_count(&self) -> u32 {
+        match (&self.pdf, &self.frame) {
+            (Some(v), _) => v.sizes.len() as u32,
+            (None, Some(frame)) => frame.page_count,
+            _ => 0,
+        }
+    }
     pub(super) fn ctx(&self) -> Ctx {
         let pdf = self.is_pdf();
         Ctx {
-            has_frame: self.frame.is_some(),
+            has_frame: self.frame.is_some() || self.pdf.is_some(),
             pending: self.pending,
             failed: self.render_failed,
             pdf,
             saving: self.exporting,
             can_previous: !pdf || self.page > 0,
-            can_next: !pdf || self.frame.as_ref().is_some_and(|f| self.page + 1 < f.page_count),
+            can_next: !pdf || self.page + 1 < self.page_count(),
             tabs: self.tabs.len(),
             sidebar_open: self.sidebar_open,
             markup_open: self.markup_open,
             crop: self.crop,
             tool: self.tool(),
+            zoom: self.zoom,
+            view: self.view_mode,
+            zoom_select: self.zoom_select,
         }
     }
     /// "Page 3 of 20" or "1920 × 1080 pixels".
     pub(super) fn subtitle(&self) -> String {
-        match &self.frame {
-            Some(frame) if self.is_pdf() => format!("Page {} of {}", self.page + 1, frame.page_count),
-            Some(frame) => format!("{} × {} pixels", frame.source_width, frame.source_height),
-            None => String::new(),
+        match (&self.pdf, &self.frame) {
+            (Some(v), _) => format!("Page {} of {}", self.page + 1, v.sizes.len()),
+            (None, Some(frame)) if self.is_pdf() => format!("Page {} of {}", self.page + 1, frame.page_count),
+            (None, Some(frame)) => format!("{} × {} pixels", frame.source_width, frame.source_height),
+            _ => String::new(),
+        }
+    }
+    /// What the sidebar panel lists for the open tab.
+    pub(super) fn sidebar_list(&self) -> SidebarList<'_> {
+        let Some(v) = &self.pdf else {
+            return SidebarList::Message(if self.frame.is_some() { "Thumbnails, contents, and notes are for PDFs." } else { "" });
+        };
+        match self.sidebar_tab {
+            0 => SidebarList::Thumbnails(&v.sizes),
+            1 => match &v.outline {
+                Some(Ok(items)) if !items.is_empty() => SidebarList::Contents(items),
+                Some(Ok(_)) => SidebarList::Message("No contents"),
+                Some(Err(error)) => SidebarList::Message(error),
+                None => SidebarList::Message("Loading contents..."),
+            },
+            _ if !v.notes.is_empty() => SidebarList::Notes(&v.notes),
+            _ if v.scanned.iter().all(|done| *done) => SidebarList::Message("No notes"),
+            _ => SidebarList::Message("Looking for notes..."),
         }
     }
     /// Accessible name of the document view: file name and page.
@@ -295,6 +355,9 @@ impl State {
             title: &label,
             sidebar_open: self.sidebar_open,
             sidebar_tab: self.sidebar_tab,
+            sidebar_list: self.sidebar_list(),
+            sidebar_scroll: self.sidebar_scroll[self.sidebar_tab.min(2)],
+            sidebar_active: if self.sidebar_tab == 0 { self.page as usize } else { self.sidebar_rows[self.sidebar_tab.min(2)] },
             markup: ease(self.markup_progress()),
             ctx: self.ctx(),
             sheet,
@@ -340,17 +403,11 @@ pub(super) unsafe fn schedule(hwnd: HWND, state: &mut State, delta: i32) {
     state.pending = true;
     state.render_failed = false;
     state.status = "Opening...".into();
-    state.requested_zoom = state.zoom;
-    let request = Request {
-        generation: state.generation,
-        path,
-        page: state.page,
-        delta,
-        width: ((document.width() * state.zoom) as u32).clamp(1, 4096),
-        height: ((document.height() * state.zoom) as u32).clamp(1, 4096),
-        sessions: state.sessions.clone(),
-    };
-    if !state.send(Job::Render(request)) {
+    let (width, height) = document::image_box(state, document);
+    let request = Request { generation: state.generation, path, page: state.page, delta, width, height, sessions: state.sessions.clone() };
+    // A PDF opens to its page sizes; tiles follow from the view.
+    let job = if is_pdf(&request.path) { Job::Open(request) } else { Job::Render(request) };
+    if !state.send(job) {
         state.pending = false;
         state.status = "The rendering worker stopped. Close Preview and reopen the file.".into();
     }
@@ -365,13 +422,14 @@ pub(super) unsafe fn open(hwnd: HWND, path: PathBuf) {
             }
         }
         let path = std::fs::canonicalize(&path).unwrap_or(path);
-        let view = state.views.get(&path).copied().unwrap_or((0, 1.0, (0.0, 0.0)));
+        let view = state.views.get(&path).copied().unwrap_or((0, Zoom::Fit, (0.0, 0.0)));
         state.path = Some(path);
         state.page = view.0;
         state.due = None;
         state.zoom = view.1;
         state.pan = view.2;
         state.crop = false;
+        state.zoom_select = false;
         state.markup = None;
         state.selection = None;
         if state.focus.is_none() || matches!(state.focus, Some(WidgetId::Command(Command::Open))) {
@@ -387,14 +445,12 @@ pub(super) unsafe fn navigate(hwnd: HWND, delta: i32) {
             return;
         }
         if state.is_pdf() {
-            let count = state.frame.as_ref().map_or(0, |f| f.page_count);
-            let page = state.page as i64 + delta as i64;
-            if page < 0 || page >= count as i64 {
-                return;
-            }
-            state.page = page as u32;
-            schedule(hwnd, state, 0);
+            document::step_page(state, delta);
+            invalidate(hwnd);
         } else {
+            // The next image opens at fit, so its pre-decoded frame matches.
+            state.zoom = Zoom::Fit;
+            state.pan = (0.0, 0.0);
             schedule(hwnd, state, delta);
         }
     });
@@ -437,6 +493,7 @@ pub(super) unsafe fn close_tab(hwnd: HWND, index: usize) {
             s.generation = s.generation.wrapping_add(1);
             s.path = None;
             s.frame = None;
+            s.pdf = None;
             s.displayed = None;
             s.pending = false;
             s.render_failed = false;
@@ -472,10 +529,59 @@ pub(super) unsafe fn tick(hwnd: HWND) {
     let mut password_to_show = None;
     let mut start_services = false;
     let mut title = None;
+    let mut info_to_show = None;
     with_state(|state| {
         while let Ok(event) = state.workers.receiver.try_recv() {
             let completed = match event {
                 Event::Render(completed) => completed,
+                Event::Pages(opened) => {
+                    if opened.generation != state.generation {
+                        continue;
+                    }
+                    state.pending = false;
+                    match opened.result {
+                        Ok(sizes) => {
+                            title = Some(shown(state, opened.path.clone(), opened.page, false));
+                            state.page = opened.page.min(sizes.len() as u32 - 1);
+                            let same = state.pdf.as_ref().is_some_and(|v| v.path == opened.path);
+                            match state.pdf.as_mut().filter(|_| same) {
+                                Some(v) => {
+                                    if v.update(sizes, opened.edits, &mut state.cache) {
+                                        state.sent.clear();
+                                    }
+                                    v.reveal = Some(state.page);
+                                }
+                                None => {
+                                    state.pdf = Some(PdfView::new(opened.path, sizes, opened.edits, state.page));
+                                    state.frame = None;
+                                    if let Some(renderer) = state.renderer.as_mut() {
+                                        renderer.bitmap = None;
+                                    }
+                                }
+                            }
+                            state.status = state.subtitle();
+                        }
+                        Err(error) => {
+                            if let Some(prompt) = failed(state, error, opened.generation, opened.path, opened.page) {
+                                password_to_show = Some(prompt);
+                            }
+                        }
+                    }
+                    invalidate(hwnd);
+                    continue;
+                }
+                Event::Done(item, outcome) => {
+                    state.workers.delivered(&item.key);
+                    received(state, item, outcome);
+                    invalidate(hwnd);
+                    continue;
+                }
+                Event::Metadata(generation, result) => {
+                    if generation == state.generation {
+                        info_to_show = Some(result);
+                    }
+                    continue;
+                }
                 Event::Saved(path, edits, whole_document, result) => {
                     state.exporting = false;
                     state.status = match result {
@@ -510,6 +616,7 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                 Event::Found(generation, result) => {
                     if generation == state.generation {
                         match result {
+                            Ok(Some(page)) if state.pdf.is_some() => document::go_to_page(state, page, true),
                             Ok(Some(page)) => {
                                 state.page = page;
                                 schedule(hwnd, state, 0);
@@ -569,57 +676,18 @@ pub(super) unsafe fn tick(hwnd: HWND) {
                         state.status = "The decoder returned an invalid image.".into();
                         continue;
                     }
-                    let previous = state.displayed.as_ref().map(|(p, _)| p.clone());
-                    let previous_dirty =
-                        previous.as_ref().and_then(|p| state.sessions.get(p)).is_some_and(|edits| edits.dirty);
-                    if completed.navigation {
-                        if let Some((path, page)) = &state.displayed {
-                            if path != &completed.path {
-                                state.views.insert(path.clone(), (*page, state.zoom, state.pan));
-                            }
-                        }
-                    }
-                    state.password_attempts.remove(&completed.path);
-                    state.displayed = Some((completed.path.clone(), completed.page));
-                    let path = completed.path;
-                    // Next or previous image replaces the tab, unless that
-                    // tab holds unsaved edits.
-                    if completed.navigation && !previous_dirty && !state.tabs.contains(&path) {
-                        if let Some(index) = previous.and_then(|p| state.tabs.iter().position(|t| *t == p)) {
-                            state.tabs[index] = path.clone();
-                        }
-                    }
-                    if !state.tabs.contains(&path) {
-                        state.tabs.push(path.clone());
-                    }
-                    title = Some(format!("{} - Preview for Windows", file_name(&path)));
-                    state.path = Some(path);
-                    state.page = completed.page;
-                    state.render_failed = false;
+                    title = Some(shown(state, completed.path, completed.page, completed.navigation));
                     state.frame = Some(frame);
-                    state.frame_zoom = state.requested_zoom;
+                    state.pdf = None;
+                    state.from_predecode = completed.from_predecode;
                     state.status = state.subtitle();
                     if let Some(renderer) = state.renderer.as_mut() {
                         renderer.bitmap = None;
                     }
                 }
                 Err(error) => {
-                    state.render_failed = error != "No more images in this direction.";
-                    state.status = format!("{error} Previous view retained.");
-                    state.slideshow = None;
-                    if error == crate::pdf::PASSWORD_REQUIRED {
-                        password_to_show = Some((completed.generation, completed.path, completed.page));
-                        state.due = None;
-                    }
-                    if let Some((path, page)) = &state.displayed {
-                        if state.path.as_ref() != Some(path) {
-                            if let Some((_, zoom, pan)) = state.views.get(path) {
-                                state.zoom = *zoom;
-                                state.pan = *pan;
-                            }
-                        }
-                        state.path = Some(path.clone());
-                        state.page = *page;
+                    if let Some(prompt) = failed(state, error, completed.generation, completed.path, completed.page) {
+                        password_to_show = Some(prompt);
                     }
                 }
             }
@@ -627,10 +695,20 @@ pub(super) unsafe fn tick(hwnd: HWND) {
         }
         if state.painted && state.due.is_some_and(|due| Instant::now() >= due) {
             state.due = None;
-            schedule(hwnd, state, 0);
+            // A PDF on screen only renders tiles at the new scale; anything
+            // else (first open, an image at a new size) loads again.
+            let showing = state.pdf.as_ref().is_some_and(|v| Some(&v.path) == state.path.as_ref());
+            if state.pending {
+                // Try again once the file in flight arrives.
+                state.due = Some(Instant::now() + document::SETTLE);
+            } else if !showing {
+                schedule(hwnd, state, 0);
+            } else if document::settle(state) {
+                invalidate(hwnd);
+            }
         }
         if !state.pending && state.slideshow.is_some_and(|due| Instant::now() >= due) {
-            if state.is_pdf() && state.frame.as_ref().is_some_and(|f| state.page + 1 >= f.page_count) {
+            if state.is_pdf() && state.page + 1 >= state.page_count() {
                 state.slideshow = None;
                 state.status = "End of slideshow.".into();
             } else {
@@ -656,7 +734,7 @@ pub(super) unsafe fn tick(hwnd: HWND) {
         // Accessibility (UI Automation load) and UISettings (12 to 23 ms to
         // create on this PC) wait until the first content is on screen, so
         // they never delay it.
-        let first_content = state.marked || state.frame.is_some() || state.render_failed || state.path.is_none();
+        let first_content = state.content_drawn || state.render_failed || state.path.is_none();
         if !state.started && state.painted && first_content && !state.pending {
             state.started = true;
             start_services = true;
@@ -673,6 +751,10 @@ pub(super) unsafe fn tick(hwnd: HWND) {
     if let Some((generation, fields)) = fields_to_show {
         super::actions::fill_field(hwnd, generation, fields);
     }
+    if let Some(result) = info_to_show {
+        super::actions::pdf_info(hwnd, result);
+    }
+    super::bench::tick(hwnd);
     if let Some(output) = output_to_open {
         open(hwnd, output);
     }
@@ -681,6 +763,94 @@ pub(super) unsafe fn tick(hwnd: HWND) {
     }
     if advance {
         navigate(hwnd, 1);
+    }
+}
+
+/// A file is on screen: tabs, title, and history follow it. Next or
+/// previous image replaces the tab, unless that tab holds unsaved edits.
+/// Returns the window title.
+fn shown(state: &mut State, path: PathBuf, page: u32, navigation: bool) -> String {
+    let previous = state.displayed.as_ref().map(|(p, _)| p.clone());
+    let previous_dirty = previous.as_ref().and_then(|p| state.sessions.get(p)).is_some_and(|edits| edits.dirty);
+    if navigation {
+        if let Some((old, page)) = &state.displayed {
+            if old != &path {
+                state.views.insert(old.clone(), (*page, state.zoom, state.pan));
+            }
+        }
+    }
+    state.password_attempts.remove(&path);
+    state.displayed = Some((path.clone(), page));
+    if navigation && !previous_dirty && !state.tabs.contains(&path) {
+        if let Some(index) = previous.and_then(|p| state.tabs.iter().position(|t| *t == p)) {
+            state.tabs[index] = path.clone();
+        }
+    }
+    if !state.tabs.contains(&path) {
+        state.tabs.push(path.clone());
+    }
+    let title = format!("{} - Preview for Windows", file_name(&path));
+    state.path = Some(path);
+    state.page = page;
+    state.render_failed = false;
+    title
+}
+
+/// A file could not open; the previous view stays. Returns the password
+/// prompt to show, if the PDF needs one.
+fn failed(state: &mut State, error: String, generation: u64, path: PathBuf, page: u32) -> Option<(u64, PathBuf, u32)> {
+    state.render_failed = error != "No more images in this direction.";
+    state.status = format!("{error} Previous view retained.");
+    state.slideshow = None;
+    let prompt = (error == crate::pdf::PASSWORD_REQUIRED).then(|| {
+        state.due = None;
+        (generation, path, page)
+    });
+    if let Some((path, page)) = &state.displayed {
+        if state.path.as_ref() != Some(path) {
+            if let Some((_, zoom, pan)) = state.views.get(path) {
+                state.zoom = *zoom;
+                state.pan = *pan;
+            }
+        }
+        state.path = Some(path.clone());
+        state.page = *page;
+    }
+    prompt
+}
+
+/// A tile, thumbnail, outline, or page of notes from the document worker.
+/// Results made for older edits are kept as stale tiles and asked for again.
+fn received(state: &mut State, item: super::worker::Item, outcome: Outcome) {
+    let fresh = state.pdf.as_ref().is_some_and(|v| v.doc == item.key.doc && *v.edits == *item.edits);
+    if !fresh {
+        state.sent.clear();
+    }
+    match outcome {
+        Outcome::Frame(Ok(frame)) if crate::model::frame_bytes(frame.width, frame.height).ok() == Some(frame.pixels.len()) => {
+            state.arrived.push((item.key, frame, fresh));
+        }
+        Outcome::Frame(_) => {
+            if let Some(v) = state.pdf.as_mut().filter(|v| v.doc == item.key.doc) {
+                v.failed.insert(item.key);
+            }
+        }
+        Outcome::Outline(result) if fresh => {
+            if let Some(v) = state.pdf.as_mut() {
+                v.outline = Some(result);
+            }
+        }
+        Outcome::Notes(result) if fresh => {
+            if let (Some(v), Work::Notes { page }) = (state.pdf.as_mut(), item.key.work) {
+                if let Some(done) = v.scanned.get_mut(page as usize) {
+                    *done = true;
+                }
+                let notes = result.unwrap_or_default();
+                let at = v.notes.partition_point(|n| n.page <= page);
+                v.notes.splice(at..at, notes);
+            }
+        }
+        Outcome::Outline(_) | Outcome::Notes(_) | Outcome::Predecoded => {}
     }
 }
 
@@ -711,17 +881,7 @@ unsafe fn password_prompt(hwnd: HWND, generation: u64, path: PathBuf, page: u32)
         state.path = Some(path.clone());
         state.page = page;
         state.status = "Unlocking PDF...".into();
-        state.requested_zoom = state.zoom;
-        let document = state.layout().document;
-        let request = Request {
-            generation: state.generation,
-            path,
-            page,
-            delta: 0,
-            width: (document.width().max(1.0) as u32).min(4096),
-            height: (document.height().max(1.0) as u32).min(4096),
-            sessions: state.sessions.clone(),
-        };
+        let request = Request { generation: state.generation, path, page, delta: 0, width: 1, height: 1, sessions: state.sessions.clone() };
         if !state.send(Job::Password(request, password)) {
             state.pending = false;
             state.status = "The PDF worker stopped.".into();

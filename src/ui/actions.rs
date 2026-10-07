@@ -3,13 +3,14 @@
 use super::{
     app::{add_tabs, close_tab, invalidate, navigate, open, schedule, select_tab, with_state},
     commands::{self, Command, MenuItem, Pick},
-    document::{MAX_ZOOM, MIN_ZOOM},
+    document,
     files::{choose, choose_many, destination, folder, load_signature, save_signature},
     menu, sheet,
+    view::{ViewMode, Zoom},
     widgets::{self, WidgetId},
     worker::{Job, Request, SaveKind},
 };
-use crate::model::{AnnotationKind, ImageEdit, PdfEdit};
+use crate::model::{AnnotationKind, ImageEdit, PdfEdit, PdfFormType, PdfMetadata};
 use std::{
     sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
@@ -46,7 +47,7 @@ pub(super) unsafe fn popup(hwnd: HWND, items: Vec<MenuItem>, anchor: Option<Widg
 
 /// Re-renders after the document area changes size, as WM_SIZE does.
 fn relayout(state: &mut super::app::State) {
-    if state.frame.is_some() {
+    if state.frame.is_some() || state.pdf.is_some() {
         state.due = Some(Instant::now() + Duration::from_millis(120));
     }
 }
@@ -150,7 +151,15 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
         if s.pending || (s.render_failed && !matches!(command, Undo | Revert)) {
             return None;
         }
-        let frame = s.frame.as_ref()?;
+        // PDF pages give their size in points; images in pixels.
+        let (width, height, count) = match (&s.pdf, &s.frame) {
+            (Some(v), _) => {
+                let [w, h] = *v.sizes.get(s.page as usize)?;
+                (w.round() as u32, h.round() as u32, v.sizes.len() as u32)
+            }
+            (None, Some(frame)) => (frame.source_width, frame.source_height, frame.page_count),
+            _ => return None,
+        };
         Some((
             Request {
                 generation: s.generation,
@@ -161,9 +170,9 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
                 height: 1,
                 sessions: s.sessions.clone(),
             },
-            frame.source_width,
-            frame.source_height,
-            frame.page_count,
+            width,
+            height,
+            count,
         ))
     })
     .flatten();
@@ -172,14 +181,15 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
     };
     let pdf = super::worker::is_pdf(&request.path);
     match command {
-        FileInfo => {
-            let bytes = std::fs::metadata(&request.path).map(|m| m.len()).unwrap_or(0);
-            let text = format!(
-                "{}\n\nSize: {width} × {height}\nPages: {count}\nFile size: {bytes} bytes\n\nEdits stay in memory until you save a copy.",
-                request.path.display()
-            );
-            sheet::alert(hwnd, "File information", &text);
+        FileInfo if pdf => {
+            // PDF metadata comes from the document worker; tick shows it.
+            with_state(|s| {
+                if !s.send(Job::Metadata(request)) {
+                    s.status = "The PDF worker stopped.".into();
+                }
+            });
         }
+        FileInfo => sheet::alert(hwnd, "File information", &image_info(&request.path, width, height)),
         Slideshow => {
             with_state(|s| {
                 s.slideshow = if s.slideshow.is_some() { None } else { Some(Instant::now() + Duration::from_secs(3)) };
@@ -300,21 +310,44 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
                 s.page = request.page.min(count.saturating_sub(2));
             });
         }
-        Fit | ZoomIn | ZoomOut => {
-            with_state(|s| {
-                s.zoom = match command {
-                    Fit => 1.0,
-                    ZoomIn => (s.zoom * 1.4).min(MAX_ZOOM),
-                    _ => (s.zoom / 1.4).max(MIN_ZOOM),
-                };
-                s.pan = (0.0, 0.0);
-                schedule(hwnd, s, 0);
+        Fit | FitWidth | ActualSize | ZoomIn | ZoomOut => {
+            with_state(|s| match command {
+                ZoomIn | ZoomOut => document::zoom_step(s, command == ZoomIn),
+                // Ctrl+\ goes back to fit to window when the width already fits.
+                FitWidth if s.zoom == Zoom::FitWidth => document::set_zoom(s, Zoom::Fit, None),
+                FitWidth => document::set_zoom(s, Zoom::FitWidth, None),
+                ActualSize => document::set_zoom(s, Zoom::Ratio(1.0), None),
+                _ => document::set_zoom(s, Zoom::Fit, None),
             });
+            invalidate(hwnd);
+        }
+        ZoomToSelection => {
+            with_state(|s| {
+                s.markup = None;
+                s.signature = None;
+                s.crop = false;
+                s.zoom_select = !s.zoom_select;
+                s.status = if s.zoom_select { "Drag over the area to zoom to. Escape cancels." } else { "Zoom to selection is off." }.into();
+            });
+            invalidate(hwnd);
+        }
+        ViewContinuous | ViewSingle | ViewTwoPages => {
+            with_state(|s| {
+                s.view_mode = match command {
+                    ViewSingle => ViewMode::Single,
+                    ViewTwoPages => ViewMode::TwoPages,
+                    _ => ViewMode::Continuous,
+                };
+                let page = s.page;
+                document::go_to_page(s, page, false);
+            });
+            invalidate(hwnd);
         }
         Crop => {
             with_state(|s| {
                 s.markup = None;
                 s.signature = None;
+                s.zoom_select = false;
                 s.crop = !s.crop;
                 s.status = if !s.crop {
                     "Crop is off.".into()
@@ -395,8 +428,11 @@ unsafe fn edit(hwnd: HWND, change: impl FnOnce(&mut super::app::State, &mut supe
         change(s, &mut edits);
         edits.dirty = !edits.image.is_empty() || !edits.pdf.is_empty();
         s.sessions.insert(path, edits);
-        s.zoom = 1.0;
-        s.pan = (0.0, 0.0);
+        if s.pdf.is_none() {
+            // An edited image may change shape, so it shows whole again.
+            s.zoom = Zoom::Fit;
+            s.pan = (0.0, 0.0);
+        }
         schedule(hwnd, s, 0);
     });
 }
@@ -497,6 +533,7 @@ unsafe fn choose_tool(hwnd: HWND, command: Command) {
     };
     with_state(|s| {
         s.crop = false;
+        s.zoom_select = false;
         s.markup = Some(kind);
         s.markup_text = text;
         s.signature = signature;
@@ -504,6 +541,133 @@ unsafe fn choose_tool(hwnd: HWND, command: Command) {
         s.status = "Drag on the page to place the mark. Escape returns to navigation.".into();
     });
     invalidate(hwnd);
+}
+
+/// "2.4 MB" style sizes, in decimal units as File Explorer's details pane.
+fn file_size(bytes: u64) -> String {
+    match bytes {
+        0..=999 => format!("{bytes} bytes"),
+        1_000..=999_999 => format!("{:.0} KB", bytes as f64 / 1e3),
+        _ => format!("{:.1} MB", bytes as f64 / 1e6),
+    }
+}
+
+/// Seconds since 1970 as "2026-10-07 13:19" (days to civil date from
+/// Howard Hinnant's algorithm, http://howardhinnant.github.io/date_algorithms.html).
+fn civil(seconds: i64) -> String {
+    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rest / 3600, rest % 3600 / 60)
+}
+
+/// A file time in the PC's time zone.
+fn local_time(time: std::io::Result<std::time::SystemTime>) -> String {
+    use windows::Win32::{Foundation::FILETIME, Storage::FileSystem::FileTimeToLocalFileTime};
+    let Some(since) = time.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) else {
+        return String::new();
+    };
+    // FILETIME counts 100 ns steps from 1601; Unix time starts 11,644,473,600 s later.
+    let ticks = (since.as_nanos() / 100) as u64 + 116_444_736_000_000_000;
+    let utc = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let mut local = FILETIME::default();
+    if unsafe { FileTimeToLocalFileTime(&utc, &mut local) }.is_err() {
+        return String::new();
+    }
+    let ticks = ((local.dwHighDateTime as u64) << 32) | local.dwLowDateTime as u64;
+    civil((ticks / 10_000_000) as i64 - 11_644_473_600)
+}
+
+/// A PDF date ("D:20261006120000Z") as "2026-10-06 12:00", in the time
+/// zone the file states.
+fn pdf_date(raw: &str) -> String {
+    let digits: String = raw.trim_start_matches("D:").chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.len() < 8 {
+        return raw.to_string();
+    }
+    let part = |range: std::ops::Range<usize>| digits.get(range).unwrap_or("00");
+    format!("{}-{}-{} {}:{}", &digits[0..4], &digits[4..6], &digits[6..8], part(8..10), part(10..12))
+}
+
+/// Lines for the info pane, skipping empty values.
+fn info_lines(path: &std::path::Path, lines: &[(&str, String)]) -> String {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut text = name + "\n";
+    for (label, value) in lines.iter().filter(|(_, v)| !v.trim().is_empty()) {
+        text.push_str(&format!("\n{label}: {}", value.trim()));
+    }
+    text
+}
+
+fn image_info(path: &std::path::Path, width: u32, height: u32) -> String {
+    let meta = std::fs::metadata(path);
+    let format = path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+    let format = match format.as_str() {
+        "JPG" | "JPEG" => "JPEG".to_string(),
+        "TIF" | "TIFF" => "TIFF".to_string(),
+        other => other.to_string(),
+    };
+    info_lines(
+        path,
+        &[
+            ("Dimensions", format!("{width} × {height} pixels")),
+            ("Format", format),
+            ("File size", meta.as_ref().map(|m| file_size(m.len())).unwrap_or_default()),
+            ("Created", meta.as_ref().map(|m| local_time(m.created())).unwrap_or_default()),
+            ("Modified", meta.as_ref().map(|m| local_time(m.modified())).unwrap_or_default()),
+            ("Folder", path.parent().map(|p| p.display().to_string()).unwrap_or_default()),
+        ],
+    )
+}
+
+fn pdf_text(path: &std::path::Path, m: &PdfMetadata, page: Option<[f32; 2]>) -> String {
+    let file = std::fs::metadata(path);
+    let form = match m.form {
+        PdfFormType::None => "",
+        PdfFormType::AcroForm => "Fillable form",
+        PdfFormType::XfaFull | PdfFormType::XfaForeground => "XFA form (needs Adobe Acrobat Reader)",
+    };
+    let size = page.map(|[w, h]| format!("{:.1} × {:.1} in ({w:.0} × {h:.0} points)", w / 72.0, h / 72.0)).unwrap_or_default();
+    info_lines(
+        path,
+        &[
+            ("Title", m.title.clone()),
+            ("Author", m.author.clone()),
+            ("Subject", m.subject.clone()),
+            ("Keywords", m.keywords.clone()),
+            ("Created", if m.created.is_empty() { String::new() } else { pdf_date(&m.created) }),
+            ("Modified", if m.modified.is_empty() { String::new() } else { pdf_date(&m.modified) }),
+            ("Creator", m.creator.clone()),
+            ("Producer", m.producer.clone()),
+            ("PDF version", m.version.clone()),
+            ("Pages", m.page_count.to_string()),
+            ("Page size", size),
+            ("Form", form.to_string()),
+            ("Password protected", if m.encrypted { "Yes".to_string() } else { String::new() }),
+            ("File size", file.as_ref().map(|f| file_size(f.len())).unwrap_or_default()),
+            ("Modified on disk", file.as_ref().map(|f| local_time(f.modified())).unwrap_or_default()),
+        ],
+    )
+}
+
+/// The info pane for the open PDF, once the worker read its metadata.
+pub(super) unsafe fn pdf_info(hwnd: HWND, result: Result<PdfMetadata, String>) {
+    let Some((path, page)) =
+        with_state(|s| Some((s.path.clone()?, s.pdf.as_ref().and_then(|v| v.sizes.get(s.page as usize).copied())))).flatten()
+    else {
+        return;
+    };
+    match result {
+        Ok(metadata) => sheet::alert(hwnd, "File information", &pdf_text(&path, &metadata, page)),
+        Err(error) => sheet::alert(hwnd, "File information", &error),
+    }
 }
 
 /// Lists the editable form fields on this page, then asks for a value.
@@ -586,6 +750,41 @@ pub(super) unsafe fn context_menu(hwnd: HWND, at: Option<(f32, f32)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn info_pane_formats_sizes_and_dates() {
+        assert_eq!(file_size(512), "512 bytes");
+        assert_eq!(file_size(379_281), "379 KB");
+        assert_eq!(file_size(50_145_534), "50.1 MB");
+        assert_eq!(civil(0), "1970-01-01 00:00");
+        assert_eq!(civil(951_782_400), "2000-02-29 00:00");
+        assert_eq!(civil(1_000_000_000), "2001-09-09 01:46");
+        assert_eq!(pdf_date("D:20261006120000Z"), "2026-10-06 12:00");
+        assert_eq!(pdf_date("D:2026"), "D:2026", "too short to read is shown as is");
+        assert_eq!(pdf_date("20240229"), "2024-02-29 00:00");
+        assert!(!local_time(Ok(std::time::SystemTime::now())).is_empty());
+        let m = PdfMetadata {
+            title: "Lease".into(),
+            author: String::new(),
+            subject: String::new(),
+            keywords: String::new(),
+            creator: String::new(),
+            producer: "Preview".into(),
+            created: "D:20261006120000Z".into(),
+            modified: String::new(),
+            version: "1.7".into(),
+            page_count: 20,
+            encrypted: false,
+            form: PdfFormType::AcroForm,
+        };
+        let text = pdf_text(std::path::Path::new("missing/lease.pdf"), &m, Some([612.0, 792.0]));
+        assert_eq!(
+            text,
+            "lease.pdf\n\nTitle: Lease\nCreated: 2026-10-06 12:00\nProducer: Preview\nPDF version: 1.7\nPages: 20\nPage size: 8.5 × 11.0 in (612 × 792 points)\nForm: Fillable form"
+        );
+        let image = image_info(std::path::Path::new("missing/photo.jpg"), 6000, 4000);
+        assert!(image.starts_with("photo.jpg\n\nDimensions: 6000 × 4000 pixels\nFormat: JPEG"), "{image}");
+    }
 
     #[test]
     fn undo_keeps_the_page_inside_the_document() {

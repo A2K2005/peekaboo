@@ -1,6 +1,10 @@
 //! Retained widget list: layout, hit testing, Tab order, F6 panes, and
 //! access keys. Pure code, so all of it runs in unit tests.
-use super::commands::{self, enabled, info, Command, Ctx};
+use super::{
+    commands::{self, enabled, info, Command, Ctx},
+    worker::Note,
+};
+use crate::model::OutlineItem;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Rect {
@@ -41,6 +45,9 @@ pub(super) enum WidgetId {
     SheetButton(usize),
     SheetField(usize),
     Document,
+    /// A row of the open sidebar list: a page thumbnail, an outline entry,
+    /// or a note.
+    SidebarItem(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +58,7 @@ pub(super) enum Role {
     SidebarTab,
     Field,
     Document,
+    ListItem,
 }
 
 /// F6 cycles these in order.
@@ -96,6 +104,105 @@ pub(super) struct SheetView<'a> {
     pub(super) buttons: Vec<&'a str>,
 }
 
+/// What the sidebar panel lists. Only rows in view become widgets.
+#[derive(Clone, Copy)]
+pub(super) enum SidebarList<'a> {
+    /// Page sizes in points.
+    Thumbnails(&'a [[f32; 2]]),
+    Contents(&'a [OutlineItem]),
+    Notes(&'a [Note]),
+    /// "No contents", "Looking for notes", and similar.
+    Message(&'a str),
+}
+
+impl SidebarList<'_> {
+    pub(super) fn len(&self) -> usize {
+        match self {
+            SidebarList::Thumbnails(s) => s.len(),
+            SidebarList::Contents(s) => s.len(),
+            SidebarList::Notes(s) => s.len(),
+            SidebarList::Message(_) => 0,
+        }
+    }
+    /// Accessible name and visible text of a row.
+    pub(super) fn label(&self, index: usize) -> String {
+        match self {
+            SidebarList::Thumbnails(_) => format!("Thumbnail, page {}", index + 1),
+            SidebarList::Contents(items) => items[index].title.clone(),
+            SidebarList::Notes(notes) => {
+                let n = &notes[index];
+                format!("Page {}, {}: {}", n.page + 1, n.kind.to_lowercase(), n.text)
+            }
+            SidebarList::Message(_) => String::new(),
+        }
+    }
+}
+
+/// Thumbnail width in epx. Pages fit a box this wide and 1.4 times as tall.
+pub(super) const THUMB_WIDTH: f32 = 120.0;
+
+/// A page thumbnail's size in physical pixels.
+pub(super) fn thumb_size(size: [f32; 2], scale: f32) -> (f32, f32) {
+    let (w, h) = (size[0].max(1.0), size[1].max(1.0));
+    let fit = (THUMB_WIDTH / w).min(1.4 * THUMB_WIDTH / h) * scale;
+    ((w * fit).round().max(1.0), (h * fit).round().max(1.0))
+}
+
+fn list_row_height(list: &SidebarList, index: usize, s: f32, ts: f32) -> f32 {
+    match list {
+        SidebarList::Thumbnails(sizes) => thumb_size(sizes[index], s).1 + (12.0 + 20.0 * ts) * s,
+        _ => control_height(ts) * s,
+    }
+}
+
+/// Top and height of a list row in content pixels.
+pub(super) fn sidebar_row(list: &SidebarList, index: usize, s: f32, ts: f32) -> (f32, f32) {
+    match list {
+        SidebarList::Thumbnails(_) => {
+            let top = (0..index).map(|i| list_row_height(list, i, s, ts)).sum();
+            (top, list_row_height(list, index, s, ts))
+        }
+        _ => {
+            let h = list_row_height(list, index, s, ts);
+            (index as f32 * h, h)
+        }
+    }
+}
+
+/// Rows that overlap the panel at this scroll offset, as (index, full row
+/// rectangle), and the height of the whole list.
+pub(super) fn sidebar_rows(list: &SidebarList, panel: Rect, scroll: f32, s: f32, ts: f32) -> (Vec<(usize, Rect)>, f32) {
+    let count = list.len();
+    let mut rows = Vec::new();
+    let mut place = |index: usize, top: f32, h: f32| {
+        if top + h > scroll && top < scroll + panel.height() {
+            rows.push((index, Rect::new(panel.x0, panel.y0 + top - scroll, panel.width(), h)));
+        }
+    };
+    let total = match list {
+        SidebarList::Thumbnails(_) => {
+            let mut top = 0.0;
+            for index in 0..count {
+                let h = list_row_height(list, index, s, ts);
+                place(index, top, h);
+                top += h;
+            }
+            top
+        }
+        _ if count == 0 => 0.0,
+        _ => {
+            let h = list_row_height(list, 0, s, ts);
+            let first = (scroll / h).floor().max(0.0) as usize;
+            let last = (((scroll + panel.height()) / h).ceil().max(0.0) as usize).min(count);
+            for index in first..last {
+                place(index, index as f32 * h, h);
+            }
+            count as f32 * h
+        }
+    };
+    (rows, total)
+}
+
 pub(super) struct Input<'a> {
     /// Client size in physical pixels.
     pub(super) width: f32,
@@ -111,6 +218,10 @@ pub(super) struct Input<'a> {
     pub(super) title: &'a str,
     pub(super) sidebar_open: bool,
     pub(super) sidebar_tab: usize,
+    pub(super) sidebar_list: SidebarList<'a>,
+    pub(super) sidebar_scroll: f32,
+    /// The list's one Tab stop: the current page, or the last row used.
+    pub(super) sidebar_active: usize,
     /// Visible fraction of the markup bar, 0 to 1, while it slides.
     pub(super) markup: f32,
     pub(super) ctx: Ctx,
@@ -126,6 +237,8 @@ pub(super) struct Layout {
     pub(super) markup_bar: Option<Rect>,
     pub(super) sidebar: Option<Rect>,
     pub(super) sidebar_panel: Rect,
+    /// Height of the whole sidebar list, for scrolling.
+    pub(super) sidebar_content: f32,
     pub(super) document: Rect,
     pub(super) status: Rect,
     pub(super) empty: Option<Empty>,
@@ -376,7 +489,26 @@ pub(super) fn layout(input: &Input) -> Layout {
             tab.checked = Some(input.sidebar_tab == index);
             w.push(tab);
         }
-        out.sidebar_panel = Rect { x0: PAD * s, y0: top + PAD * s + tab_h + PAD * s, x1: side_w - PAD * s, y1: bottom };
+        let panel = Rect { x0: PAD * s, y0: top + PAD * s + tab_h + PAD * s, x1: side_w - PAD * s, y1: bottom };
+        out.sidebar_panel = panel;
+        let list = &input.sidebar_list;
+        let (rows, total) = sidebar_rows(list, panel, input.sidebar_scroll, s, ts);
+        out.sidebar_content = total;
+        let active =
+            if rows.iter().any(|(i, _)| *i == input.sidebar_active) { Some(input.sidebar_active) } else { rows.first().map(|r| r.0) };
+        for (index, row) in rows {
+            // Clipped to the panel, so a half-hidden row never takes clicks
+            // meant for the sidebar tabs or the status bar.
+            let rect = Rect { y0: row.y0.max(panel.y0), y1: row.y1.min(panel.y1), ..row };
+            let mut item = plain_widget(WidgetId::SidebarItem(index), Role::ListItem, Region::Sidebar, rect, list.label(index));
+            item.focusable = active == Some(index);
+            match list {
+                SidebarList::Thumbnails(_) => item.checked = Some(index == input.sidebar_active),
+                SidebarList::Contents(items) => item.enabled = items[index].page.is_some(),
+                _ => {}
+            }
+            w.push(item);
+        }
         left = side_w;
     }
 
@@ -543,6 +675,9 @@ mod tests {
             title: "a.pdf",
             sidebar_open: false,
             sidebar_tab: 0,
+            sidebar_list: SidebarList::Message(""),
+            sidebar_scroll: 0.0,
+            sidebar_active: 0,
             markup: 0.0,
             ctx: Ctx { has_frame: !tabs.is_empty(), pdf: true, tabs: tabs.len(), ..Default::default() },
             sheet: None,
@@ -761,6 +896,49 @@ mod tests {
         assert_eq!(access_key_target(&layout.widgets, Scope::Markup, 'H'), Some(cmd(Command::Highlight)));
         assert_eq!(access_key_target(&layout.widgets, Scope::Root, 'H'), None, "Share is disabled");
         assert_eq!(access_key_target(&layout.widgets, Scope::Markup, 'S'), None);
+    }
+
+    #[test]
+    fn sidebar_lists_only_rows_in_view_with_one_tab_stop() {
+        let tabs = vec!["a.pdf".to_string()];
+        let sizes = vec![[612.0, 792.0]; 500];
+        let mut i = input(1100.0, &tabs);
+        i.sidebar_open = true;
+        i.sidebar_list = SidebarList::Thumbnails(&sizes);
+        i.sidebar_active = 3;
+        let l = layout(&i);
+        let items: Vec<&Widget> = l.widgets.iter().filter(|w| w.role == Role::ListItem).collect();
+        let row = sidebar_row(&i.sidebar_list, 1, 1.0, 1.0).0;
+        assert!(items.len() < 10 && items.len() as f32 >= l.sidebar_panel.height() / row);
+        assert_eq!(l.sidebar_content, 500.0 * row);
+        assert_eq!(items[0].label, "Thumbnail, page 1");
+        assert_eq!(items.iter().filter(|w| w.focusable).map(|w| w.id).collect::<Vec<_>>(), vec![WidgetId::SidebarItem(3)]);
+        assert_eq!(items[3].checked, Some(true), "the current page is marked");
+        assert!(items.iter().all(|w| w.rect.y0 >= l.sidebar_panel.y0 && w.rect.y1 <= l.sidebar_panel.y1));
+        i.sidebar_scroll = row * 250.0 + 5.0;
+        let far = layout(&i);
+        let first = far.widgets.iter().find(|w| w.role == Role::ListItem).unwrap();
+        assert_eq!(first.id, WidgetId::SidebarItem(250));
+        assert!(first.focusable, "page 4 is out of view, so the first row in view takes the Tab stop");
+        let outline: Vec<OutlineItem> =
+            (0..100_000).map(|n| OutlineItem { title: format!("Part {n}"), page: (n % 2 == 0).then_some(n), level: 0 }).collect();
+        i.sidebar_list = SidebarList::Contents(&outline);
+        i.sidebar_scroll = 32.0 * 5000.0;
+        let contents = layout(&i);
+        let rows: Vec<&Widget> = contents.widgets.iter().filter(|w| w.role == Role::ListItem).collect();
+        assert_eq!((rows[0].id, rows[0].label.as_str()), (WidgetId::SidebarItem(5000), "Part 5000"));
+        assert!(rows[0].enabled && !rows[1].enabled, "entries without a page are disabled");
+        assert!(rows.len() <= 30);
+        assert_eq!(contents.sidebar_content, 32.0 * 100_000.0);
+        i.sidebar_list = SidebarList::Message("No contents");
+        assert!(!layout(&i).widgets.iter().any(|w| w.role == Role::ListItem));
+    }
+
+    #[test]
+    fn thumbnails_fit_a_portrait_box() {
+        assert_eq!(thumb_size([612.0, 792.0], 1.0), (120.0, 155.0));
+        assert_eq!(thumb_size([792.0, 612.0], 2.0), (240.0, 185.0));
+        assert_eq!(thumb_size([100.0, 1000.0], 1.0), (17.0, 168.0));
     }
 
     #[test]

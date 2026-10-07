@@ -2,12 +2,13 @@
 //! empty state, sheets, focus rectangles, keytips, and tooltips. The
 //! document itself is drawn by document.rs.
 use super::{
-    app::{with_state, State},
+    app::{invalidate, with_state, State},
     commands::glyph,
     document,
     render::{fonts, measure, Align, Fonts, Painter, Renderer},
     theme::Theme,
-    widgets::{in_scope, Layout, Rect, Region, Role, Widget, WidgetId},
+    widgets::{self, in_scope, Layout, Rect, Region, Role, SidebarList, Widget, WidgetId},
+    worker::{Key, Work},
 };
 use windows::{
     core::Result,
@@ -19,12 +20,6 @@ use windows::{
         UI::{Input::KeyboardAndMouse::GetFocus, WindowsAndMessaging::*},
     },
 };
-
-const SIDEBAR_PLACEHOLDERS: [&str; 3] = [
-    "Page thumbnails will show here.",
-    "The table of contents will show here.",
-    "Notes and highlights will show here.",
-];
 
 struct Look<'a> {
     p: &'a Painter,
@@ -200,14 +195,66 @@ fn bars(l: &Look, state: &State, layout: &Layout) {
                 l.p.fill_round(bar, 1.5 * s, l.t.accent);
             }
         }
-        let text = SIDEBAR_PLACEHOLDERS[state.sidebar_tab.min(2)];
-        l.p.text(text, layout.sidebar_panel, &l.f.wrap, l.t.text_secondary, Align::Leading);
     }
     let status = layout.status;
     l.p.fill(status, l.t.bar);
     l.p.fill(Rect { y1: status.y0 + s, ..status }, l.t.border);
     let text = Rect { x0: status.x0 + 12.0 * s, y0: status.y0, x1: status.x1 - 12.0 * s, y1: status.y1 };
     l.p.text(&state.status, text, &l.f.caption, l.t.text_secondary, Align::Leading);
+}
+
+/// The sidebar list: thumbnails with page numbers, outline entries indented
+/// by level, or notes. Only rows in view are drawn.
+fn sidebar_panel(l: &Look, state: &mut State, layout: &Layout) {
+    if layout.sidebar.is_none() {
+        return;
+    }
+    let (s, ts, panel) = (l.s, state.text_scale, layout.sidebar_panel);
+    let list = state.sidebar_list();
+    if let SidebarList::Message(message) = list {
+        let line = Rect { y1: panel.y0 + 3.0 * 20.0 * ts * s, ..panel };
+        l.p.text(message, line, &l.f.wrap, l.t.text_secondary, Align::Leading);
+        return;
+    }
+    let scroll = state.sidebar_scroll[state.sidebar_tab.min(2)];
+    let (rows, _) = widgets::sidebar_rows(&list, panel, scroll, s, ts);
+    let rows: Vec<(usize, Rect, String, u32)> = rows
+        .into_iter()
+        .map(|(i, r)| {
+            let level = if let SidebarList::Contents(items) = list { items[i].level.min(8) } else { 0 };
+            (i, r, list.label(i), level)
+        })
+        .collect();
+    let thumbnails = matches!(list, SidebarList::Thumbnails(_));
+    l.p.push_clip(panel);
+    for (index, row, label, level) in rows {
+        if state.hover == Some(WidgetId::SidebarItem(index)) {
+            l.p.fill_round(row.inset(2.0 * s), 4.0 * s, l.t.hover);
+        }
+        if !thumbnails {
+            let enabled = layout.widgets.iter().find(|w| w.id == WidgetId::SidebarItem(index)).is_none_or(|w| w.enabled);
+            let text = Rect { x0: row.x0 + (8.0 + 12.0 * level as f32) * s, x1: row.x1 - 8.0 * s, ..row };
+            l.p.text(&label, text, &l.f.body, if enabled { l.t.text } else { l.t.text_disabled }, Align::Leading);
+            continue;
+        }
+        let Some(v) = state.pdf.as_ref() else {
+            break;
+        };
+        let (w, h) = widgets::thumb_size(v.sizes[index], s);
+        let thumb = Rect::new((row.x0 + (row.width() - w) / 2.0).round(), (row.y0 + 6.0 * s).round(), w, h);
+        let current = index == state.page as usize;
+        l.p.fill(thumb, super::theme::Rgba(1.0, 1.0, 1.0, 1.0));
+        if let Some(tile) = state.cache.get(&Key { doc: v.doc, work: Work::Thumb { page: index as u32 } }) {
+            l.p.draw_bitmap(&tile.bitmap, thumb);
+        }
+        // The current page gets the accent frame, as Preview does.
+        let (frame, width) = if current { (l.t.accent, 2.0 * s) } else { (l.t.border, s) };
+        l.p.stroke_round(thumb.inset(-width), 0.0, frame, width);
+        let number = Rect { y0: thumb.y1 + 4.0 * s, y1: row.y1, ..row };
+        let font = if current { &l.f.strong } else { &l.f.caption };
+        l.p.text(&(index + 1).to_string(), number, font, if current { l.t.text } else { l.t.text_secondary }, Align::Center);
+    }
+    l.p.pop_clip();
 }
 
 fn empty_state(l: &Look, state: &State, layout: &Layout) {
@@ -301,29 +348,30 @@ fn tooltip(l: &Look, state: &State, layout: &Layout) {
 }
 
 /// Draws everything between BeginDraw and EndDraw. Returns true when the
-/// document frame was drawn.
-pub(super) fn draw(p: &Painter, bitmap: Option<&ID2D1Bitmap>, fonts: &Fonts, state: &mut State) -> bool {
-    let layout = state.layout();
+/// document shows complete content.
+pub(super) fn draw(p: &Painter, bitmap: Option<&ID2D1Bitmap>, fonts: &Fonts, state: &mut State, layout: &Layout) -> bool {
     let look = Look { p, t: state.theme, f: fonts, s: state.scale };
     p.clear(state.theme.chrome);
-    title_bar(&look, state, &layout);
-    bars(&look, state, &layout);
+    title_bar(&look, state, layout);
+    bars(&look, state, layout);
+    sidebar_panel(&look, state, layout);
     let drew = if layout.empty.is_some() {
         p.fill(layout.document, state.theme.canvas);
-        empty_state(&look, state, &layout);
+        empty_state(&look, state, layout);
         false
     } else {
         document::paint(p, bitmap, state, layout.document)
     };
-    sheet(&look, state, &layout);
-    focus_ring(&look, state, &layout);
-    keytips(&look, state, &layout);
-    tooltip(&look, state, &layout);
+    sheet(&look, state, layout);
+    focus_ring(&look, state, layout);
+    keytips(&look, state, layout);
+    tooltip(&look, state, layout);
     drew
 }
 
 /// WM_PAINT body. Paints before any decode on launch; decode is scheduled
-/// from tick once `painted` is set.
+/// from tick once `painted` is set. After the frame, it asks the document
+/// worker for what the view still needs.
 pub(super) unsafe fn paint(hwnd: HWND) {
     with_state(|state| {
         state.painted = true;
@@ -331,6 +379,10 @@ pub(super) unsafe fn paint(hwnd: HWND) {
         if width == 0 || height == 0 {
             return;
         }
+        let document = state.layout().document;
+        let gliding = document::prepare(state, document);
+        super::bench::before_draw(state, document);
+        let layout = state.layout();
         let result = (|| -> Result<bool> {
             if state.renderer.is_none() {
                 state.renderer = Some(Renderer::new(hwnd, width, height)?);
@@ -341,37 +393,61 @@ pub(super) unsafe fn paint(hwnd: HWND) {
                 }
             }
             let fonts = fonts(state.scale, state.text_scale)?;
+            state.cache.new_frame();
             let renderer = state.renderer.take().unwrap();
-            renderer.begin();
-            let drew = draw(&renderer.painter, renderer.bitmap.as_ref(), &fonts, state);
-            let ended = renderer.end();
+            let uploaded = document::upload(state, &renderer.painter);
+            if uploaded.is_ok() {
+                renderer.begin();
+            }
+            let drew = uploaded.is_ok() && draw(&renderer.painter, renderer.bitmap.as_ref(), &fonts, state, &layout);
+            let ended = if uploaded.is_ok() { renderer.end() } else { Ok(()) };
             state.renderer = Some(renderer);
+            uploaded?;
             ended?;
             Ok(drew)
         })();
-        match result {
-            Ok(true) if !state.pending && !state.marked && !state.render_failed => benchmark_marker(hwnd, state),
+        let drew = match result {
+            Ok(drew) => drew,
             Err(error) => {
-                // D2DERR_RECREATE_TARGET and other device loss: rebuild on the next paint.
+                // D2DERR_RECREATE_TARGET and other device loss: rebuild on the
+                // next paint. Cached bitmaps belong to the lost target.
                 state.renderer = None;
+                state.cache.clear();
+                state.sent.clear();
                 state.status = format!("Windows could not draw this view: {error}");
+                false
             }
-            _ => {}
+        };
+        if drew && !state.pending && !state.render_failed {
+            state.content_drawn = true;
+            if !state.marked {
+                benchmark_marker(hwnd, state);
+            }
+        }
+        let more = super::bench::after_present(hwnd, state, layout.document, drew);
+        document::request(state, &layout);
+        if gliding || more {
+            invalidate(hwnd);
         }
     });
 }
 
-/// PFW_BENCH_OUT and PFW_BENCH_AUTOCLOSE, exactly as docs/contracts.md defines.
+/// PFW_BENCH_OUT and PFW_BENCH_AUTOCLOSE, exactly as docs/contracts.md
+/// defines. For a PDF, width and height are the first visible page's pixels.
 unsafe fn benchmark_marker(hwnd: HWND, state: &mut State) {
-    let (Some(path), Some(frame)) = (std::env::var_os("PFW_BENCH_OUT"), state.frame.as_ref()) else {
+    let Some(path) = std::env::var_os("PFW_BENCH_OUT") else {
         return;
+    };
+    let (width, height, pages) = match (&state.pdf, &state.frame) {
+        (Some(v), _) => (state.stats.page_px.0, state.stats.page_px.1, v.sizes.len() as u32),
+        (None, Some(frame)) => (frame.width, frame.height, frame.page_count),
+        _ => return,
     };
     let mut counter = 0;
     let mut frequency = 0;
     if DwmFlush().is_ok() && QueryPerformanceCounter(&mut counter).is_ok() && QueryPerformanceFrequency(&mut frequency).is_ok() {
         let json = format!(
-            "{{\"first_content_qpc\":{counter},\"qpc_frequency\":{frequency},\"width\":{},\"height\":{},\"page_count\":{}}}",
-            frame.width, frame.height, frame.page_count
+            "{{\"first_content_qpc\":{counter},\"qpc_frequency\":{frequency},\"width\":{width},\"height\":{height},\"page_count\":{pages}}}"
         );
         if std::fs::write(path, json).is_ok() {
             state.marked = true;
@@ -385,8 +461,17 @@ unsafe fn benchmark_marker(hwnd: HWND, state: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{model::Frame, ui::theme::{palette, Mode, Rgba}, ui::widgets::Scope, ui::worker::Workers};
-    use std::path::PathBuf;
+    use crate::{
+        model::Frame,
+        ui::{
+            document::{PdfView, Tile},
+            theme::{palette, Mode, Rgba},
+            view::Zoom,
+            widgets::Scope,
+            worker::Workers,
+        },
+    };
+    use std::{path::PathBuf, sync::Arc};
     use windows::{
         core::Interface,
         Win32::{
@@ -412,9 +497,48 @@ mod tests {
         Frame { width, height, pixels, page_count: 20, source_width: width, source_height: height }
     }
 
-    /// Draws one scene into a WIC bitmap with the window's own drawing code
-    /// and returns its premultiplied BGRA pixels. No window is created.
-    unsafe fn render(mode: Mode, scene: &str, size: (u32, u32), scale: f32, text_scale: f32) -> Frame {
+    /// A page tile cut from `page` as the renderer would draw it at `scale`.
+    fn tile(page: &Frame, scale: f32, [x, y, w, h]: [u32; 4]) -> Frame {
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for row in y..y + h {
+            for col in x..x + w {
+                let sx = ((col as f32 / scale) as u32).min(page.width - 1);
+                let sy = ((row as f32 / scale) as u32).min(page.height - 1);
+                let i = ((sy * page.width + sx) * 4) as usize;
+                pixels.extend_from_slice(&page.pixels[i..i + 4]);
+            }
+        }
+        Frame { width: w, height: h, pixels, page_count: 1, source_width: w, source_height: h }
+    }
+
+    /// The thumbnail stand-in color, BGRA.
+    const THUMB: [u8; 4] = [255, 200, 150, 255];
+
+    /// Opens a synthetic 20-page PDF in `state` and fills the cache the way
+    /// the document worker would: full tiles for `tiled` pages, thumbnails
+    /// for `thumbs` pages.
+    fn open_pdf(painter: &Painter, state: &mut State, tiled: &[u32], thumbs: &[u32]) {
+        let path = PathBuf::from("Quarterly report.pdf");
+        state.pdf = Some(PdfView::new(path, vec![[612.0, 792.0]; 20], Arc::default(), 0));
+        state.status = "Page 1 of 20".into();
+        let document = state.layout().document;
+        document::prepare(state, document);
+        let source = page();
+        for item in document::wanted(state, &state.layout()) {
+            let frame = match item.key.work {
+                Work::Tile { page, .. } if tiled.contains(&page) => tile(&source, item.scale, item.region),
+                Work::Thumb { page } if thumbs.contains(&page) => {
+                    let (w, h) = (item.region[2], item.region[3]);
+                    Frame { width: w, height: h, pixels: THUMB.repeat((w * h) as usize), page_count: 1, source_width: w, source_height: h }
+                }
+                _ => continue,
+            };
+            let bitmap = painter.upload(&frame).unwrap();
+            state.cache.insert(item.key, Tile { bitmap, fresh: true }, frame.pixels.len());
+        }
+    }
+
+    unsafe fn target(size: (u32, u32)) -> (IWICBitmap, Painter) {
         let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
         let bitmap = wic.CreateBitmap(size.0, size.1, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad).unwrap();
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).unwrap();
@@ -430,24 +554,29 @@ mod tests {
             )
             .unwrap();
         target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        let painter = Painter::new(target.cast().unwrap()).unwrap();
-        let paths: Vec<PathBuf> = if scene == "empty" {
-            Vec::new()
-        } else {
-            vec![PathBuf::from("Quarterly report.pdf"), PathBuf::from("Beach photo.jpg"), PathBuf::from("Lease agreement.pdf")]
+        (bitmap, Painter::new(target.cast().unwrap()).unwrap())
+    }
+
+    fn pixels(bitmap: &IWICBitmap, size: (u32, u32)) -> Frame {
+        let mut pixels = vec![0u8; (size.0 * size.1 * 4) as usize];
+        unsafe { bitmap.CopyPixels(std::ptr::null(), size.0 * 4, &mut pixels).unwrap() };
+        Frame { width: size.0, height: size.1, pixels, page_count: 1, source_width: size.0, source_height: size.1 }
+    }
+
+    /// Draws one scene into a WIC bitmap with the window's own drawing code
+    /// and returns its premultiplied BGRA pixels. No window is created.
+    unsafe fn render(mode: Mode, scene: &str, size: (u32, u32), scale: f32, text_scale: f32) -> Frame {
+        let (bitmap, painter) = target(size);
+        let paths: Vec<PathBuf> = match scene {
+            "empty" => Vec::new(),
+            "image" => vec![PathBuf::from("Beach photo.jpg")],
+            _ => vec![PathBuf::from("Quarterly report.pdf"), PathBuf::from("Beach photo.jpg"), PathBuf::from("Lease agreement.pdf")],
         };
         let workers = Workers::start(HWND::default()).unwrap();
         let mut state = State::new(workers, &paths, (size.0 as f32, size.1 as f32), scale, text_scale, palette(mode));
         state.animations = false;
-        let mut frame_bitmap = None;
-        if !paths.is_empty() {
-            let frame = page();
-            frame_bitmap = Some(painter.upload(&frame).unwrap());
-            state.frame = Some(frame);
-            state.status = "Page 1 of 20".into();
-        }
         match scene {
-            "document" => {
+            "document" | "image" => {
                 state.sidebar_open = true;
                 state.set_markup(true);
                 state.markup = Some(crate::model::AnnotationKind::Highlight);
@@ -477,14 +606,121 @@ mod tests {
             }
             _ => {}
         }
+        let mut frame_bitmap = None;
+        if scene == "image" {
+            let frame = page();
+            frame_bitmap = Some(painter.upload(&frame).unwrap());
+            state.frame = Some(frame);
+            state.status = state.subtitle();
+        } else if !paths.is_empty() {
+            open_pdf(&painter, &mut state, &[0, 1], &[0, 1, 2]);
+        }
         let fonts = fonts(scale, text_scale).unwrap();
         painter.target.BeginDraw();
-        let drew = draw(&painter, frame_bitmap.as_ref(), &fonts, &mut state);
+        let layout = state.layout();
+        let drew = draw(&painter, frame_bitmap.as_ref(), &fonts, &mut state, &layout);
         painter.target.EndDraw(None, None).unwrap();
-        assert_eq!(drew, !paths.is_empty());
-        let mut pixels = vec![0u8; (size.0 * size.1 * 4) as usize];
-        bitmap.CopyPixels(std::ptr::null(), size.0 * 4, &mut pixels).unwrap();
-        Frame { width: size.0, height: size.1, pixels, page_count: 1, source_width: size.0, source_height: size.1 }
+        assert_eq!(drew, !paths.is_empty(), "{scene}");
+        pixels(&bitmap, size)
+    }
+
+    /// Tiles draw where they arrived; a page without tiles shows its
+    /// thumbnail stretched, so it is not blank; a page with neither counts
+    /// as blank for the scroll benchmark.
+    #[test]
+    fn pdf_view_draws_tiles_and_thumbnail_placeholders_headless() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let size = (1000, 900);
+            let (bitmap, painter) = target(size);
+            let workers = Workers::start(HWND::default()).unwrap();
+            let paths = vec![PathBuf::from("Quarterly report.pdf")];
+            let mut state = State::new(workers, &paths, (size.0 as f32, size.1 as f32), 1.0, 1.0, palette(Mode::Light));
+            // Pages of 408 by 528 pixels: page 1 whole, the top of page 2.
+            state.zoom = Zoom::Ratio(0.5);
+            open_pdf(&painter, &mut state, &[0], &[1]);
+            let fonts = fonts(1.0, 1.0).unwrap();
+            let layout = state.layout();
+            painter.target.BeginDraw();
+            let drew = draw(&painter, None, &fonts, &mut state, &layout);
+            painter.target.EndDraw(None, None).unwrap();
+            assert!(!drew, "page 2 has no tiles yet");
+            let stats = state.stats.clone();
+            assert!(stats.visible > 2 && stats.missing > 0, "{stats:?}");
+            assert!(stats.blank.is_empty(), "page 2 shows its thumbnail");
+            let shot = pixels(&bitmap, size);
+            let g = document::geometry_in(&state, layout.document).unwrap();
+            let rect = |i: usize| {
+                let r = g.layout.pages[i].1;
+                (layout.document.x0 + r.x0 - g.left, layout.document.y0 + r.y0 - g.top, r.width() / 612.0)
+            };
+            let (x, y, k) = rect(0);
+            let text = pixel(&shot, (x + 100.0 * k) as u32, (y + 83.0 * k) as u32);
+            assert!(close(text, Rgba(96.0 / 255.0, 96.0 / 255.0, 96.0 / 255.0, 1.0)), "page 1 text line from its tile: {text:?}");
+            let (x, y, _) = rect(1);
+            let thumb = pixel(&shot, (x + 30.0) as u32, (y + 10.0).min(size.1 as f32 - 40.0) as u32);
+            assert!(close(thumb, Rgba(150.0 / 255.0, 200.0 / 255.0, 1.0, 1.0)), "page 2 placeholder: {thumb:?}");
+            let gap = pixel(&shot, (x + 30.0) as u32, (y - 4.0) as u32);
+            assert!(close(gap, palette(Mode::Light).canvas), "the gap between pages");
+            // Without a thumbnail, the missing tiles count as blank.
+            state.cache.clear();
+            painter.target.BeginDraw();
+            draw(&painter, None, &fonts, &mut state, &layout);
+            painter.target.EndDraw(None, None).unwrap();
+            assert_eq!(state.stats.blank.len() as u32, state.stats.visible);
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/screenshots/light-pdf-placeholder.png");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let _ = std::fs::remove_file(&path);
+            crate::imaging::export_frame(&shot, &path).unwrap();
+        }
+    }
+
+    /// Before the first page is up, its tiles go first; after that, a
+    /// page's thumbnail goes before its tiles, so scrolling never shows a
+    /// blank page for long. Sidebar thumbnails come after the view's work.
+    #[test]
+    fn work_list_puts_the_first_page_then_placeholders_first() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let (_, painter) = target((10, 10));
+            let workers = Workers::start(HWND::default()).unwrap();
+            let paths = vec![PathBuf::from("Quarterly report.pdf")];
+            let mut state = State::new(workers, &paths, (1000.0, 900.0), 1.0, 1.0, palette(Mode::Light));
+            state.zoom = Zoom::Ratio(0.5);
+            open_pdf(&painter, &mut state, &[], &[]);
+            let layout = state.layout();
+            let kinds = |state: &State| -> Vec<&'static str> {
+                document::wanted(state, &state.layout())
+                    .iter()
+                    .map(|i| match i.key.work {
+                        Work::Tile { .. } => "tile",
+                        Work::Thumb { .. } => "thumb",
+                        _ => "other",
+                    })
+                    .collect()
+            };
+            let first = kinds(&state);
+            assert_eq!(&first[..5], &["tile", "tile", "tile", "thumb", "thumb"], "three tiles in view, then placeholders");
+            assert!(first[5..].contains(&"tile"), "then the margin");
+            state.content_drawn = true;
+            let later = kinds(&state);
+            assert_eq!(&later[..2], &["thumb", "thumb"], "pages 1 and 2 in view get placeholders first");
+            let items = document::wanted(&state, &layout);
+            let tiles: Vec<u32> = items.iter().filter_map(|i| if let Work::Tile { page, .. } = i.key.work { Some(page) } else { None }).collect();
+            assert!(tiles.iter().all(|p| *p <= 2), "only pages in view and the margin: {tiles:?}");
+            state.sidebar_open = true;
+            let with_sidebar = kinds(&state);
+            assert!(with_sidebar.len() > later.len(), "sidebar thumbnails come last");
+            // An image asks for its neighbors, never for tiles.
+            state.pdf = None;
+            state.frame = Some(page());
+            state.displayed = Some((paths[0].clone(), 0));
+            state.path = Some(paths[0].clone());
+            let neighbors = document::wanted(&state, &state.layout());
+            assert_eq!(neighbors.len(), 2);
+            assert!(matches!(neighbors[0].key.work, Work::Predecode { delta: 1, .. }));
+            assert!(matches!(neighbors[1].key.work, Work::Predecode { delta: -1, .. }));
+        }
     }
 
     fn pixel(frame: &Frame, x: u32, y: u32) -> Rgba {
@@ -528,7 +764,7 @@ mod tests {
             std::fs::create_dir_all(&out).unwrap();
             for (mode, name) in [(Mode::Light, "light"), (Mode::Dark, "dark"), (Mode::Contrast, "contrast")] {
                 let theme = palette(mode);
-                for scene in ["document", "empty", "sheet", "keytips"] {
+                for scene in ["document", "image", "empty", "sheet", "keytips"] {
                     let size = (1100, 760);
                     let shot = render(mode, scene, size, 1.0, 1.0);
                     // Title bar drag space and the bottom-right canvas corner.
