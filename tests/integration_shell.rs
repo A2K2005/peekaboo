@@ -1,13 +1,17 @@
-﻿#![allow(dead_code)]
+#![allow(dead_code)]
 #[path = "../src/integration.rs"]
 mod integration;
 
 use std::path::{Path, PathBuf};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, HWND};
-use windows::Win32::System::Com::{CoInitializeEx, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{
+    CoInitializeEx, COINIT_APARTMENTTHREADED, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL,
+};
 use windows::Win32::System::Ole::{ReleaseStgMedium, CF_HDROP};
-use windows::Win32::System::Registry::{RegDeleteTreeW, RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+use windows::Win32::System::Registry::{
+    RegDeleteTreeW, RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ,
+};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 /// The only registry key these tests write. Dropping the guard deletes it.
@@ -35,7 +39,9 @@ fn read(key: &str, name: &str) -> Option<String> {
             Some(&mut size),
         )
     };
-    status.is_ok().then(|| String::from_utf16_lossy(&buffer[..size as usize / 2 - 1]))
+    status
+        .is_ok()
+        .then(|| String::from_utf16_lossy(&buffer[..size as usize / 2 - 1]))
 }
 
 /// Every value under a key as sorted "key|name|data" lines, with `root` replaced by "ROOT".
@@ -77,32 +83,82 @@ fn register_writes_per_user_keys_and_unregister_removes_them() {
     let classes = format!(r"{base}\Classes");
     let quoted = r#""C:\Apps\Preview\preview-for-windows.exe""#;
 
-    assert_eq!(read(&format!(r"{classes}\PreviewForWindows.Pdf"), "").as_deref(), Some("PDF document"));
     assert_eq!(
-        read(&format!(r"{classes}\PreviewForWindows.Jpeg\shell\open\command"), ""),
+        read(&format!(r"{classes}\PreviewForWindows.Pdf"), "").as_deref(),
+        Some("PDF document")
+    );
+    assert_eq!(
+        read(
+            &format!(r"{classes}\PreviewForWindows.Jpeg\shell\open\command"),
+            ""
+        ),
         Some(format!(r#"{quoted} "%1""#))
     );
-    assert_eq!(read(&format!(r"{classes}\.heic\OpenWithProgids"), "PreviewForWindows.Heif").as_deref(), Some(""));
+    assert_eq!(
+        read(
+            &format!(r"{classes}\.heic\OpenWithProgids"),
+            "PreviewForWindows.Heif"
+        )
+        .as_deref(),
+        Some("")
+    );
     let convert = format!(r"{classes}\SystemFileAssociations\.png\shell\PreviewForWindows.Convert");
     assert_eq!(read(&convert, "MUIVerb").as_deref(), Some("Convert"));
-    assert_eq!(read(&convert, "MultiSelectModel").as_deref(), Some("Player"));
-    assert_eq!(read(&format!(r"{convert}\command"), ""), Some(format!(r#"{quoted} --convert "%1""#)));
-    let pdf_verbs = format!(r"{classes}\SystemFileAssociations\.pdf\shell");
-    assert_eq!(read(&format!(r"{pdf_verbs}\PreviewForWindows.Combine"), "MUIVerb").as_deref(), Some("Combine into PDF"));
-    assert_eq!(read(&format!(r"{pdf_verbs}\PreviewForWindows.Resize"), "MUIVerb"), None, "PDFs get Combine only");
     assert_eq!(
-        read(&format!(r"{classes}\Applications\preview-for-windows.exe\SupportedTypes"), ".tiff").as_deref(),
+        read(&convert, "MultiSelectModel").as_deref(),
+        Some("Player")
+    );
+    assert_eq!(
+        read(&format!(r"{convert}\command"), ""),
+        Some(format!(r#"{quoted} --convert "%1""#))
+    );
+    let pdf_verbs = format!(r"{classes}\SystemFileAssociations\.pdf\shell");
+    assert_eq!(
+        read(
+            &format!(r"{pdf_verbs}\PreviewForWindows.Combine"),
+            "MUIVerb"
+        )
+        .as_deref(),
+        Some("Combine into PDF")
+    );
+    assert_eq!(
+        read(&format!(r"{pdf_verbs}\PreviewForWindows.Resize"), "MUIVerb"),
+        None,
+        "PDFs get Combine only"
+    );
+    assert_eq!(
+        read(
+            &format!(r"{classes}\Applications\preview-for-windows.exe\SupportedTypes"),
+            ".tiff"
+        )
+        .as_deref(),
         Some("")
     );
     let capabilities = format!(r"{base}\PreviewForWindows\Capabilities");
-    assert_eq!(read(&format!(r"{capabilities}\FileAssociations"), ".webp").as_deref(), Some("PreviewForWindows.Webp"));
-    assert_eq!(read(&format!(r"{base}\RegisteredApplications"), "Preview for Windows"), Some(capabilities));
+    assert_eq!(
+        read(&format!(r"{capabilities}\FileAssociations"), ".webp").as_deref(),
+        Some("PreviewForWindows.Webp")
+    );
+    assert_eq!(
+        read(
+            &format!(r"{base}\RegisteredApplications"),
+            "Preview for Windows"
+        ),
+        Some(capabilities)
+    );
     assert_eq!(dump(&base).len(), 195, "values written");
 
     integration::unregister_at(&base, exe).unwrap();
-    assert_eq!(dump(&base), Vec::<String>::new(), "unregister leaves no values");
+    assert_eq!(
+        dump(&base),
+        Vec::<String>::new(),
+        "unregister leaves no values"
+    );
     integration::unregister_at(&base, exe).unwrap();
-    assert!(integration::register_at(&base, Path::new("preview.exe")).is_err(), "relative path");
+    assert!(
+        integration::register_at(&base, Path::new("preview.exe")).is_err(),
+        "relative path"
+    );
 }
 
 #[test]
@@ -139,12 +195,18 @@ fn script_writes_the_same_keys_as_rust() {
 
 #[test]
 fn default_apps_link_matches_windows_version() {
-    assert_eq!(integration::default_apps_uri(19045), "ms-settings:defaultapps");
+    assert_eq!(
+        integration::default_apps_uri(19045),
+        "ms-settings:defaultapps"
+    );
     assert_eq!(
         integration::default_apps_uri(22631),
         "ms-settings:defaultapps?registeredAppUser=Preview%20for%20Windows"
     );
-    assert!(integration::windows_build() >= 10240, "reads this PC's build");
+    assert!(
+        integration::windows_build() >= 10240,
+        "reads this PC's build"
+    );
 }
 
 #[test]
@@ -172,10 +234,21 @@ fn recent_files_are_newest_first_capped_and_pruned() {
     let list = integration::add_recent(&store, &upper).unwrap();
     assert_eq!(list[0], upper);
     assert_eq!(list.len(), 20);
-    assert_eq!(list.iter().filter(|p| p.to_str().unwrap().eq_ignore_ascii_case(files[10].to_str().unwrap())).count(), 1);
+    assert_eq!(
+        list.iter()
+            .filter(|p| p
+                .to_str()
+                .unwrap()
+                .eq_ignore_ascii_case(files[10].to_str().unwrap()))
+            .count(),
+        1
+    );
 
     std::fs::remove_file(&files[24]).unwrap();
-    assert!(!integration::load_recent(&store).contains(&files[24]), "missing files are pruned");
+    assert!(
+        !integration::load_recent(&store).contains(&files[24]),
+        "missing files are pruned"
+    );
     assert!(integration::add_recent(&store, Path::new("relative.png")).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -184,7 +257,10 @@ fn recent_files_are_newest_first_capped_and_pruned() {
 fn drag_data_object_carries_files_from_two_folders() {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
     let dir = scratch("drag");
-    let files = [dir.join("one").join("a.png"), dir.join("two").join("b c.pdf")];
+    let files = [
+        dir.join("one").join("a.png"),
+        dir.join("two").join("b c.pdf"),
+    ];
     for file in &files {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, b"x").unwrap();

@@ -26,13 +26,13 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{
-    IDataTransferManagerInterop, ILCreateFromPathW, ILFree, SHAddToRecentDocs, SHChangeNotify,
-    SHCreateShellItemArrayFromIDLists, SHDoDragDrop, ShellExecuteW, BHID_DataObject,
-    SHARD_PATHW, SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
+    BHID_DataObject, IDataTransferManagerInterop, ILCreateFromPathW, ILFree, SHAddToRecentDocs,
+    SHChangeNotify, SHCreateShellItemArrayFromIDLists, SHDoDragDrop, ShellExecuteW, SHARD_PATHW,
+    SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, FindWindowExW, FindWindowW, GetWindowThreadProcessId,
-    SendMessageTimeoutW, HWND_MESSAGE, SMTO_ABORTIFHUNG, SW_SHOWNORMAL, WM_COPYDATA,
+    AllowSetForegroundWindow, FindWindowExW, GetWindowThreadProcessId, SendMessageTimeoutW,
+    SMTO_ABORTIFHUNG, SW_SHOWNORMAL, WM_COPYDATA,
 };
 
 pub const APP_NAME: &str = "Preview for Windows";
@@ -65,9 +65,14 @@ impl Action {
     }
 
     fn from_flag(flag: &str) -> Option<Self> {
-        [Action::Open, Action::Convert, Action::Resize, Action::Combine]
-            .into_iter()
-            .find(|a| a.flag() == flag)
+        [
+            Action::Open,
+            Action::Convert,
+            Action::Resize,
+            Action::Combine,
+        ]
+        .into_iter()
+        .find(|a| a.flag() == flag)
     }
 }
 
@@ -81,7 +86,10 @@ pub struct Command {
 /// program name). Relative paths resolve against the current folder.
 /// Other flags are ignored.
 pub fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Command {
-    let mut command = Command { action: Action::Open, paths: Vec::new() };
+    let mut command = Command {
+        action: Action::Open,
+        paths: Vec::new(),
+    };
     for (index, arg) in args.into_iter().enumerate() {
         if let Some(action) = arg.to_str().and_then(Action::from_flag) {
             if index == 0 {
@@ -168,16 +176,20 @@ pub unsafe fn decode_copydata(lparam: LPARAM) -> Option<Command> {
         return None;
     }
     // The system copy may be unaligned for u16, so read bytes.
-    let bytes = unsafe { std::slice::from_raw_parts(data.lpData as *const u8, data.cbData as usize) };
-    let wide: Vec<u16> = bytes.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+    let bytes =
+        unsafe { std::slice::from_raw_parts(data.lpData as *const u8, data.cbData as usize) };
+    let wide: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .collect();
     decode(&wide)
 }
 
 /// Finds the running instance's top-level window, or its message-only window
 /// if it keeps one to receive files while no window is open.
 pub fn find_window(class: &str) -> Option<HWND> {
-    let class = HSTRING::from(class);
-    unsafe { FindWindowW(&class, None).or_else(|_| FindWindowExW(Some(HWND_MESSAGE), None, &class, None)) }.ok()
+    // With no parent, FindWindowEx searches top-level and message-only windows.
+    unsafe { FindWindowExW(None, None, &HSTRING::from(class), None) }.ok()
 }
 
 /// Sends `command` to a running window. Succeeds only when that window
@@ -272,9 +284,19 @@ pub const FILE_TYPES: [(&str, &str, &str); 11] = [
 ];
 /// Explorer verb key, menu text, action, and whether PDFs get it.
 pub const VERBS: [(&str, &str, Action, bool); 3] = [
-    ("PreviewForWindows.Convert", "Convert", Action::Convert, false),
+    (
+        "PreviewForWindows.Convert",
+        "Convert",
+        Action::Convert,
+        false,
+    ),
     ("PreviewForWindows.Resize", "Resize", Action::Resize, false),
-    ("PreviewForWindows.Combine", "Combine into PDF", Action::Combine, true),
+    (
+        "PreviewForWindows.Combine",
+        "Combine into PDF",
+        Action::Combine,
+        true,
+    ),
 ];
 
 /// Registers the app for this Windows user: ProgIDs, "Open with", Default
@@ -305,9 +327,17 @@ pub fn register_at(base: &str, exe: &Path) -> Result<(), String> {
         set(&format!("{key}\\DefaultIcon"), "", &icon)?;
         set(&format!("{key}\\shell\\open"), "MultiSelectModel", "Player")?;
         set(&format!("{key}\\shell\\open\\command"), "", &open)?;
-        set(&format!("{classes}\\{extension}\\OpenWithProgids"), progid, "")?;
+        set(
+            &format!("{classes}\\{extension}\\OpenWithProgids"),
+            progid,
+            "",
+        )?;
         set(&format!("{application}\\SupportedTypes"), extension, "")?;
-        set(&format!("{capabilities}\\FileAssociations"), extension, progid)?;
+        set(
+            &format!("{capabilities}\\FileAssociations"),
+            extension,
+            progid,
+        )?;
         for (verb, text, action, pdf) in VERBS {
             if extension == ".pdf" && !pdf {
                 continue;
@@ -316,15 +346,31 @@ pub fn register_at(base: &str, exe: &Path) -> Result<(), String> {
             set(&key, "MUIVerb", text)?;
             set(&key, "MultiSelectModel", "Player")?;
             set(&key, "Icon", &icon)?;
-            set(&format!("{key}\\command"), "", &format!("\"{exe}\" {} \"%1\"", action.flag()))?;
+            set(
+                &format!("{key}\\command"),
+                "",
+                &format!("\"{exe}\" {} \"%1\"", action.flag()),
+            )?;
         }
     }
     set(&application, "FriendlyAppName", APP_NAME)?;
-    set(&format!("{application}\\shell\\open"), "MultiSelectModel", "Player")?;
+    set(
+        &format!("{application}\\shell\\open"),
+        "MultiSelectModel",
+        "Player",
+    )?;
     set(&format!("{application}\\shell\\open\\command"), "", &open)?;
     set(&capabilities, "ApplicationName", APP_NAME)?;
-    set(&capabilities, "ApplicationDescription", "View and edit PDFs and images.")?;
-    set(&format!("{base}\\RegisteredApplications"), APP_NAME, &capabilities)
+    set(
+        &capabilities,
+        "ApplicationDescription",
+        "View and edit PDFs and images.",
+    )?;
+    set(
+        &format!("{base}\\RegisteredApplications"),
+        APP_NAME,
+        &capabilities,
+    )
 }
 
 /// Removes only what `register_at` wrote. Extension keys stay; other apps share them.
@@ -339,7 +385,10 @@ pub fn unregister_at(base: &str, exe: &Path) -> Result<(), String> {
     };
     for (extension, progid, _) in FILE_TYPES {
         keep_first_error(delete_tree(&format!("{classes}\\{progid}")));
-        keep_first_error(delete_value(&format!("{classes}\\{extension}\\OpenWithProgids"), progid));
+        keep_first_error(delete_value(
+            &format!("{classes}\\{extension}\\OpenWithProgids"),
+            progid,
+        ));
         for (verb, ..) in VERBS {
             keep_first_error(delete_tree(&format!(
                 "{classes}\\SystemFileAssociations\\{extension}\\shell\\{verb}"
@@ -348,7 +397,10 @@ pub fn unregister_at(base: &str, exe: &Path) -> Result<(), String> {
     }
     keep_first_error(delete_tree(&format!("{classes}\\Applications\\{exe_name}")));
     keep_first_error(delete_tree(&format!("{base}\\{APP_KEY}\\Capabilities")));
-    keep_first_error(delete_value(&format!("{base}\\RegisteredApplications"), APP_NAME));
+    keep_first_error(delete_value(
+        &format!("{base}\\RegisteredApplications"),
+        APP_NAME,
+    ));
     result
 }
 
@@ -382,15 +434,20 @@ fn delete_tree(key: &str) -> Result<(), String> {
     if status == ERROR_FILE_NOT_FOUND {
         return Ok(());
     }
-    status.ok().map_err(|e| format!("Could not remove the registry key {key}: {e}"))
+    status
+        .ok()
+        .map_err(|e| format!("Could not remove the registry key {key}: {e}"))
 }
 
 fn delete_value(key: &str, name: &str) -> Result<(), String> {
-    let status = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(key), &HSTRING::from(name)) };
+    let status =
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(key), &HSTRING::from(name)) };
     if status == ERROR_FILE_NOT_FOUND {
         return Ok(());
     }
-    status.ok().map_err(|e| format!("Could not remove {name} from {key}: {e}"))
+    status
+        .ok()
+        .map_err(|e| format!("Could not remove {name} from {key}: {e}"))
 }
 
 fn notify_associations_changed() {
@@ -401,7 +458,10 @@ fn notify_associations_changed() {
 pub fn default_apps_uri(build: u32) -> String {
     if build >= 22000 {
         // APP_NAME has only letters and spaces, so this is its URI escape.
-        format!("ms-settings:defaultapps?registeredAppUser={}", APP_NAME.replace(' ', "%20"))
+        format!(
+            "ms-settings:defaultapps?registeredAppUser={}",
+            APP_NAME.replace(' ', "%20")
+        )
     } else {
         "ms-settings:defaultapps".into()
     }
@@ -412,7 +472,10 @@ pub fn open_default_apps() -> Result<(), String> {
     let uri = HSTRING::from(default_apps_uri(windows_build()));
     let result = unsafe { ShellExecuteW(None, w!("open"), &uri, None, None, SW_SHOWNORMAL) };
     if result.0 as isize <= 32 {
-        return Err("Windows could not open Default apps settings. Open Settings > Apps > Default apps.".into());
+        return Err(
+            "Windows could not open Default apps settings. Open Settings > Apps > Default apps."
+                .into(),
+        );
     }
     Ok(())
 }
@@ -444,7 +507,11 @@ pub fn windows_build() -> u32 {
 pub fn share_files(hwnd: HWND, paths: &[PathBuf]) -> Result<(), String> {
     let title = match paths {
         [] => return Err("Open a file to share.".into()),
-        [one] => one.file_name().unwrap_or(one.as_os_str()).to_string_lossy().into_owned(),
+        [one] => one
+            .file_name()
+            .unwrap_or(one.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
         many => format!("{} files", many.len()),
     };
     // ponytail: resolves files on the UI thread; move to a worker if 100-file shares feel slow.
@@ -456,23 +523,35 @@ pub fn share_files(hwnd: HWND, paths: &[PathBuf]) -> Result<(), String> {
             .map_err(|e| format!("Could not share {}: {}", path.display(), e.message()))?;
         files.push(file);
     }
-    let fail = |e: windows::core::Error| format!("Windows could not open the share sheet: {}", e.message());
-    let interop = windows::core::factory::<DataTransferManager, IDataTransferManagerInterop>().map_err(fail)?;
+    let fail = |e: windows::core::Error| {
+        format!("Windows could not open the share sheet: {}", e.message())
+    };
+    let interop = windows::core::factory::<DataTransferManager, IDataTransferManagerInterop>()
+        .map_err(fail)?;
     let manager: DataTransferManager = unsafe { interop.GetForWindow(hwnd) }.map_err(fail)?;
     let token = Arc::new(AtomicI64::new(0));
     let handler_token = token.clone();
-    let handler = TypedEventHandler::<DataTransferManager, DataRequestedEventArgs>::new(move |sender, args| {
-        let data = args.ok()?.Request()?.Data()?;
-        data.Properties()?.SetTitle(&HSTRING::from(&title))?;
-        let items = files
-            .iter()
-            .map(|f| f.resolve().and_then(|f| f.cast::<IStorageItem>()).map(Some))
-            .collect::<Result<Vec<_>, _>>()?;
-        data.SetStorageItemsReadOnly(&windows_collections::IIterable::<IStorageItem>::from(items))?;
-        // One share per call; the next call registers fresh items.
-        sender.ok()?.RemoveDataRequested(handler_token.load(Ordering::SeqCst))
-    });
-    token.store(manager.DataRequested(&handler).map_err(fail)?, Ordering::SeqCst);
+    let handler = TypedEventHandler::<DataTransferManager, DataRequestedEventArgs>::new(
+        move |sender, args| {
+            let data = args.ok()?.Request()?.Data()?;
+            data.Properties()?.SetTitle(&HSTRING::from(&title))?;
+            let items = files
+                .iter()
+                .map(|f| f.resolve().and_then(|f| f.cast::<IStorageItem>()).map(Some))
+                .collect::<Result<Vec<_>, _>>()?;
+            data.SetStorageItemsReadOnly(&windows_collections::IIterable::<IStorageItem>::from(
+                items,
+            ))?;
+            // One share per call; the next call registers fresh items.
+            sender
+                .ok()?
+                .RemoveDataRequested(handler_token.load(Ordering::SeqCst))
+        },
+    );
+    token.store(
+        manager.DataRequested(&handler).map_err(fail)?,
+        Ordering::SeqCst,
+    );
     if let Err(e) = unsafe { interop.ShowShareUIForWindow(hwnd) } {
         let _ = manager.RemoveDataRequested(token.load(Ordering::SeqCst));
         return Err(fail(e));
@@ -515,7 +594,8 @@ pub fn file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
 /// Call on the UI thread after OleInitialize, while a mouse button is down.
 pub fn drag_files(hwnd: HWND, paths: &[PathBuf]) -> Result<DROPEFFECT, String> {
     // Without a pressed button, OLE would drop at once wherever the pointer is.
-    let pressed = unsafe { GetKeyState(VK_LBUTTON.0 as i32) < 0 || GetKeyState(VK_RBUTTON.0 as i32) < 0 };
+    let pressed =
+        unsafe { GetKeyState(VK_LBUTTON.0 as i32) < 0 || GetKeyState(VK_RBUTTON.0 as i32) < 0 };
     if !pressed {
         return Err("Hold the mouse button to drag.".into());
     }
@@ -550,14 +630,21 @@ pub fn load_recent(dir: &Path) -> Vec<PathBuf> {
 /// Moves `path` to the top of the list in `dir` and saves it. Returns the new list.
 pub fn add_recent(dir: &Path, path: &Path) -> io::Result<Vec<PathBuf>> {
     let Some(text) = path.to_str().filter(|_| path.is_absolute()) else {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Recent files need a full path."));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Recent files need a full path.",
+        ));
     };
     let key = text.to_lowercase();
     let mut list = load_recent(dir);
     list.retain(|p| p.to_string_lossy().to_lowercase() != key);
     list.insert(0, path.to_path_buf());
     list.truncate(RECENT_LIMIT);
-    let lines: String = list.iter().filter_map(|p| p.to_str()).map(|p| format!("{p}\n")).collect();
+    let lines: String = list
+        .iter()
+        .filter_map(|p| p.to_str())
+        .map(|p| format!("{p}\n"))
+        .collect();
     std::fs::create_dir_all(dir)?;
     let temp = dir.join("recent.tmp");
     std::fs::write(&temp, lines)?;
@@ -567,7 +654,8 @@ pub fn add_recent(dir: &Path, path: &Path) -> io::Result<Vec<PathBuf>> {
 
 /// Records an opened file in the app's list and in Windows Recent, which feeds the jump list.
 pub fn note_recent(path: &Path) -> io::Result<Vec<PathBuf>> {
-    let dir = recent_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA is not set."))?;
+    let dir = recent_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA is not set."))?;
     let list = add_recent(&dir, path)?;
     let wide = HSTRING::from(path.as_os_str());
     unsafe { SHAddToRecentDocs(SHARD_PATHW.0 as u32, Some(wide.as_ptr().cast())) };
