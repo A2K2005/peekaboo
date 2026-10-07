@@ -13,7 +13,7 @@ Building v1 end to end. Plan and slice status: [docs/plan-v1.md](docs/plan-v1.md
 | Wave 1: foundations | Implemented; current worktree contains reviewed fixes | UI foundation, PDF engine, imaging and AI, Windows integration, benchmarks |
 | Wave 2: v1 tasks | In progress; viewer and save model reviewed, text integrated with final fixes awaiting rerun, later workflows partial | 7 slices in PRD order |
 
-Branches: `master` holds the research and the Codex merge. All wave work merges into `v1`. The active uncommitted review worktree is `Desktop/Portfolio/preview-for-windows-latest` on `codex/glance-gap-fixes`. Nothing merges into `master` without the owner (D14).
+Branches: `master` holds the research and the Codex merge. All wave work merges into `v1`. Codex's checkpoint `8c0ca65` (branch `codex/glance-gap-fixes`, worktree `Desktop/Portfolio/preview-for-windows-latest`) is fast-forwarded into `v1`. Remote: private repo `A2K2005/preview-for-windows` on GitHub (D20). Nothing merges into `master` without the owner (D14).
 | Wave 3: release gates | Not started | Accessibility, performance, round trip, packaging, final review |
 
 ## Architecture summary
@@ -53,6 +53,7 @@ Cargo: `C:\Users\Armaan\.cargo\bin\cargo.exe`.
 - No network calls, update checks, or telemetry on the launch path. OCR and AI load on first use.
 - Simple beats complex. One clear way to do each thing. No speculative abstractions.
 - Fix root causes, not symptoms.
+- Comments explain only a non-obvious why (a platform quirk, a safety rule, a known limit). No comments that restate the code, narrate changes, name waves, slices, or agents, or hold TODO placeholders. No dead code or unused imports.
 - An agent never reviews its own work.
 - Never overwrite a user's file without the save model's consent rules (W2-3). Writes go to a temp file, then an atomic replace.
 - Prose in docs, comments, commits, and UI text: Google Developer Documentation Style Guide, ASD-STE100-derived precision, Zinsser (clarity, simplicity, brevity, humanity). No em dashes in UI text.
@@ -92,4 +93,5 @@ This PC is not the PRD reference laptop (i5 12th gen, 8 GB, Windows 11) or the l
 | D17 | 2026-10-07 | Arrows save as Ink annotations. | PDFium cannot create Line annotations. Ink has an appearance stream; pdf.js draws it (W1-B test). Edge and Acrobat display is unverified. |
 | D15 | 2026-10-07 | No GUI launches while the owner uses the PC. Headless tests only. GUI checks (screenshots, UIA dumps, launch timing) run only after the owner says they are away. | Owner revoked an earlier "launch briefly" permission after test windows disrupted their work. |
 | D18 | 2026-10-07 | The visual direction is a restrained dark glass Windows shell: Mica commanding/content layers, near-black opaque viewer canvas, subtle edge halos, sparse system accent, opaque transients, and solid/high-contrast fallbacks. | Owner supplied dark glass references. The app adapts their material and depth without copying their dashboard or onboarding composition, and without copying Glance. |
+| D20 | 2026-10-07 | The repo is pushed to the private GitHub repo `A2K2005/preview-for-windows`, all branches. Every commit is authored as A2K2005 (history rewritten once; backup bundle in `%TEMP%\pfw-before-author-rewrite.bundle`). Push only when the owner asks. | Owner asked for the repo under the A2K2005 account. Supersedes "Nothing is pushed" in D14. |
 | D19 | 2026-10-07 | Autosave replays edits from one immutable opened snapshot and identifies work by the logical file path. Every overwrite requires first-edit consent; external changes pause; reader leases block snapshot cleanup. | Prevents double-applied edits, stale completions, cross-tab status errors, and close/logoff data loss found during adversarial review. |

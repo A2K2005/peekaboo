@@ -8,6 +8,7 @@ Updated 2026-10-07 for the handoff commit. The PRD remains the release contract.
 - Before the latest text fixes, the complete serial release suite exited successfully. The binary suite reported 150 passed and 2 optional tests ignored; the remaining integration suites also passed.
 - PDF/image text selection, reading-order copy, Find, OCR hover, highlights, and accessibility text were then integrated. The first pass passed 129 UI tests with 1 timing probe ignored.
 - Independent text review found four issues: raw fallback copy order, permanent text-layer retry loops, missing snapshot leases for queued view work, and word selection at the last glyph. Fixes and regressions are present in the worktree, including the multi-frame image Ctrl+A correction, but the owner asked to stop testing before the final rerun. Treat the latest text changes as **implemented but unverified**.
+- 2026-10-07: the full serial release suite passed at `8c0ca65` (280 passed, 0 failed, 14 ignored). The four text fixes have no independent review yet.
 
 ## Product work left
 
