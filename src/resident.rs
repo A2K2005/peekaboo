@@ -163,6 +163,9 @@ unsafe fn peek(window: HWND, space: bool) {
     }
     let selection = shell_kind(window).and_then(|desktop| crate::selection::read(window, desktop));
     READING.set(false);
+    if logging() {
+        log(&format!("peek: space {space}, selection {:?}", selection.as_ref().map(|(path, siblings)| (path, siblings.len()))));
+    }
     match selection {
         Some((path, siblings)) => show(path, siblings),
         None if space => resend_space(),
@@ -213,6 +216,9 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     if code == HC_ACTION as i32 {
         let key = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let injected = key.flags.0 & LLKHF_INJECTED.0 != 0;
+        if key.vkCode == VK_SPACE.0 as u32 && logging() {
+            log(&format!("hook: message {:#x}, injected {injected}, {}", wparam.0, focus_report()));
+        }
         if key.vkCode != VK_SPACE.0 as u32 && !injected {
             // Another key means Space is not held, even if its key-up was missed.
             SPACE_DOWN.store(false, Ordering::Relaxed);
