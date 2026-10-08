@@ -17,6 +17,12 @@ Select any file in Explorer and press <kbd>Space</kbd>. It opens in about 100 ms
 
 </div>
 
+## Why it exists
+
+On a Mac, you press Space to look at any file. On Windows, you pick an app and wait, and small edits are spread across Edge, Photos, Paint, and heavy PDF suites. Peekaboo makes looking instant and lets you finish the small edit in the same window.
+
+**Read the product case study:** [problem, users, the pivot to Space-first, trade-offs, metrics, and what I cut →](docs/CASE-STUDY.md)
+
 ## How it works
 
 ```mermaid
