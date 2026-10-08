@@ -41,16 +41,18 @@ The first PRD was **editor-first**: a faster Preview app that you open.
 
 When I compared the builds side by side with the real macOS flow, I saw that the editor is not the magic. **The magic is the Space bar.** Quick Look removes the decision "which app do I open?". You don't open anything; you just look.
 
+**Windows today:** 4 steps, 3 to 10 s
+
 ```mermaid
 flowchart LR
-    subgraph Before["Windows today: 4 steps, 3 to 10 s"]
-        direction LR
-        B1[Find file] --> B2[Pick an app] --> B3[Wait for it to load] --> B4[Look]
-    end
-    subgraph After["Peekaboo: 2 steps, ~0.1 s"]
-        direction LR
-        A1[Select file] --> A2["Press Space, look"]
-    end
+    B1[Find file] --> B2[Pick an app] --> B3[Wait] --> B4[Look]
+```
+
+**With Peekaboo:** 2 steps, about 0.1 s
+
+```mermaid
+flowchart LR
+    A1[Select file] --> A2[Press Space and look]
 ```
 
 So I pivoted the product to **Quick Look first** (decision D21):
