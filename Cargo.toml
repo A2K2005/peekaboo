@@ -1,5 +1,5 @@
 [package]
-name = "preview-for-windows"
+name = "peekaboo"
 version = "0.1.0"
 edition = "2021"
 publish = false

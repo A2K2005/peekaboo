@@ -34,7 +34,7 @@ extern "system" fn receiver(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
     }
 }
 
-/// A receiver window with its own message loop, like a running Preview.
+/// A receiver window with its own message loop, like a running Peekaboo.
 struct Receiver {
     hwnd: isize,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -97,7 +97,7 @@ impl Drop for Receiver {
 }
 
 fn unique_class(name: &str) -> String {
-    format!("PreviewForWindowsTest.{name}.{}", std::process::id())
+    format!("PeekabooTest.{name}.{}", std::process::id())
 }
 
 fn percentile(samples: &mut [f64], p: f64) -> f64 {

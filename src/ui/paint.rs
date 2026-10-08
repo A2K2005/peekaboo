@@ -104,7 +104,7 @@ fn title_bar(l: &Look, state: &State, layout: &Layout) {
         l.p.fill(bar, l.t.bar);
         l.p.fill(Rect { y0: bar.y1 - s, ..bar }, l.t.divider);
         let t = layout.title_text;
-        let name = state.path.as_deref().map(file_name).unwrap_or_else(|| "Preview for Windows".into());
+        let name = state.path.as_deref().map(file_name).unwrap_or_else(|| "Peekaboo".into());
         let detail = state.title_detail();
         if detail.is_empty() {
             l.p.text(&name, t, &l.f.strong, l.t.text, Align::Leading);
@@ -914,7 +914,7 @@ mod tests {
 
     /// Times the first chrome draw in a fresh process (font loading, text
     /// layout, glyph rasterization) on a software WIC target. Run alone:
-    /// cargo test --release --bin preview-for-windows first_frame_cost -- --ignored --nocapture
+    /// cargo test --release --bin peekaboo first_frame_cost -- --ignored --nocapture
     #[test]
     #[ignore = "timing probe; run alone in a fresh process"]
     fn first_frame_cost() {

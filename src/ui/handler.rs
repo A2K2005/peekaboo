@@ -43,7 +43,7 @@ use windows::{
     },
 };
 
-const CLASS: PCWSTR = w!("PreviewForWindowsHandlerHost");
+const CLASS: PCWSTR = w!("PeekabooHandlerHost");
 
 thread_local! {
     static HANDLER: RefCell<Option<IPreviewHandler>> = const { RefCell::new(None) };

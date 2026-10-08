@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# Builds dist\Preview-*-Windows-x64.zip and an unsigned dist\Preview-*-x64.msix from the release build.
+# Builds dist\Peekaboo-*-Windows-x64.zip and an unsigned dist\Peekaboo-*-x64.msix from the release build.
 # Steps and owner tasks: docs/packaging.md.
 [CmdletBinding()]
 param(
@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($IncludeAiPack) { throw 'The AI pack remains a local evaluation dependency. Its distribution review and exact model/runtime notices must be completed before packaging it.' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$exe = Join-Path $root 'target\release\preview-for-windows.exe'
+$exe = Join-Path $root 'target\release\peekaboo.exe'
 $pdf = Join-Path $root 'runtime\pdfium.dll'
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Build the release executable first.' }
 if (-not (Test-Path -LiteralPath $pdf)) { throw 'Run tools/fetch-pdfium.ps1 first.' }
@@ -21,12 +21,12 @@ $pdfProvenance = Get-Content -LiteralPath (Join-Path $root 'runtime\x64\provenan
 if ((Get-FileHash -LiteralPath $pdf -Algorithm SHA256).Hash -ine $pdfProvenance.dll_sha256) { throw 'PDFium DLL does not match its pinned provenance. Fetch the verified runtime again.' }
 
 # Never reuse or delete an older output folder; add a time stamp instead.
-$destination = Join-Path $root 'dist\Preview'
+$destination = Join-Path $root 'dist\Peekaboo'
 if (Test-Path -LiteralPath $destination) {
-    $destination = Join-Path $root ('dist\Preview-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff'))
+    $destination = Join-Path $root ('dist\Peekaboo-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff'))
 }
 [IO.Directory]::CreateDirectory($destination) | Out-Null
-Copy-Item -LiteralPath $exe -Destination (Join-Path $destination 'preview-for-windows.exe')
+Copy-Item -LiteralPath $exe -Destination (Join-Path $destination 'peekaboo.exe')
 Copy-Item -LiteralPath $pdf -Destination (Join-Path $destination 'pdfium.dll')
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $destination
 Copy-Item -LiteralPath (Join-Path $root 'THIRD-PARTY-NOTICES.md') -Destination $destination
@@ -47,7 +47,7 @@ $metadata = ($metadataText -join "`n") | ConvertFrom-Json
 # actionable failure are not hidden by an unrelated crate audit failure.
 $packages = $metadata.packages | Sort-Object @{ Expression = { if ($_.name -eq 'libwebp-sys') { 0 } else { 1 } } }, name
 foreach ($package in $packages) {
-    if ($package.name -eq 'preview-for-windows') { continue }
+    if ($package.name -eq 'peekaboo') { continue }
     if (-not $package.license -or $package.license -match '(?<!L)GPL|AGPL') { throw "Review license for $($package.name): $($package.license)" }
     $licenseDirectory = Join-Path $notices "$($package.name)-$($package.version)"
     [IO.Directory]::CreateDirectory($licenseDirectory) | Out-Null
@@ -109,7 +109,7 @@ $signtool = Join-Path $WindowsSdkBin 'signtool.exe'
 if (-not (Test-Path -LiteralPath $makeappx)) { throw "makeappx.exe not found in $WindowsSdkBin. Install the Windows SDK or pass -WindowsSdkBin." }
 $layout = $destination + '-msix-layout'
 [IO.Directory]::CreateDirectory($layout) | Out-Null
-Copy-Item -LiteralPath (Join-Path $destination 'preview-for-windows.exe') -Destination $layout
+Copy-Item -LiteralPath (Join-Path $destination 'peekaboo.exe') -Destination $layout
 Copy-Item -LiteralPath (Join-Path $destination 'pdfium.dll') -Destination $layout
 Copy-Item -LiteralPath (Join-Path $destination 'THIRD-PARTY-NOTICES.md') -Destination $layout
 Copy-Item -LiteralPath $notices -Destination (Join-Path $layout 'licenses') -Recurse
@@ -157,7 +157,7 @@ if ($Sign) {
     $certificate = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $publisher -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date).AddDays(1) } | Select-Object -First 1
     if (-not $certificate) {
         # Self-signed code-signing certificate for local tests only. Windows does not trust it, so the package will not install as is.
-        $certificate = New-SelfSignedCertificate -Type Custom -KeyUsage DigitalSignature -CertStoreLocation 'Cert:\CurrentUser\My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}') -Subject $publisher -FriendlyName 'Preview for Windows test signing'
+        $certificate = New-SelfSignedCertificate -Type Custom -KeyUsage DigitalSignature -CertStoreLocation 'Cert:\CurrentUser\My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}') -Subject $publisher -FriendlyName 'Peekaboo test signing'
     }
     & $signtool sign /fd SHA256 /sha1 $certificate.Thumbprint /s My $msix | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'signtool could not sign the MSIX.' }

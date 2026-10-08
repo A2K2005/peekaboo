@@ -48,7 +48,7 @@ pub(super) unsafe fn reload(hwnd: HWND) {
 /// Untitled clipboard images stay in the temporary folder until the user
 /// saves a copy, so they stay out of recent files.
 fn untitled_dir() -> PathBuf {
-    std::env::temp_dir().join("PreviewForWindows")
+    std::env::temp_dir().join("Peekaboo")
 }
 
 /// Records an opened file in the list and in Windows Recent. The shell call

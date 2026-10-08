@@ -21,7 +21,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 # Windows PowerShell 5.1 leaves $PSScriptRoot empty in param defaults of advanced scripts.
-if (-not $Executable) { $Executable = Join-Path $root 'target\release\preview-for-windows.exe' }
+if (-not $Executable) { $Executable = Join-Path $root 'target\release\peekaboo.exe' }
 if (-not $FixturesDirectory) { $FixturesDirectory = Join-Path $root 'fixtures' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'artifacts\perf' }
 $exe = (Resolve-Path -LiteralPath $Executable).Path

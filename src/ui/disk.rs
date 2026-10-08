@@ -43,7 +43,7 @@ fn current(path: &Path) -> Result<Option<Stamp>, String> {
 
 #[derive(Debug, PartialEq)]
 pub(super) enum Failure {
-    /// The file changed or disappeared since Preview last read or wrote it.
+    /// The file changed or disappeared since Peekaboo last read or wrote it.
     Changed,
     Error(String),
 }
@@ -63,7 +63,7 @@ fn wide(path: &Path) -> Vec<u16> {
 }
 
 /// "name (edited).ext", or "name (edited 2).ext" and up when taken.
-/// `extension` replaces the original one, for formats Preview cannot write.
+/// `extension` replaces the original one, for formats Peekaboo cannot write.
 pub(super) fn copy_name(original: &Path, extension: Option<&OsStr>) -> Option<PathBuf> {
     let folder = original.parent()?;
     let stem = original.file_stem()?;
@@ -141,7 +141,7 @@ pub(super) fn publish(staged: &Path, target: &Path) -> Result<(), String> {
 /// Writes a new version of `target` that is never left truncated. `write`
 /// fills and verifies a staging file in the target's folder (ReplaceFileW
 /// needs one volume); the file is flushed and then swapped in. `expected`
-/// is the target as Preview last saw it, or None for a new file. A target
+/// is the target as Peekaboo last saw it, or None for a new file. A target
 /// that differs fails with `Changed`, unless `force`, and stays unchanged.
 /// Returns the target's new stamp.
 pub(super) fn write_verified(
@@ -234,13 +234,13 @@ pub(super) fn can_overwrite(path: &Path) -> Result<(), String> {
             let _ = fs::remove_file(&probe);
             Ok(())
         }
-        Err(_) => Err("Preview cannot write in this folder.".into()),
+        Err(_) => Err("Peekaboo cannot write in this folder.".into()),
     }
 }
 
-/// %LOCALAPPDATA%\PreviewForWindows
+/// %LOCALAPPDATA%\Peekaboo
 pub(super) fn app_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("PreviewForWindows"))
+    std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("Peekaboo"))
 }
 
 #[cfg(test)]

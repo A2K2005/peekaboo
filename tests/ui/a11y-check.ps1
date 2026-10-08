@@ -2,7 +2,7 @@
 # has no name. Windows PowerShell 5.1. Opens a window: run only in a GUI
 # session that may be disturbed.
 #
-#   powershell -NoProfile -File tests/ui/a11y-check.ps1 -Executable target/release/preview-for-windows.exe -InputFile fixtures/20-pages.pdf
+#   powershell -NoProfile -File tests/ui/a11y-check.ps1 -Executable target/release/peekaboo.exe -InputFile fixtures/20-pages.pdf
 #
 # Scenarios: the document window, the More menu, the Find sheet, and the
 # empty window. Trees go to artifacts/a11y/<scenario>.txt.

@@ -738,7 +738,7 @@ impl PdfEngine {
                     .is_some_and(|known| known != &source_stamp)
             {
                 return Err(
-                    "This PDF changed outside Preview. Reopen it before applying or saving edits."
+                    "This PDF changed outside Peekaboo. Reopen it before applying or saving edits."
                         .into(),
                 );
             }
@@ -998,7 +998,7 @@ impl PdfEngine {
                 .is_some_and(|known| known != &current)
         {
             return Err(
-                "This PDF changed outside Preview. Reopen it before applying or saving edits."
+                "This PDF changed outside Peekaboo. Reopen it before applying or saving edits."
                     .into(),
             );
         }

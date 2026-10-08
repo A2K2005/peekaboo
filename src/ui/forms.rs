@@ -229,7 +229,7 @@ fn pump(state: &mut State) {
         state.forms.in_flight = true;
     } else {
         state.forms.queued.clear();
-        state.status = "The PDF worker stopped. Close Preview and reopen the file.".into();
+        state.status = "The PDF worker stopped. Close Peekaboo and reopen the file.".into();
     }
 }
 

@@ -263,8 +263,8 @@ pub(super) fn tree(s: &State) -> TreeUpdate {
         root_children.push(SHEET);
     }
     let title = match &s.path {
-        Some(path) => format!("{} - Preview for Windows", file_name(path)),
-        None => "Preview for Windows".into(),
+        Some(path) => format!("{} - Peekaboo", file_name(path)),
+        None => "Peekaboo".into(),
     };
     nodes.push((ROOT, group(Role::Window, &title, super::widgets::Rect::new(0.0, 0.0, s.size.0, s.size.1), root_children)));
     let focus = s

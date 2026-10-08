@@ -487,7 +487,7 @@ pub(super) unsafe fn edit_same_page(hwnd: HWND, request: &Request, change: impl 
     edit(hwnd, change);
 }
 
-/// Points autosave at the file itself on the first edit. A file Preview
+/// Points autosave at the file itself on the first edit. A file Peekaboo
 /// cannot write asks where to save a copy instead.
 pub(super) unsafe fn prepare_save(hwnd: HWND, path: &std::path::Path) -> bool {
     let Some((session_id, opened, configured)) = with_state(|s| {
@@ -495,7 +495,7 @@ pub(super) unsafe fn prepare_save(hwnd: HWND, path: &std::path::Path) -> bool {
     })
     .flatten()
     else {
-        sheet::alert(hwnd, "Cannot edit this file", "Preview has not finished opening this file. Try again in a moment.");
+        sheet::alert(hwnd, "Cannot edit this file", "Peekaboo has not finished opening this file. Try again in a moment.");
         return false;
     };
     if configured {
@@ -535,7 +535,7 @@ pub(super) unsafe fn resolve_save_conflict(hwnd: HWND, path: std::path::PathBuf)
         return;
     };
     let message = format!(
-        "{} changed outside Preview while edits were being saved. Overwrite that version, save your edits to a new copy, or keep autosave paused.",
+        "{} changed outside Peekaboo while edits were being saved. Overwrite that version, save your edits to a new copy, or keep autosave paused.",
         super::app::file_name(&current_target)
     );
     let Some((button, _)) = sheet::ask(

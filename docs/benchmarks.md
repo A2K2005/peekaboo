@@ -9,7 +9,7 @@ Build first: `cargo build --release`. Each run opens the app window for a moment
 | Task | Command | Time (estimate) |
 | --- | --- | --- |
 | Self-test with fake apps | `powershell -NoProfile -File tools/test-benchmark.ps1` | 15 s |
-| One file | `powershell -NoProfile -File tools/benchmark.ps1 -Executable target/release/preview-for-windows.exe -InputFile fixtures/20-pages.pdf -Runs 30` | 20 s |
+| One file | `powershell -NoProfile -File tools/benchmark.ps1 -Executable target/release/peekaboo.exe -InputFile fixtures/20-pages.pdf -Runs 30` | 20 s |
 | Full suite | `powershell -NoProfile -File tools/perf/run-suite.ps1 -Runs 30` | 3 min |
 | Gate (runs the suite) | `powershell -NoProfile -File tools/perf-gate.ps1 -Runs 30` | 3 min |
 | Release gate | `powershell -NoProfile -File tools/perf-gate.ps1 -Runs 59` | 5 min |
@@ -43,7 +43,7 @@ Output goes under `artifacts/` (not in git). Each `benchmark.ps1` call writes `s
 - Peak values (`PeakWorkingSetSize`, `PeakPagefileUsage`) are read after the app exits, while the harness still holds the process handle.
 - Memory after idle (`-IdleSeconds 2`): the harness starts the app without `PFW_BENCH_AUTOCLOSE`, waits for the marker file, waits 2 s more, reads `WorkingSetSize` and `PrivateUsage`, then sends `WM_CLOSE` with `Process.CloseMainWindow` (a window message, not synthetic input). The app must exit with code 0.
 
-**Sizes.** The executable size is the byte length of `target/release/preview-for-windows.exe`. The package size is `zip_bytes` from the JSON that `tools/package.ps1` prints.
+**Sizes.** The executable size is the byte length of `target/release/peekaboo.exe`. The package size is `zip_bytes` from the JSON that `tools/package.ps1` prints.
 
 **Gate.** `tools/perf-gate.ps1` runs the suite (or reads `-ResultsFile`), compares each metric with `benchmarks/baseline.json`, and prints one table: metric, baseline, current, change, PRD target, result. It exits 1 if a metric that has a baseline value:
 

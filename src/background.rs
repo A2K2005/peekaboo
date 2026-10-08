@@ -76,7 +76,7 @@ static RUNTIME: OnceLock<Result<(), String>> = OnceLock::new();
 fn pack_folders(app: &Path) -> Vec<PathBuf> {
     let mut paths = vec![app.join("ai")];
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        paths.push(PathBuf::from(local).join("PreviewForWindows").join("ai"));
+        paths.push(PathBuf::from(local).join("Peekaboo").join("ai"));
     }
     if cfg!(any(test, debug_assertions)) {
         paths.push(
@@ -93,7 +93,7 @@ fn pack() -> Result<PathBuf, String> {
     pack_folders(dir)
         .into_iter()
         .find(|p| [ "onnxruntime.dll", DEPTH, MATTING, REFINER].iter().all(|f| p.join(f).is_file()))
-        .ok_or_else(|| "Background removal needs the AI pack, which is not installed. Add the AI pack beside Preview, then try again. No image was uploaded.".into())
+        .ok_or_else(|| "Background removal needs the AI pack, which is not installed. Add the AI pack beside Peekaboo, then try again. No image was uploaded.".into())
 }
 fn load(pack: &Path) -> Result<Snap, String> {
     RUNTIME

@@ -38,7 +38,7 @@ use windows::Win32::{
     },
 };
 
-const CLASS: &str = "PreviewForWindowsResident";
+const CLASS: &str = "PeekabooResident";
 /// wParam: the foreground window. lParam: 1 when a swallowed Space caused it.
 const WM_APP_PEEK: u32 = WM_APP + 20;
 const WM_APP_REINSTALL: u32 = WM_APP + 21;
@@ -64,7 +64,7 @@ thread_local! {
 pub fn run() -> Result<()> {
     unsafe {
         // The handle lives as long as the process, which marks it as the resident one.
-        let _mutex = CreateMutexW(None, false, w!("Local\\PreviewForWindowsResident"))?;
+        let _mutex = CreateMutexW(None, false, w!("Local\\PeekabooResident"))?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return Ok(());
         }
@@ -298,10 +298,10 @@ pub(crate) fn logging() -> bool {
     *ON.get_or_init(|| std::env::var_os("PFW_RESIDENT_LOG").is_some())
 }
 
-/// Appends one line to %LOCALAPPDATA%\PreviewForWindows\resident.log.
+/// Appends one line to %LOCALAPPDATA%\Peekaboo\resident.log.
 pub(crate) fn log(line: &str) {
     use std::io::Write;
-    let Some(folder) = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("PreviewForWindows")) else {
+    let Some(folder) = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("Peekaboo")) else {
         return;
     };
     let _ = std::fs::create_dir_all(&folder);

@@ -51,7 +51,7 @@ Updated 2026-10-07 for the handoff commit. The PRD remains the release contract.
 
 - No live GUI was launched during this checkpoint because the owner asked not to interrupt the desktop.
 - The dark glass screenshots prove headless colors and layout, not live DWM Mica composition.
-- No current measurement proves that Preview for Windows is faster than Glance or meets the PRD cold-launch and memory targets.
+- No current measurement proves that Peekaboo is faster than Glance or meets the PRD cold-launch and memory targets.
 - Packaging intentionally fails closed while dependency notices are incomplete.
 - The handoff commit is a development checkpoint, not a release candidate.
 

@@ -2,7 +2,7 @@
 # system settings (PFW_THEME). Windows PowerShell 5.1. Opens windows: run
 # only in a GUI session that may be disturbed.
 #
-#   powershell -NoProfile -File tests/ui/screenshots.ps1 -Executable target/release/preview-for-windows.exe -InputFile fixtures/20-pages.pdf
+#   powershell -NoProfile -File tests/ui/screenshots.ps1 -Executable target/release/peekaboo.exe -InputFile fixtures/20-pages.pdf
 #
 # Output: artifacts/screenshots/<theme>-document.png and <theme>-empty.png.
 param(

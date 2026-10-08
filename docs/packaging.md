@@ -11,15 +11,15 @@ Run these in Windows PowerShell 5.1. PowerShell 7 is not needed.
 
 Options: `-Sign` signs the MSIX with a local test certificate; without it the MSIX stays unsigned. `-SkipMsix` builds only the ZIP. `-WindowsSdkBin` points to another SDK `bin\<version>\x64` folder.
 
-The script never deletes an earlier output. If `dist\Preview` exists, it adds a UTC time stamp to every name below.
+The script never deletes an earlier output. If `dist\Peekaboo` exists, it adds a UTC time stamp to every name below.
 
 | Output | Contents |
 | --- | --- |
-| `dist\Preview\` | ZIP payload: exe, `pdfium.dll`, README, notices, `register-file-associations.ps1`, `licenses\`, `manifest.json` (SHA256 per file) |
-| `dist\Preview-Windows-x64.zip` | The folder above |
-| `dist\Preview-msix-layout\` | MSIX payload: exe, `pdfium.dll`, notices, `licenses\`, `Assets\` (generated logos), `AppxManifest.xml` |
-| `dist\Preview-x64.msix` | Packed and schema-checked package; test-signed only with `-Sign` |
-| `dist\Preview-msix-check\` | The MSIX unpacked again for the file-list check |
+| `dist\Peekaboo\` | ZIP payload: exe, `pdfium.dll`, README, notices, `register-file-associations.ps1`, `licenses\`, `manifest.json` (SHA256 per file) |
+| `dist\Peekaboo-Windows-x64.zip` | The folder above |
+| `dist\Peekaboo-msix-layout\` | MSIX payload: exe, `pdfium.dll`, notices, `licenses\`, `Assets\` (generated logos), `AppxManifest.xml` |
+| `dist\Peekaboo-x64.msix` | Packed and schema-checked package; test-signed only with `-Sign` |
+| `dist\Peekaboo-msix-check\` | The MSIX unpacked again for the file-list check |
 
 Packaging currently stops at the `libwebp-sys 0.14.4` license audit. The
 published crate declares MIT but does not include the binding's license text or
@@ -56,18 +56,18 @@ Sizes exclude the optional AI pack. The release exe in both packages does not ye
 
 ### Test certificate
 
-With `-Sign`, the script creates `CN=Preview for Windows Test` in `Cert:\CurrentUser\My` with the code-signing EKU, as Microsoft documents [3]. It needs no admin rights. Later runs reuse it. Windows does not trust it, so the MSIX does not install as is. To remove it:
+With `-Sign`, the script creates `CN=Peekaboo Test` in `Cert:\CurrentUser\My` with the code-signing EKU, as Microsoft documents [3]. It needs no admin rights. Later runs reuse it. Windows does not trust it, so the MSIX does not install as is. To remove it:
 
 ```powershell
-Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -eq 'CN=Preview for Windows Test' | Remove-Item
+Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -eq 'CN=Peekaboo Test' | Remove-Item
 ```
 
 ## Steps that need the owner
 
 1. **Publisher identity.** For the Store, reserve the name in Partner Center and copy its `Identity Name`, `Publisher`, and `PublisherDisplayName` into `packaging\AppxManifest.xml`. The Store signs Store submissions. For a direct download, buy a code-signing certificate whose subject matches `Publisher` exactly [3], then sign with `signtool sign /fd SHA256 /sha1 <thumbprint>` (or `/f <pfx>`) [2].
 2. **Store submission.** `runFullTrust` is a restricted capability. Partner Center asks why the app needs it at submission time.
-3. **Install test on a test PC.** Import the test certificate into `Cert:\LocalMachine\TrustedPeople` from an admin prompt [3], then `Add-AppxPackage dist\Preview-x64.msix`. Check "Open with", Default apps, and the Explorer verbs. Remove the certificate after the test.
-4. **Hosting and winget.** Upload the signed MSIX to an HTTPS URL. In `packaging\winget\`, replace `REPLACE_WITH_HTTPS_URL_OF_Preview-x64.msix`, `REPLACE_WITH_SHA256_OF_THE_MSIX` (`Get-FileHash -Algorithm SHA256`), and `REPLACE_WITH_LICENSE`. Run `winget validate --manifest packaging\winget`, then open a pull request to `microsoft/winget-pkgs` under `manifests\p\PreviewForWindows\PreviewForWindows\<version>\` [4].
+3. **Install test on a test PC.** Import the test certificate into `Cert:\LocalMachine\TrustedPeople` from an admin prompt [3], then `Add-AppxPackage dist\Peekaboo-x64.msix`. Check "Open with", Default apps, and the Explorer verbs. Remove the certificate after the test.
+4. **Hosting and winget.** Upload the signed MSIX to an HTTPS URL. In `packaging\winget\`, replace `REPLACE_WITH_HTTPS_URL_OF_Peekaboo-x64.msix`, `REPLACE_WITH_SHA256_OF_THE_MSIX` (`Get-FileHash -Algorithm SHA256`), and `REPLACE_WITH_LICENSE`. Run `winget validate --manifest packaging\winget`, then open a pull request to `microsoft/winget-pkgs` under `manifests\p\Peekaboo\Peekaboo\<version>\` [4].
 5. **Art.** Replace the generated placeholder logos. Scaled logo variants need a `resources.pri` (makepri); the current package has none (unverified whether Windows shows the plain files at every size).
 6. **ARM64.** Needs the MSVC ARM64 tools (admin install), then a second package with `ProcessorArchitecture="arm64"`.
 
@@ -97,9 +97,9 @@ The module is not in `src/main.rs` yet. The tests include it with `#[path = "../
 
 ### Single instance
 
-1. The new process calls `hand_off(WINDOW_CLASS, &command)` before it creates a window. It creates the named mutex `Local\PreviewForWindowsMain`.
+1. The new process calls `hand_off(WINDOW_CLASS, &command)` before it creates a window. It creates the named mutex `Local\PeekabooMain`.
 2. If the mutex is new, this process is the running instance. It keeps the returned guard until exit.
-3. If the mutex exists, the process looks for a top-level or message-only window of class `PreviewForWindowsMain` with one `FindWindowEx` call [5]. It waits up to 5 s for the other instance to create its window.
+3. If the mutex exists, the process looks for a top-level or message-only window of class `PeekabooMain` with one `FindWindowEx` call [5]. It waits up to 5 s for the other instance to create its window.
 4. It calls `AllowSetForegroundWindow` with the owner's process ID, so the running window can come to the front [6]. Then it sends WM_COPYDATA with `SendMessageTimeoutW` (5 s, abort if hung).
 5. The payload is UTF-16 strings, each ending in NUL: the action flag, then absolute paths. `dwData` is `0x50465731` ("PFW1").
 6. The receiver copies the data during the message, as Microsoft requires [7]. It rejects a wrong tag, a null pointer, an empty or odd size, over 1 MiB, a missing final NUL, or an unknown action. It keeps only drive and UNC paths, so relative paths and device paths such as `\\.\PhysicalDrive0` are dropped.
@@ -120,22 +120,22 @@ The PRD warm-open target is p95 under 150 ms for the whole open [PRD]. The hando
 
 | Key under `HKCU\Software` | Values |
 | --- | --- |
-| `Classes\PreviewForWindows.<Type>` (8 ProgIDs: Pdf, Jpeg, Png, Webp, Heif, Gif, Tiff, Bmp) | Type name, `DefaultIcon`, `shell\open` with `MultiSelectModel=Player` and `"exe" "%1"` [9] |
+| `Classes\Peekaboo.<Type>` (8 ProgIDs: Pdf, Jpeg, Png, Webp, Heif, Gif, Tiff, Bmp) | Type name, `DefaultIcon`, `shell\open` with `MultiSelectModel=Player` and `"exe" "%1"` [9] |
 | `Classes\<ext>\OpenWithProgids` | `<ProgID>` = empty string, for "Open with" [10] |
-| `Classes\Applications\preview-for-windows.exe` | `FriendlyAppName`, `SupportedTypes`, `shell\open` |
-| `PreviewForWindows\Capabilities` | `ApplicationName`, `ApplicationDescription`, `FileAssociations\<ext>` = ProgID [11] |
-| `RegisteredApplications` | `Preview for Windows` = `Software\PreviewForWindows\Capabilities` [11][12] |
-| `Classes\SystemFileAssociations\<ext>\shell\PreviewForWindows.<Verb>` | `MUIVerb`, `MultiSelectModel=Player`, `Icon`, `command` [13][14] |
+| `Classes\Applications\peekaboo.exe` | `FriendlyAppName`, `SupportedTypes`, `shell\open` |
+| `Peekaboo\Capabilities` | `ApplicationName`, `ApplicationDescription`, `FileAssociations\<ext>` = ProgID [11] |
+| `RegisteredApplications` | `Peekaboo` = `Software\Peekaboo\Capabilities` [11][12] |
+| `Classes\SystemFileAssociations\<ext>\shell\Peekaboo.<Verb>` | `MUIVerb`, `MultiSelectModel=Player`, `Icon`, `command` [13][14] |
 
 Extensions: .pdf .jpg .jpeg .png .webp .heic .heif .gif .tif .tiff .bmp. The code never writes an extension's default value or `UserChoice`, so it never sets a default; Microsoft says the choice of default should be user driven [11]. `register` and `unregister` then call `SHChangeNotify(SHCNE_ASSOCCHANGED)` [8]. `unregister_at` removes only what `register_at` wrote.
 
-`tools\register-file-associations.ps1` writes the same keys for ZIP users, with `-Unregister`. `script_writes_the_same_keys_as_rust` runs both against scratch keys and compares every value. Tests write only `HKCU\Software\PreviewForWindows-Test` and delete it; the real keys were checked absent after the run.
+`tools\register-file-associations.ps1` writes the same keys for ZIP users, with `-Unregister`. `script_writes_the_same_keys_as_rust` runs both against scratch keys and compares every value. Tests write only `HKCU\Software\Peekaboo-Test` and delete it; the real keys were checked absent after the run.
 
 `open_default_apps` opens `ms-settings:defaultapps` on Windows 10. On build 22000 and later it adds `?registeredAppUser=Preview%20for%20Windows`, which Windows 11 21H2 and 22H2 (with the 2023-04 update) and 23H2 or later support [12].
 
 ### Explorer verbs: Convert, Resize, Combine into PDF
 
-Command line: `preview-for-windows.exe --convert "<path>"`, `--resize`, or `--combine`, followed by one or more paths. Convert and Resize apply to the 10 image extensions; Combine into PDF also applies to .pdf. The verbs live under `SystemFileAssociations`, so they stay available when another app is the default [14].
+Command line: `peekaboo.exe --convert "<path>"`, `--resize`, or `--combine`, followed by one or more paths. Convert and Resize apply to the 10 image extensions; Combine into PDF also applies to .pdf. The verbs live under `SystemFileAssociations`, so they stay available when another app is the default [14].
 
 Explorer limits by selection model [15]:
 
@@ -164,11 +164,11 @@ If selections over 100 files matter, build route 1.
 
 ### Recent files
 
-`recent.txt` in `%LOCALAPPDATA%\PreviewForWindows\` holds one full path per line, newest first, at most 20. `load_recent` returns the list without touching the disk, so an offline network path cannot stall it. `prune_recent` drops missing files; call it on a worker thread. `add_recent` matches paths without case, writes a temp file, then renames it. `note_recent` also calls `SHAddToRecentDocs(SHARD_PATHW)`, which feeds the Recent list in the app's jump list [23]. Tests use a scratch folder and never call `note_recent`, because it writes the user's real Recent items. Jump list display: pending GUI check.
+`recent.txt` in `%LOCALAPPDATA%\Peekaboo\` holds one full path per line, newest first, at most 20. `load_recent` returns the list without touching the disk, so an offline network path cannot stall it. `prune_recent` drops missing files; call it on a worker thread. `add_recent` matches paths without case, writes a temp file, then renames it. `note_recent` also calls `SHAddToRecentDocs(SHARD_PATHW)`, which feeds the Recent list in the app's jump list [23]. Tests use a scratch folder and never call `note_recent`, because it writes the user's real Recent items. Jump list display: pending GUI check.
 
 ## Wave 2 wiring
 
-1. Register the main window class as `integration::WINDOW_CLASS` (`PreviewForWindowsMain`). The shell uses `PreviewForWindowsSpeedSpike` today.
+1. Register the main window class as `integration::WINDOW_CLASS` (`PeekabooMain`). The shell uses `PeekabooSpeedSpike` today.
 2. At start: `let command = integration::parse_args(std::env::args_os().skip(1));` then `let Some(_guard) = integration::hand_off(integration::WINDOW_CLASS, &command) else { return };`. Keep the guard alive until exit.
 3. In the window procedure, on WM_COPYDATA: `if let Some(command) = unsafe { integration::decode_copydata(lparam) } { ...; return LRESULT(1) }`, else return 0. Restore the window if it is minimized and call `SetForegroundWindow`. For Open, add tabs and skip paths already open. For Convert, Resize, and Combine, `merge` commands that arrive within a short window (suggested 300 ms, unmeasured), then start one job.
 4. Call `OleInitialize` instead of `CoInitializeEx` on the UI thread, for `drag_files`.

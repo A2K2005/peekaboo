@@ -31,7 +31,7 @@ use windows::{
 };
 
 /// The single-instance handoff finds the window by this class name.
-pub(super) const CLASS: PCWSTR = w!("PreviewForWindowsMain");
+pub(super) const CLASS: PCWSTR = w!("PeekabooMain");
 const WM_APP_TEXT_SCALE: u32 = WM_APP + 3;
 
 thread_local! {
@@ -113,7 +113,7 @@ unsafe fn main_window(
     let hwnd = CreateWindowExW(
         WINDOW_EX_STYLE::default(),
         CLASS,
-        w!("Preview for Windows"),
+        w!("Peekaboo"),
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
@@ -822,14 +822,14 @@ unsafe fn close(hwnd: HWND) {
     with_state(|s| s.pause_save_dispatch(true));
     let (dirty, saving) = with_state(|s| s.window_close_state()).unwrap_or((false, false));
     if saving {
-        sheet::alert(hwnd, "Saving", "Wait for the save to finish, then close Preview.");
+        sheet::alert(hwnd, "Saving", "Wait for the save to finish, then close Peekaboo.");
         with_state(|s| s.pause_save_dispatch(false));
         return;
     }
     if dirty
         && !sheet::confirm(
             hwnd,
-            "Close Preview?",
+            "Close Peekaboo?",
             "Some edits are not saved. Closing now discards those edits.",
             "Close without saving",
         )
@@ -838,7 +838,7 @@ unsafe fn close(hwnd: HWND) {
         return;
     }
     if with_state(|s| s.window_close_state().1).unwrap_or(true) {
-        sheet::alert(hwnd, "Saving", "A file started saving. Wait for it to finish, then close Preview.");
+        sheet::alert(hwnd, "Saving", "A file started saving. Wait for it to finish, then close Peekaboo.");
         with_state(|s| s.pause_save_dispatch(false));
         return;
     }

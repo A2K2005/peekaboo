@@ -1,43 +1,43 @@
 #requires -Version 5.1
-# Adds Preview to "Open with", Default apps, and the Explorer verbs Convert, Resize,
+# Adds Peekaboo to "Open with", Default apps, and the Explorer verbs Convert, Resize,
 # and Combine into PDF for this Windows user. It never changes a default app.
 # Keep in step with register_at in src/integration.rs; tests/integration_shell.rs compares the two.
 [CmdletBinding()]
 param(
-    [string]$Executable = (Join-Path $PSScriptRoot 'preview-for-windows.exe'),
+    [string]$Executable = (Join-Path $PSScriptRoot 'peekaboo.exe'),
     [switch]$Unregister,
     # Key under HKEY_CURRENT_USER. Tests use a scratch key; leave it as Software otherwise.
     [string]$Root = 'Software'
 )
 $ErrorActionPreference = 'Stop'
 $exe = (Resolve-Path -LiteralPath $Executable).Path
-if ([IO.Path]::GetExtension($exe) -ine '.exe') { throw 'Select the Preview executable.' }
+if ([IO.Path]::GetExtension($exe) -ine '.exe') { throw 'Select the Peekaboo executable.' }
 $exeName = Split-Path -Leaf $exe
-$appName = 'Preview for Windows'
+$appName = 'Peekaboo'
 $classes = "$Root\Classes"
-$capabilities = "$Root\PreviewForWindows\Capabilities"
+$capabilities = "$Root\Peekaboo\Capabilities"
 $application = "$classes\Applications\$exeName"
-$preserved = "$Root\PreviewForWindows\AssociationPreservation"
+$preserved = "$Root\Peekaboo\AssociationPreservation"
 $open = '"' + $exe + '" "%1"'
 $icon = '"' + $exe + '",0'
 $types = @(
-    @('.pdf', 'PreviewForWindows.Pdf', 'PDF document'),
-    @('.jpg', 'PreviewForWindows.Jpeg', 'JPEG image'),
-    @('.jpeg', 'PreviewForWindows.Jpeg', 'JPEG image'),
-    @('.png', 'PreviewForWindows.Png', 'PNG image'),
-    @('.webp', 'PreviewForWindows.Webp', 'WebP image'),
-    @('.heic', 'PreviewForWindows.Heif', 'HEIF image'),
-    @('.heif', 'PreviewForWindows.Heif', 'HEIF image'),
-    @('.gif', 'PreviewForWindows.Gif', 'GIF image'),
-    @('.tif', 'PreviewForWindows.Tiff', 'TIFF image'),
-    @('.tiff', 'PreviewForWindows.Tiff', 'TIFF image'),
-    @('.bmp', 'PreviewForWindows.Bmp', 'BMP image')
+    @('.pdf', 'Peekaboo.Pdf', 'PDF document'),
+    @('.jpg', 'Peekaboo.Jpeg', 'JPEG image'),
+    @('.jpeg', 'Peekaboo.Jpeg', 'JPEG image'),
+    @('.png', 'Peekaboo.Png', 'PNG image'),
+    @('.webp', 'Peekaboo.Webp', 'WebP image'),
+    @('.heic', 'Peekaboo.Heif', 'HEIF image'),
+    @('.heif', 'Peekaboo.Heif', 'HEIF image'),
+    @('.gif', 'Peekaboo.Gif', 'GIF image'),
+    @('.tif', 'Peekaboo.Tiff', 'TIFF image'),
+    @('.tiff', 'Peekaboo.Tiff', 'TIFF image'),
+    @('.bmp', 'Peekaboo.Bmp', 'BMP image')
 )
 # Verb key, menu text, command-line flag, and whether PDFs get it.
 $verbs = @(
-    @('PreviewForWindows.Convert', 'Convert', '--convert', $false),
-    @('PreviewForWindows.Resize', 'Resize', '--resize', $false),
-    @('PreviewForWindows.Combine', 'Combine into PDF', '--combine', $true)
+    @('Peekaboo.Convert', 'Convert', '--convert', $false),
+    @('Peekaboo.Resize', 'Resize', '--resize', $false),
+    @('Peekaboo.Combine', 'Combine into PDF', '--combine', $true)
 )
 $hive = [Microsoft.Win32.Registry]::CurrentUser
 $classesRoot = [Microsoft.Win32.Registry]::ClassesRoot
@@ -151,11 +151,11 @@ if ($Unregister) {
 
 if ($Root -eq 'Software') {
     # SHCNE_ASSOCCHANGED with SHCNF_IDLIST tells Explorer to reload associations.
-    Add-Type -Namespace PreviewForWindows -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);'
-    [PreviewForWindows.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+    Add-Type -Namespace Peekaboo -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);'
+    [Peekaboo.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 if ($Unregister) {
-    'Preview is removed from Open with and Default apps for this Windows user.'
+    'Peekaboo is removed from Open with and Default apps for this Windows user.'
 } else {
-    'Preview is in Open with and Default apps for this Windows user. Your default apps did not change. To make Preview the default, open Settings > Apps > Default apps.'
+    'Peekaboo is in Open with and Default apps for this Windows user. Your default apps did not change. To make Peekaboo the default, open Settings > Apps > Default apps.'
 }

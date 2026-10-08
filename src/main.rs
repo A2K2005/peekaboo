@@ -21,7 +21,7 @@ fn main() {
         _ => ui::run(),
     };
     if let Err(error) = result {
-        eprintln!("Preview could not start: {error}");
+        eprintln!("Peekaboo could not start: {error}");
         std::process::exit(1);
     }
 }

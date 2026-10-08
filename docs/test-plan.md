@@ -24,9 +24,9 @@ Run from the repository root with PowerShell 7:
 ```powershell
 pwsh -NoProfile -File tools/make-fixtures.ps1
 pwsh -NoProfile -File tools/test-benchmark.ps1
-pwsh -NoProfile -File tools/benchmark.ps1 -Executable target/release/preview-for-windows.exe -InputFile fixtures/20-pages.pdf -Runs 30
-pwsh -NoProfile -File tools/benchmark.ps1 -Executable target/release/preview-for-windows.exe -InputFile fixtures/500-pages-50mb.pdf -Runs 30
-pwsh -NoProfile -File tools/benchmark.ps1 -Executable target/release/preview-for-windows.exe -InputFile fixtures/image-24mp.jpg -Runs 30
+pwsh -NoProfile -File tools/benchmark.ps1 -Executable target/release/peekaboo.exe -InputFile fixtures/20-pages.pdf -Runs 30
+pwsh -NoProfile -File tools/benchmark.ps1 -Executable target/release/peekaboo.exe -InputFile fixtures/500-pages-50mb.pdf -Runs 30
+pwsh -NoProfile -File tools/benchmark.ps1 -Executable target/release/peekaboo.exe -InputFile fixtures/image-24mp.jpg -Runs 30
 ```
 
 Use the actual built executable path if its name changes. Paths are passed with `ProcessStartInfo.ArgumentList`, without a command shell. Each session gets a unique output directory containing raw marker files, `samples.json`, `samples.csv`, and `summary.json`. A missing success marker, nonzero exit, malformed marker, or timeout fails the run. A percentile over successful samples does not erase failed runs.

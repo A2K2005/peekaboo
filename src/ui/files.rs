@@ -101,7 +101,7 @@ pub(super) unsafe fn destination(hwnd: HWND, pdf: bool) -> Option<PathBuf> {
         });
     }
     if path.exists() {
-        sheet::alert(hwnd, "Choose a new name", "Preview saves a copy and never replaces an existing file.");
+        sheet::alert(hwnd, "Choose a new name", "Peekaboo saves a copy and never replaces an existing file.");
         None
     } else {
         Some(path)
@@ -136,7 +136,7 @@ pub(super) unsafe fn save_as(hwnd: HWND, name: &str, label: &str, extension: &st
         path.set_extension(extension);
     }
     if path.exists() {
-        sheet::alert(hwnd, "Choose a new name", "Preview saves a copy and never replaces an existing file.");
+        sheet::alert(hwnd, "Choose a new name", "Peekaboo saves a copy and never replaces an existing file.");
         None
     } else {
         Some(path)
@@ -168,7 +168,7 @@ pub(super) unsafe fn folder(hwnd: HWND) -> Option<PathBuf> {
 
 fn app_data() -> std::result::Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
-        .map(|p| PathBuf::from(p).join("PreviewForWindows"))
+        .map(|p| PathBuf::from(p).join("Peekaboo"))
         .ok_or("Windows local app storage is unavailable.".into())
 }
 /// A saved signature: strokes of `[x, y, pressure]` in 0..1 of its bounding

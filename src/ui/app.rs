@@ -608,7 +608,7 @@ impl State {
             .filter(|(_, save)| save.due.is_some_and(|due| due <= now) && save.in_flight.is_none())
             .map(|(path, _)| path.clone())
             .collect();
-        let base = super::disk::app_dir().unwrap_or_else(|| std::env::temp_dir().join("PreviewForWindows"));
+        let base = super::disk::app_dir().unwrap_or_else(|| std::env::temp_dir().join("Peekaboo"));
         let mut requests = Vec::new();
         for path in due {
             let edits = self.sessions.get(&path).cloned().unwrap_or_default();
@@ -809,7 +809,7 @@ pub(super) unsafe fn schedule(hwnd: HWND, state: &mut State, delta: i32) {
     let job = if is_pdf(&request.path) { Job::Open(request) } else { Job::Render(request) };
     if !state.send(job) {
         state.pending = false;
-        state.status = "The rendering worker stopped. Close Preview and reopen the file.".into();
+        state.status = "The rendering worker stopped. Close Peekaboo and reopen the file.".into();
     }
     invalidate(hwnd);
 }
@@ -943,7 +943,7 @@ pub(super) unsafe fn close_tab(hwnd: HWND, index: usize) {
     match next {
         Some(next) => open(hwnd, next),
         None => {
-            let _ = SetWindowTextW(hwnd, windows::core::w!("Preview for Windows"));
+            let _ = SetWindowTextW(hwnd, windows::core::w!("Peekaboo"));
             invalidate(hwnd);
         }
     }
@@ -1263,7 +1263,7 @@ fn shown(state: &mut State, path: PathBuf, page: u32, navigation: bool) -> Strin
     if !state.tabs.contains(&path) {
         state.tabs.push(path.clone());
     }
-    let title = format!("{} - Preview for Windows", file_name(&path));
+    let title = format!("{} - Peekaboo", file_name(&path));
     state.path = Some(path);
     state.page = page;
     state.render_failed = false;
@@ -1565,7 +1565,7 @@ mod tests {
         let requests = state.autosave_requests(Instant::now());
         assert_eq!(requests.len(), 1);
         assert!(requests[0].edits.image.is_empty() && requests[0].edits.pdf.is_empty());
-        assert_eq!(requests[0].expected, Some(stamp(12)), "revert replaces only the version Preview last saved");
+        assert_eq!(requests[0].expected, Some(stamp(12)), "revert replaces only the version Peekaboo last saved");
         state.workers.stop();
     }
 
@@ -1704,7 +1704,7 @@ mod tests {
         for labels in [["Overwrite", "Save copy"], ["Remember", "This file only"]] {
             state.sheet = Some(Sheet {
                 title: "Save edits".into(),
-                message: "Choose how Preview should save this file.".into(),
+                message: "Choose how Peekaboo should save this file.".into(),
                 fields: Vec::new(),
                 buttons: labels.iter().map(|label| (*label).into()).collect(),
                 cancel: usize::MAX,

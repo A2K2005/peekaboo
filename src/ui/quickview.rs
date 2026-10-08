@@ -477,7 +477,7 @@ unsafe fn show_file(hwnd: HWND) {
     };
     look_up_app(hwnd, &path);
     if !super::organize::can_insert(&path) {
-        let title: Vec<u16> = format!("{} - Preview for Windows", file_name(&path)).encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = format!("{} - Peekaboo", file_name(&path)).encode_utf16().chain(Some(0)).collect();
         let _ = SetWindowTextW(hwnd, windows::core::PCWSTR(title.as_ptr()));
         with_state(|s| {
             forget_document(s);
@@ -1030,7 +1030,7 @@ unsafe fn finish(hwnd: HWND) {
     let _ = KillTimer(Some(hwnd), 1);
     set_layered(hwnd, false);
     with_state(reset);
-    let _ = SetWindowTextW(hwnd, w!("Preview for Windows"));
+    let _ = SetWindowTextW(hwnd, w!("Peekaboo"));
 }
 
 /// The rectangle of the item focused in Explorer or on the desktop, in
@@ -1229,7 +1229,7 @@ unsafe fn open_editor(hwnd: HWND, markup: bool) {
         if markup {
             s.set_markup(true);
         }
-        Some((s.path.as_deref().map(|p| format!("{} - Preview for Windows", file_name(p))), doc))
+        Some((s.path.as_deref().map(|p| format!("{} - Peekaboo", file_name(p))), doc))
     })
     .flatten() else {
         return;

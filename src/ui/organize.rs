@@ -217,7 +217,7 @@ fn extract(s: &mut State, page: u32) {
     let Some(path) = s.path.clone() else {
         return;
     };
-    let root = std::env::temp_dir().join("PreviewForWindows").join("drag out");
+    let root = std::env::temp_dir().join("Peekaboo").join("drag out");
     // Only the latest drag's file is kept. The PDF writer never replaces a
     // file, so each drag gets its own folder.
     let _ = std::fs::remove_dir_all(&root);
@@ -403,7 +403,7 @@ fn page_inserts(paths: &[PathBuf], gap: u32) -> (Vec<PdfEdit>, Vec<String>) {
 
 unsafe fn report(hwnd: HWND, skipped: &[String]) {
     if !skipped.is_empty() {
-        let message = format!("Only PDFs and images that Preview can read become pages. Not added: {}", skipped.join(", "));
+        let message = format!("Only PDFs and images that Peekaboo can read become pages. Not added: {}", skipped.join(", "));
         sheet::alert(hwnd, "Some files were not added", &message);
     }
 }

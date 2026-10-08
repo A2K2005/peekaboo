@@ -1,4 +1,6 @@
-# Preview for Windows
+# Peekaboo
+
+Peekaboo was renamed from Preview for Windows on 2026-10-08 (D23). The folder and the GitHub repo keep the old name.
 
 A free, native Windows app that opens PDFs and images in under 400 ms and does everyday edits. The product spec is [docs/PRD.md](docs/PRD.md). The PRD is the source of truth for scope and performance targets. The owner opened the language and stack choice (D3). Do not change scope without owner approval.
 
@@ -96,4 +98,5 @@ This PC is not the PRD reference laptop (i5 12th gen, 8 GB, Windows 11) or the l
 | D20 | 2026-10-07 | The repo is pushed to the private GitHub repo `A2K2005/preview-for-windows`, all branches. Every commit is authored as A2K2005 (history rewritten once; backup bundle in `%TEMP%\pfw-before-author-rewrite.bundle`). Push only when the owner asks. | Owner asked for the repo under the A2K2005 account. Supersedes "Nothing is pushed" in D14. |
 | D21 | 2026-10-07 | The product becomes Quick Look first: press Space on a file in Explorer and a minimal peek window opens at once; the full editor opens only on request. The editor's chrome shows on demand. Spec: `docs/quicklook-spec.md`. | Owner: "it should be like Quick Look / Peek... very seamless... it should not act as a buffer between the user and what they want to open." |
 | D22 | 2026-10-07 | Saving is Mac style: edits autosave into the file with no first-edit prompt. "Revert to opened" is the way back. Unwritable files ask where to save a copy. The product name stays for now; pick a final name before Store release. | Owner chose both. Supersedes the first-edit consent in D19 and W2-3. |
+| D23 | 2026-10-08 | The app is named Peekaboo. The executable is `peekaboo.exe`; window classes, the resident mutex, ProgIDs (`Peekaboo.Pdf`), Explorer verbs, the registry app key, the MSIX identity, the winget ID (`Peekaboo.Peekaboo`), and `%LOCALAPPDATA%\Peekaboo` follow it. `PFW_*` environment variables and the `~pfw` staging prefix stay. Settings and recent files under the old `%LOCALAPPDATA%\PreviewForWindows` are not migrated. | Owner approved the name. Supersedes "the product name stays for now" in D22. |
 | D19 | 2026-10-07 | Autosave replays edits from one immutable opened snapshot and identifies work by the logical file path. Every overwrite requires first-edit consent; external changes pause; reader leases block snapshot cleanup. | Prevents double-applied edits, stale completions, cross-tab status errors, and close/logoff data loss found during adversarial review. |

@@ -36,9 +36,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SMTO_ABORTIFHUNG, SW_SHOWNORMAL, WM_COPYDATA,
 };
 
-pub const APP_NAME: &str = "Preview for Windows";
+pub const APP_NAME: &str = "Peekaboo";
 /// Class name of the main window. A second launch finds the running instance by it.
-pub const WINDOW_CLASS: &str = "PreviewForWindowsMain";
+pub const WINDOW_CLASS: &str = "PeekabooMain";
 /// dwData of every WM_COPYDATA this app sends ("PFW1").
 pub const COPYDATA_TAG: usize = 0x5046_5731;
 /// Command lines are at most 32,767 characters, so 1 MiB is ample.
@@ -208,7 +208,7 @@ pub fn forward(hwnd: HWND, command: &Command) -> Result<(), String> {
         lpData: payload.as_ptr() as *mut _,
     };
     if data.cbData > MAX_PAYLOAD {
-        return Err("Too many files to pass to the open Preview window.".into());
+        return Err("Too many files to pass to the open Peekaboo window.".into());
     }
     let mut reply = 0usize;
     let sent = unsafe {
@@ -227,7 +227,7 @@ pub fn forward(hwnd: HWND, command: &Command) -> Result<(), String> {
         )
     };
     if sent.0 == 0 || reply != 1 {
-        return Err("The open Preview window did not respond.".into());
+        return Err("The open Peekaboo window did not respond.".into());
     }
     Ok(())
 }
@@ -271,36 +271,36 @@ pub fn hand_off(class: &str, command: &Command) -> Option<InstanceGuard> {
     }
 }
 
-const APP_KEY: &str = "PreviewForWindows";
+const APP_KEY: &str = "Peekaboo";
 const THUMBNAIL_HANDLER: &str = "{e357fccd-a995-4576-b01f-234630154e96}";
 const PREVIEW_HANDLER: &str = "{8895b1c6-b41f-4c1c-a562-0d564250836f}";
 const PRESERVED_KEY: &str = "AssociationPreservation";
 /// Extension, ProgID, and type name. Default Programs asks for app-specific ProgIDs.
 pub const FILE_TYPES: [(&str, &str, &str); 11] = [
-    (".pdf", "PreviewForWindows.Pdf", "PDF document"),
-    (".jpg", "PreviewForWindows.Jpeg", "JPEG image"),
-    (".jpeg", "PreviewForWindows.Jpeg", "JPEG image"),
-    (".png", "PreviewForWindows.Png", "PNG image"),
-    (".webp", "PreviewForWindows.Webp", "WebP image"),
-    (".heic", "PreviewForWindows.Heif", "HEIF image"),
-    (".heif", "PreviewForWindows.Heif", "HEIF image"),
-    (".gif", "PreviewForWindows.Gif", "GIF image"),
-    (".tif", "PreviewForWindows.Tiff", "TIFF image"),
-    (".tiff", "PreviewForWindows.Tiff", "TIFF image"),
-    (".bmp", "PreviewForWindows.Bmp", "BMP image"),
+    (".pdf", "Peekaboo.Pdf", "PDF document"),
+    (".jpg", "Peekaboo.Jpeg", "JPEG image"),
+    (".jpeg", "Peekaboo.Jpeg", "JPEG image"),
+    (".png", "Peekaboo.Png", "PNG image"),
+    (".webp", "Peekaboo.Webp", "WebP image"),
+    (".heic", "Peekaboo.Heif", "HEIF image"),
+    (".heif", "Peekaboo.Heif", "HEIF image"),
+    (".gif", "Peekaboo.Gif", "GIF image"),
+    (".tif", "Peekaboo.Tiff", "TIFF image"),
+    (".tiff", "Peekaboo.Tiff", "TIFF image"),
+    (".bmp", "Peekaboo.Bmp", "BMP image"),
 ];
 /// Explorer verb key, menu text, action, and whether PDFs get it.
 pub const VERBS: [(&str, &str, Action, bool); 4] = [
-    ("PreviewForWindows.Peek", "Quick view", Action::Peek, true),
+    ("Peekaboo.Peek", "Quick view", Action::Peek, true),
     (
-        "PreviewForWindows.Convert",
+        "Peekaboo.Convert",
         "Convert",
         Action::Convert,
         false,
     ),
-    ("PreviewForWindows.Resize", "Resize", Action::Resize, false),
+    ("Peekaboo.Resize", "Resize", Action::Resize, false),
     (
-        "PreviewForWindows.Combine",
+        "Peekaboo.Combine",
         "Combine into PDF",
         Action::Combine,
         true,
@@ -538,7 +538,7 @@ fn exe_parts(exe: &Path) -> Result<(&str, &str), String> {
     let name = exe.file_name().and_then(|n| n.to_str());
     match (text, name) {
         (Some(text), Some(name)) => Ok((text, name)),
-        _ => Err("Choose the Preview program file by its full path.".into()),
+        _ => Err("Choose the Peekaboo program file by its full path.".into()),
     }
 }
 
@@ -637,7 +637,7 @@ pub fn default_apps_uri(build: u32) -> String {
     }
 }
 
-/// Opens Default apps in Settings, where the user picks Preview. Never sets a default itself.
+/// Opens Default apps in Settings, where the user picks Peekaboo. Never sets a default itself.
 pub fn open_default_apps() -> Result<(), String> {
     let uri = HSTRING::from(default_apps_uri(windows_build()));
     let result = unsafe { ShellExecuteW(None, w!("open"), &uri, None, None, SW_SHOWNORMAL) };
@@ -655,7 +655,7 @@ pub fn open_default_apps() -> Result<(), String> {
 pub fn is_default_for(extension: &str) -> bool {
     let extension = HSTRING::from(extension);
     let query = |what: ASSOCSTR| association(&extension, what);
-    if query(ASSOCSTR_PROGID).is_some_and(|progid| progid.starts_with("PreviewForWindows.")) {
+    if query(ASSOCSTR_PROGID).is_some_and(|progid| progid.starts_with("Peekaboo.")) {
         return true;
     }
     let exe = std::env::current_exe().ok();
@@ -843,7 +843,7 @@ pub fn drag_files(hwnd: HWND, paths: &[PathBuf]) -> Result<DROPEFFECT, String> {
 pub const RECENT_LIMIT: usize = 20;
 const RECENT_FILE: &str = "recent.txt";
 
-/// %LOCALAPPDATA%\PreviewForWindows
+/// %LOCALAPPDATA%\Peekaboo
 pub fn recent_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join(APP_KEY))
 }

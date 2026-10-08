@@ -157,7 +157,7 @@ pub(super) fn tick(state: &mut State) -> bool {
         state.find.cancel = Some(cancel);
         state.find.in_flight += 1;
     } else {
-        infobar::error(state, "Search stopped working. Close Preview and open the file again.");
+        infobar::error(state, "Search stopped working. Close Peekaboo and open the file again.");
     }
     true
 }

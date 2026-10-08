@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  MSIX manifest for Preview for Windows. tools/package.ps1 sets Identity/@Version from Cargo.toml.
+  MSIX manifest for Peekaboo. tools/package.ps1 sets Identity/@Version from Cargo.toml.
   Publisher is a placeholder for local test signing. Replace it with the Partner Center
   publisher (Store) or the code-signing certificate subject (direct download). See docs/packaging.md.
 -->
@@ -12,11 +12,11 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap uap2 uap3 rescap">
 
-  <Identity Name="PreviewForWindows" Publisher="CN=Preview for Windows Test" Version="0.0.0.0" ProcessorArchitecture="x64" />
+  <Identity Name="Peekaboo" Publisher="CN=Peekaboo Test" Version="0.0.0.0" ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Preview for Windows</DisplayName>
-    <PublisherDisplayName>Preview for Windows</PublisherDisplayName>
+    <DisplayName>Peekaboo</DisplayName>
+    <PublisherDisplayName>Peekaboo</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
@@ -29,9 +29,9 @@
   </Resources>
 
   <Applications>
-    <Application Id="App" Executable="preview-for-windows.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="App" Executable="peekaboo.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Preview for Windows"
+        DisplayName="Peekaboo"
         Description="View and edit PDFs and images."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"

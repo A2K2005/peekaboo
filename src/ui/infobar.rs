@@ -110,7 +110,7 @@ pub(super) fn save_problem(state: &mut State, path: &Path) {
             state,
             Bar {
                 kind: Kind::Conflict,
-                text: format!("{name} changed outside Preview. Autosave is paused."),
+                text: format!("{name} changed outside Peekaboo. Autosave is paused."),
                 actions: vec![("Resolve", Action::Resolve(owned))],
             },
         ),
@@ -328,7 +328,7 @@ pub(super) unsafe fn activate(hwnd: HWND, id: WidgetId) {
 /// thumbnail and preview handlers.
 fn open_default_apps() -> Result<(), String> {
     if !crate::integration::is_registered() {
-        let exe = std::env::current_exe().map_err(|e| format!("Could not find the Preview program file. {e}"))?;
+        let exe = std::env::current_exe().map_err(|e| format!("Could not find the Peekaboo program file. {e}"))?;
         crate::integration::register(&exe)?;
     }
     crate::integration::open_default_apps()
@@ -341,7 +341,7 @@ fn remember_offer() {
     }
 }
 
-/// Offers once, on a launch after the first, to make Preview the default
+/// Offers once, on a launch after the first, to make Peekaboo the default
 /// viewer. Runs on its own thread after first content, so launch pays
 /// nothing, and waits so the bar does not appear with the first page.
 pub(super) fn after_launch(hwnd: HWND) {
@@ -378,7 +378,7 @@ pub(super) unsafe fn offer(hwnd: HWND) {
             s,
             Bar {
                 kind: Kind::Offer,
-                text: "Make Preview for Windows your default viewer?".into(),
+                text: "Make Peekaboo your default viewer?".into(),
                 actions: vec![("Open settings", Action::OpenDefaultApps), ("Not now", Action::NotNow)],
             },
         )

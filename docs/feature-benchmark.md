@@ -22,7 +22,7 @@ External evidence: [Glance source at the reviewed revision](https://github.com/R
 
 ## Ten everyday tasks
 
-| PRD task | Preview for Windows: status and local evidence | Competitor benchmark and present lead | Next proof required |
+| PRD task | Peekaboo: status and local evidence | Competitor benchmark and present lead | Next proof required |
 | --- | --- | --- | --- |
 | 1. Open and read | **Implemented / Tested subset / Unverified targets.** Tiles, thumbnails, outline, view modes, tabs, zoom, and neighbor predecode in `src/ui/document.rs`, `view.rs`, `worker.rs`. Two focused 4K tests passed in this review session; subsequent frame-pinning test also passed. | Glance has a complete viewer; Apple documents viewing PDFs/images. No measured speed leader. | Quiet-machine release baseline, reference and low-end devices, 500-page scrolling, blank-tile duration, actual next-image navigation and resident handoff. |
 | 2. Find and copy | **Implemented / Latest fixes unverified.** PDF and OCR TextLayer flows now provide pointer and keyboard selection, word/line expansion, reading-order copy, highlights, Ctrl+F and F3 navigation, stale-result rejection, and accessibility text. The first pass passed 129 UI tests; four review fixes were added after that run and still need the final rerun. | Apple and Glance have shipped selection/search UX. Our engine and interaction path are connected, but no comparative usability lead is established. | Rerun and re-review the final fixes; add an inline find bar if required; run live pointer, keyboard, Narrator, rotated-page, multi-column, and multi-frame tests. |

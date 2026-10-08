@@ -15,7 +15,7 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 /// The only registry key these tests write. Dropping the guard deletes it.
-const TEST_ROOT: &str = r"Software\PreviewForWindows-Test";
+const TEST_ROOT: &str = r"Software\Peekaboo-Test";
 
 struct TestKey;
 
@@ -94,18 +94,18 @@ fn scratch(name: &str) -> PathBuf {
 fn register_writes_per_user_keys_and_unregister_removes_them() {
     let _key = TestKey;
     let base = format!(r"{TEST_ROOT}\rust");
-    let exe = Path::new(r"C:\Apps\Preview\preview-for-windows.exe");
+    let exe = Path::new(r"C:\Apps\Peekaboo\peekaboo.exe");
     integration::register_at(&base, exe).unwrap();
     let classes = format!(r"{base}\Classes");
-    let quoted = r#""C:\Apps\Preview\preview-for-windows.exe""#;
+    let quoted = r#""C:\Apps\Peekaboo\peekaboo.exe""#;
 
     assert_eq!(
-        read(&format!(r"{classes}\PreviewForWindows.Pdf"), "").as_deref(),
+        read(&format!(r"{classes}\Peekaboo.Pdf"), "").as_deref(),
         Some("PDF document")
     );
     assert_eq!(
         read(
-            &format!(r"{classes}\PreviewForWindows.Jpeg\shell\open\command"),
+            &format!(r"{classes}\Peekaboo.Jpeg\shell\open\command"),
             ""
         ),
         Some(format!(r#"{quoted} "%1""#))
@@ -113,12 +113,12 @@ fn register_writes_per_user_keys_and_unregister_removes_them() {
     assert_eq!(
         read(
             &format!(r"{classes}\.heic\OpenWithProgids"),
-            "PreviewForWindows.Heif"
+            "Peekaboo.Heif"
         )
         .as_deref(),
         Some("")
     );
-    let convert = format!(r"{classes}\SystemFileAssociations\.png\shell\PreviewForWindows.Convert");
+    let convert = format!(r"{classes}\SystemFileAssociations\.png\shell\Peekaboo.Convert");
     assert_eq!(read(&convert, "MUIVerb").as_deref(), Some("Convert"));
     assert_eq!(
         read(&convert, "MultiSelectModel").as_deref(),
@@ -131,34 +131,34 @@ fn register_writes_per_user_keys_and_unregister_removes_them() {
     let pdf_verbs = format!(r"{classes}\SystemFileAssociations\.pdf\shell");
     assert_eq!(
         read(
-            &format!(r"{pdf_verbs}\PreviewForWindows.Combine"),
+            &format!(r"{pdf_verbs}\Peekaboo.Combine"),
             "MUIVerb"
         )
         .as_deref(),
         Some("Combine into PDF")
     );
     assert_eq!(
-        read(&format!(r"{pdf_verbs}\PreviewForWindows.Resize"), "MUIVerb"),
+        read(&format!(r"{pdf_verbs}\Peekaboo.Resize"), "MUIVerb"),
         None,
         "PDFs get Combine only"
     );
     assert_eq!(
         read(
-            &format!(r"{classes}\Applications\preview-for-windows.exe\SupportedTypes"),
+            &format!(r"{classes}\Applications\peekaboo.exe\SupportedTypes"),
             ".tiff"
         )
         .as_deref(),
         Some("")
     );
-    let capabilities = format!(r"{base}\PreviewForWindows\Capabilities");
+    let capabilities = format!(r"{base}\Peekaboo\Capabilities");
     assert_eq!(
         read(&format!(r"{capabilities}\FileAssociations"), ".webp").as_deref(),
-        Some("PreviewForWindows.Webp")
+        Some("Peekaboo.Webp")
     );
     assert_eq!(
         read(
             &format!(r"{base}\RegisteredApplications"),
-            "Preview for Windows"
+            "Peekaboo"
         ),
         Some(capabilities)
     );
@@ -285,7 +285,7 @@ fn registration_preserves_shell_handlers_through_uninstall() {
         Some(old_preview)
     );
 
-    let exe = Path::new(r"C:\Apps\Preview\preview-for-windows.exe");
+    let exe = Path::new(r"C:\Apps\Peekaboo\peekaboo.exe");
     integration::register_at(&base, exe).unwrap();
     assert_eq!(
         read(&extension, "PerceivedType").as_deref(),
@@ -295,7 +295,7 @@ fn registration_preserves_shell_handlers_through_uninstall() {
     assert_eq!(read(&preview_key, "").as_deref(), Some(old_preview));
     let png = format!(r"{classes}\.png");
     assert_eq!(read(&png, "PerceivedType").as_deref(), Some("image"));
-    let marker = format!(r"{base}\PreviewForWindows\AssociationPreservation\pdf");
+    let marker = format!(r"{base}\Peekaboo\AssociationPreservation\pdf");
     assert_eq!(
         read(&marker, "PerceivedType"),
         None,
@@ -346,7 +346,7 @@ fn default_apps_link_matches_windows_version() {
     );
     assert_eq!(
         integration::default_apps_uri(22631),
-        "ms-settings:defaultapps?registeredAppUser=Preview%20for%20Windows"
+        "ms-settings:defaultapps?registeredAppUser=Peekaboo"
     );
     assert!(
         integration::windows_build() >= 10240,

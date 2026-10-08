@@ -4,7 +4,7 @@
 # Windows PowerShell 5.1. Opens windows: run only in a GUI session that may
 # be disturbed. These are process-relaunch timings, not cold launches.
 #
-#   powershell -NoProfile -File tests/ui/launch-ab.ps1 -A artifacts/baseline/preview-for-windows.exe -B target/release/preview-for-windows.exe -InputFile fixtures/500-pages-50mb.pdf -Runs 20
+#   powershell -NoProfile -File tests/ui/launch-ab.ps1 -A artifacts/baseline/peekaboo.exe -B target/release/peekaboo.exe -InputFile fixtures/500-pages-50mb.pdf -Runs 20
 param(
     [Parameter(Mandatory)][string]$A,
     [Parameter(Mandatory)][string]$B,

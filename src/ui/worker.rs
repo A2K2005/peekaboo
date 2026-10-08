@@ -354,7 +354,7 @@ fn stable_read<T>(path: &Path, read: impl FnOnce() -> Result<T, String>) -> Resu
     let value = read()?;
     let after = disk::Stamp::of(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
     if stamp != after {
-        return Err("The file changed while Preview was opening it. Open it again.".into());
+        return Err("The file changed while Peekaboo was opening it. Open it again.".into());
     }
     Ok((value, stamp))
 }
@@ -603,7 +603,7 @@ impl Worker {
                 let result = stable_read(&source, || {
                     self.pdf()
                         .map_err(|_| {
-                            "PDFium could not load. Install the verified pdfium.dll beside Preview and reopen the PDF.".to_string()
+                            "PDFium could not load. Install the verified pdfium.dll beside Peekaboo and reopen the PDF.".to_string()
                         })
                         .and_then(|engine| {
                             engine.alias_password(&request.path, &source);
@@ -1144,7 +1144,7 @@ mod tests {
             std::fs::write(&path, b"after and a different length").unwrap();
             Ok(())
         });
-        assert_eq!(result.unwrap_err(), "The file changed while Preview was opening it. Open it again.");
+        assert_eq!(result.unwrap_err(), "The file changed while Peekaboo was opening it. Open it again.");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1179,7 +1179,7 @@ mod tests {
         assert_eq!((original.source_width, original.source_height), (2, 1));
         assert_eq!((rotated.source_width, rotated.source_height), (1, 2));
 
-        // Replace the target after Preview's successful save. The retry keeps
+        // Replace the target after Peekaboo's successful save. The retry keeps
         // the immutable snapshot but must not overwrite the other writer.
         std::fs::remove_file(&source).unwrap();
         let external = Frame { width: 3, source_width: 3, pixels: [255, 0, 0, 255].repeat(3), ..frame };

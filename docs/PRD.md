@@ -1,4 +1,4 @@
-# PRD: Preview for Windows
+# PRD: Peekaboo
 
 Oct 6, 2026 · @A2K
 
@@ -6,7 +6,7 @@ Oct 6, 2026 · @A2K
 
 Build one free, native Windows app that opens any PDF or image in under half a second and handles the everyday edits people do today across Edge, Photos, Paint and paid PDF tools.
 
-Working name: **Preview for Windows**. Target: Windows 10 and 11, x64 and ARM64. The bar is macOS Preview: instant open, one window, no account, no ads, no upsell.
+Name: **Peekaboo** (renamed from Preview for Windows on 2026-10-08). Target: Windows 10 and 11, x64 and ARM64. The bar is macOS Preview: instant open, one window, no account, no ads, no upsell.
 
 What v1 ships: view, annotate, sign, fill forms, rearrange and merge pages, crop, resize, convert, copy text from images, remove backgrounds.
 
