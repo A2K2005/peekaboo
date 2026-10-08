@@ -184,6 +184,9 @@ fn bars(l: &Look, state: &State, layout: &Layout) {
         l.p.fill(Rect { y0: bar.y1 - s, ..bar }, l.t.divider);
         for w in layout.widgets.iter().filter(|w| w.region == Region::MarkupBar) {
             icon_button(l, state, w);
+            if let WidgetId::Command(command) = w.id {
+                super::marks::paint_button(l.p, state, command, w.rect);
+            }
         }
     }
     if let Some(side) = layout.sidebar {

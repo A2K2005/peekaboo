@@ -1,4 +1,4 @@
-//! Windows file dialogs, the clipboard, and the saved signature.
+//! Windows file dialogs, the clipboard, and saved signatures.
 use super::sheet;
 use std::path::PathBuf;
 use windows::{
@@ -166,13 +166,9 @@ pub(super) unsafe fn folder(hwnd: HWND) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf16_lossy(&buffer[..length])))
 }
 
-pub(super) fn signature_path() -> std::result::Result<PathBuf, String> {
+fn app_data() -> std::result::Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
-        .map(|p| {
-            PathBuf::from(p)
-                .join("PreviewForWindows")
-                .join("signature.txt")
-        })
+        .map(|p| PathBuf::from(p).join("PreviewForWindows"))
         .ok_or("Windows local app storage is unavailable.".into())
 }
 /// A saved signature: strokes of `[x, y, pressure]` in 0..1 of its bounding
@@ -185,10 +181,27 @@ pub(super) struct Signature {
 
 const SIGNATURE_HEADER: &str = "signature 2 ";
 
-/// None when no signature is saved yet.
-pub(super) fn load_signature() -> Option<std::result::Result<Signature, String>> {
-    let text = std::fs::read_to_string(signature_path().ok()?).ok()?;
-    Some(parse_signature(&text).ok_or_else(|| "The saved signature cannot be read. Draw a new one.".to_string()))
+/// Saved signatures, newest first. Each is a file in the signatures
+/// folder; `signature.txt` beside it is the one earlier versions saved.
+/// Files that cannot be read are left out.
+pub(super) fn signatures() -> Vec<Signature> {
+    let Ok(base) = app_data() else {
+        return Vec::new();
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(base.join("signatures"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|x| x == "txt"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+        .into_iter()
+        .map(|(_, path)| path)
+        .chain(Some(base.join("signature.txt")))
+        .filter_map(|path| parse_signature(&std::fs::read_to_string(path).ok()?))
+        .collect()
 }
 
 /// Version 2 starts with a header and separates strokes with blank lines.
@@ -255,10 +268,10 @@ pub(super) fn store_signature(strokes: &[Vec<[f32; 3]>]) -> std::result::Result<
         .map(|s| s.iter().map(|p| format!("{},{},{}", p[0], p[1], p[2])).collect::<Vec<_>>().join("\n"))
         .collect();
     text.push_str(&body.join("\n\n"));
-    let path = signature_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Cannot save the signature: {e}"))?;
-    }
+    let folder = app_data()?.join("signatures");
+    std::fs::create_dir_all(&folder).map_err(|e| format!("Cannot save the signature: {e}"))?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let path = folder.join(format!("{stamp}.txt"));
     let staged = path.with_extension("tmp");
     std::fs::write(&staged, text)
         .and_then(|_| std::fs::rename(&staged, &path))

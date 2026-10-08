@@ -194,6 +194,14 @@ impl Painter {
         let rounded = D2D1_ROUNDED_RECT { rect: d2d_rect(r), radiusX: radius, radiusY: radius };
         unsafe { self.target.DrawRoundedRectangle(&rounded, self.brush(color), width, None) };
     }
+    pub(super) fn stroke_ellipse(&self, r: Rect, color: Rgba, width: f32) {
+        let ellipse = D2D1_ELLIPSE {
+            point: windows_numerics::Vector2 { X: (r.x0 + r.x1) / 2.0, Y: (r.y0 + r.y1) / 2.0 },
+            radiusX: r.width() / 2.0,
+            radiusY: r.height() / 2.0,
+        };
+        unsafe { self.target.DrawEllipse(&ellipse, self.brush(color), width, None) };
+    }
     pub(super) fn line(&self, from: (f32, f32), to: (f32, f32), color: Rgba, width: f32) {
         unsafe {
             self.target.DrawLine(

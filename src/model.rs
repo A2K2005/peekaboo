@@ -4,6 +4,7 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 pub enum ImageEdit {
     RotateRight,
     FlipHorizontal,
+    FlipVertical,
     Crop {
         left: f32,
         top: f32,
@@ -14,10 +15,27 @@ pub enum ImageEdit {
         width: u32,
         height: u32,
     },
+    /// A mark in the default style (`MarkStyle::default`).
     Annotate {
         kind: AnnotationKind,
         points: Vec<[f32; 2]>,
         text: String,
+    },
+    /// A mark with a chosen line, colors, and text style.
+    Mark {
+        kind: AnnotationKind,
+        points: Vec<[f32; 2]>,
+        text: String,
+        style: MarkStyle,
+    },
+    /// Clears the rectangle, or the ellipse inside it; with `outside`,
+    /// everything else. Cleared pixels turn transparent, or white when
+    /// `white`, for formats that cannot store transparency.
+    Clear {
+        rect: NormRect,
+        ellipse: bool,
+        outside: bool,
+        white: bool,
     },
 }
 
@@ -36,6 +54,14 @@ pub enum PdfEdit {
         kind: AnnotationKind,
         points: Vec<[f32; 2]>,
         text: String,
+    },
+    /// `Annotate` with a chosen style.
+    Mark {
+        page: u32,
+        kind: AnnotationKind,
+        points: Vec<[f32; 2]>,
+        text: String,
+        style: MarkStyle,
     },
     FillField {
         page: u32,
@@ -103,6 +129,115 @@ pub enum AnnotationKind {
     Ellipse,
     Arrow,
     Text,
+    Line,
+    RoundedRectangle,
+    Bubble,
+    Star,
+    Polygon,
+    /// A round magnifier over the image. Images only.
+    Loupe,
+    /// Dims everything outside the box.
+    Mask,
+}
+
+impl AnnotationKind {
+    /// Shapes with an inside that a fill color paints.
+    pub fn closed(self) -> bool {
+        use AnnotationKind::*;
+        matches!(self, Rectangle | Ellipse | RoundedRectangle | Bubble | Star | Polygon | Text)
+    }
+}
+
+/// How a mark looks. Colors are `0xRRGGBBAA`; alpha 0 means none. `width`
+/// (lines) and `size` (text) are points on a PDF page; images scale them
+/// with the image (`imaging::annotated`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MarkStyle {
+    pub width: f32,
+    pub stroke: u32,
+    pub fill: u32,
+    pub text: u32,
+    pub size: f32,
+    pub font: MarkFont,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkFont {
+    Sans,
+    Serif,
+    Mono,
+}
+
+impl Default for MarkStyle {
+    fn default() -> Self {
+        Self { width: 2.0, stroke: 0x0078D4FF, fill: 0, text: 0x0078D4FF, size: 12.0, font: MarkFont::Sans }
+    }
+}
+
+impl MarkStyle {
+    /// The style with a visible line where `kind` needs one: lines always,
+    /// and closed shapes when they have no fill either.
+    pub fn visible(self, kind: AnnotationKind) -> Self {
+        let none = |color: u32| color & 0xFF == 0;
+        if none(self.stroke) && (!kind.closed() || none(self.fill)) && kind != AnnotationKind::Text {
+            return Self { stroke: Self::default().stroke, ..self };
+        }
+        self
+    }
+}
+
+/// A `0xRRGGBBAA` color as red, green, blue, and alpha from 0 to 1.
+pub fn rgba(color: u32) -> [f32; 4] {
+    color.to_be_bytes().map(|c| c as f32 / 255.0)
+}
+
+/// The outline of a rounded rectangle, speech bubble, star, or polygon in
+/// the box from `a` to `b`, as a closed polygon in the same normalized
+/// coordinates. `aspect` is the page or image width over its height, so
+/// corners stay round. None for other kinds.
+pub fn outline(kind: AnnotationKind, a: [f32; 2], b: [f32; 2], aspect: f32) -> Option<Vec<[f32; 2]>> {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    use AnnotationKind::*;
+    let (l, t, r, bottom) = (a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1]));
+    let (w, h) = (r - l, bottom - t);
+    let ring = |count: usize, inner: f32| -> Vec<[f32; 2]> {
+        (0..count)
+            .map(|i| {
+                let angle = TAU * i as f32 / count as f32 - FRAC_PI_2;
+                let k = if i % 2 == 1 && inner > 0.0 { inner } else { 1.0 };
+                [l + w / 2.0 * (1.0 + k * angle.cos()), t + h / 2.0 * (1.0 + k * angle.sin())]
+            })
+            .collect()
+    };
+    // Corner arcs of a rounded rectangle from `t` down to `low`. A tail,
+    // when given, goes on the bottom edge between the last two corners.
+    let rounded = |low: f32, tail: &[[f32; 2]]| -> Vec<[f32; 2]> {
+        let aspect = aspect.max(1e-3);
+        let rx = 0.15 * w.min((low - t) / aspect);
+        let ry = rx * aspect;
+        let corners = [([r - rx, t + ry], -90.0), ([r - rx, low - ry], 0.0), ([l + rx, low - ry], 90.0), ([l + rx, t + ry], 180.0)];
+        let mut points = Vec::new();
+        for (index, (center, from)) in corners.into_iter().enumerate() {
+            if index == 2 {
+                points.extend_from_slice(tail);
+            }
+            for step in 0..=6 {
+                let angle = (from + 15.0 * step as f32).to_radians();
+                points.push([center[0] + angle.cos() * rx, center[1] + angle.sin() * ry]);
+            }
+        }
+        points
+    };
+    Some(match kind {
+        RoundedRectangle => rounded(bottom, &[]),
+        Bubble => {
+            let body = t + 0.75 * h;
+            rounded(body, &[[l + 0.4 * w, body], [l + 0.15 * w, bottom], [l + 0.25 * w, body]])
+        }
+        Star => ring(10, 0.4),
+        Polygon => ring(6, 0.0),
+        _ => return None,
+    })
 }
 
 /// A rectangle normalized to the page or image: `[left, top, right, bottom]`,

@@ -461,6 +461,9 @@ pub(super) unsafe fn pointer(hwnd: HWND, state: &mut State, e: &PointerEvent) ->
             return Some(repaint);
         }
     }
+    if let Some(repaint) = super::marks::pointer(hwnd, state, e) {
+        return Some(repaint);
+    }
     if state.signature.is_some() {
         if e.phase == Phase::Down {
             place_signature(hwnd, state, e.x, e.y);
@@ -564,6 +567,9 @@ unsafe fn key(hwnd: HWND, s: &mut State, vk: u16, ctrl: bool, shift: bool, alt: 
         s.forms.adjust = None;
         return true;
     }
+    if !ctrl && !alt && super::marks::key(hwnd, s, key) {
+        return true;
+    }
     let Some(field) = focused(s) else {
         return false;
     };
@@ -660,20 +666,10 @@ pub(super) unsafe fn tool(hwnd: HWND, command: Command) -> bool {
     match command {
         Command::Highlight | Command::Underline | Command::Strikethrough => mark_selection(hwnd, command),
         Command::PlaceSignature => {
-            match files::load_signature() {
-                Some(Ok(signature)) => {
-                    with_state(|s| start_signing(s, signature));
-                }
-                Some(Err(error)) => {
-                    with_state(|s| {
-                        open_pad(s);
-                        s.status = error;
-                    });
-                }
-                None => {
-                    with_state(open_pad);
-                }
-            }
+            match files::signatures().into_iter().next() {
+                Some(signature) => with_state(|s| start_signing(s, signature)),
+                None => with_state(open_pad),
+            };
             invalidate(hwnd);
             true
         }
@@ -687,6 +683,25 @@ pub(super) unsafe fn tool(hwnd: HWND, command: Command) -> bool {
 pub(super) unsafe fn new_signature(hwnd: HWND) {
     with_state(open_pad);
     invalidate(hwnd);
+}
+
+/// The Sign button: pick a saved signature to place, or create one.
+pub(super) unsafe fn sign_menu(hwnd: HWND, keyboard: bool) {
+    let saved = files::signatures();
+    let Some(ctx) = with_state(|s| s.ctx()) else {
+        return;
+    };
+    let items = super::commands::sign_menu(&ctx, &saved);
+    match actions::popup(hwnd, items, Some(WidgetId::Command(Command::SignMenu)), None, keyboard) {
+        Some(super::commands::Pick::Index(index)) => {
+            if let Some(signature) = saved.into_iter().nth(index) {
+                with_state(|s| start_signing(s, signature));
+            }
+            invalidate(hwnd);
+        }
+        Some(super::commands::Pick::Command(command)) => actions::execute(hwnd, command, keyboard),
+        None => {}
+    }
 }
 
 /// Highlight, underline, or strike out the selected text: one annotation
@@ -781,6 +796,7 @@ fn start_signing(state: &mut State, signature: Signature) {
     state.markup = None;
     state.crop = false;
     state.zoom_select = false;
+    state.marks.deselect();
     state.forms.placed = None;
     state.signature = Some(signature);
     state.set_markup(true);
@@ -1017,13 +1033,14 @@ unsafe fn text_box(hwnd: HWND, state: &mut State, x: f32, y: f32) {
     open_editor(hwnd, state, path, page, [left, top, left + w, top + h], None);
 }
 
-/// Pixel height of the text box font: 12 pt on a PDF page, the image
-/// annotation size on an image.
+/// Pixel height of the text box font: the text style size on a PDF page,
+/// scaled as `imaging` draws it on an image.
 fn editor_font_px(state: &State, page: u32) -> i32 {
     let screen = document::text_rect(state, page, [0.0, 0.0, 1.0, 1.0]);
+    let points = state.marks.style.size;
     let px = match (state.pdf.as_ref().and_then(|v| v.sizes.get(page as usize)), screen) {
-        (Some(size), Some(r)) => 12.0 * r.height() / size[1],
-        (None, Some(r)) => r.width() * 0.03,
+        (Some(size), Some(r)) => points * r.height() / size[1],
+        (None, Some(r)) => r.width() * 0.0025 * points,
         _ => 14.0 * state.scale,
     };
     px.round().clamp(6.0, 400.0) as i32
@@ -1110,16 +1127,17 @@ unsafe fn finish_editor(edit: HWND, commit: bool) {
     invalidate(parent);
 }
 
-/// The box around new text: 12 pt Helvetica lines with room for wide glyphs.
+/// The box around new text: Helvetica lines with room for wide glyphs.
 fn fitted(state: &State, editor: &Editor, text: &str) -> NormRect {
     let [left, top, ..] = editor.rect;
     let Some([pw, ph]) = state.pdf.as_ref().filter(|v| v.path == editor.path).and_then(|v| v.sizes.get(editor.page as usize).copied()) else {
         return editor.rect;
     };
+    let size = state.marks.style.size;
     let lines = text.lines().count().max(1) as f32;
     let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
-    let w = ((longest * 7.2 + 10.0) / pw).clamp(30.0 / pw, 1.0);
-    let h = ((lines * 14.0 + 8.0) / ph).min(1.0);
+    let w = ((longest * 0.6 * size + 10.0) / pw).clamp(30.0 / pw, 1.0);
+    let h = ((lines * 1.17 * size + 8.0) / ph).min(1.0);
     let (left, top) = (left.min(1.0 - w).max(0.0), top.min(1.0 - h).max(0.0));
     [left, top, left + w, top + h]
 }
@@ -1147,17 +1165,22 @@ unsafe fn close_editor(state: &mut State, commit: bool) {
         None => {
             let r = fitted(state, &editor, &text);
             let points = vec![[r[0], r[1]], [r[2], r[3]]];
+            let (kind, style) = (AnnotationKind::Text, state.marks.style);
             if is_pdf(&editor.path) {
-                (Some(PdfEdit::Annotate { page, kind: AnnotationKind::Text, points, text }), None)
+                (Some(PdfEdit::Mark { page, kind, points, text, style }), None)
             } else {
-                (None, Some(ImageEdit::Annotate { kind: AnnotationKind::Text, points, text }))
+                (None, Some(ImageEdit::Mark { kind, points, text, style }))
             }
         }
     };
+    let added = editor.existing.is_none();
     push(editor.parent, state, &editor.path, |edits| {
         edits.pdf.extend(pdf_edit);
         edits.image.extend(image_edit);
     });
+    if added {
+        super::marks::select_last(state, &editor.path);
+    }
 }
 
 /// Keeps the text box on its page through scrolling and zooming.
