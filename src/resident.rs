@@ -25,7 +25,7 @@ use windows::Win32::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, RegisterHotKey, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
             KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VIRTUAL_KEY, VK_CONTROL,
-            VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_SPACE,
+            VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_SPACE,
         },
         WindowsAndMessaging::{
             CallNextHookEx, CreateWindowExW, DefWindowProcW, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
@@ -216,6 +216,13 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     if code == HC_ACTION as i32 {
         let key = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let injected = key.flags.0 & LLKHF_INJECTED.0 != 0;
+        let close_key = key.vkCode == VK_SPACE.0 as u32 || key.vkCode == VK_ESCAPE.0 as u32;
+        if close_key && wparam.0 as u32 == WM_KEYDOWN && no_modifiers() {
+            if let Some(window) = crate::ui::quick_view_lost_keys() {
+                let _ = PostMessageW(Some(window), WM_KEYDOWN, WPARAM(key.vkCode as usize), LPARAM(0));
+                return LRESULT(1);
+            }
+        }
         if key.vkCode == VK_SPACE.0 as u32 && logging() {
             log(&format!("hook: message {:#x}, injected {injected}, {}", wparam.0, focus_report()));
         }

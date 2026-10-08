@@ -91,6 +91,11 @@ pub fn peek(path: PathBuf, siblings: Vec<PathBuf>) {
     quickview::post(path, siblings);
 }
 
+/// See `quickview::foreign_focus`. Callable from any thread.
+pub fn quick_view_lost_keys() -> Option<HWND> {
+    quickview::foreign_focus()
+}
+
 /// Destroys the hidden main window when it has no unsaved work, which frees
 /// its documents, tiles, and Direct2D device; `standby` then returns.
 /// Returns false while the window is visible or busy, so the caller tries

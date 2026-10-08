@@ -1282,6 +1282,27 @@ unsafe fn open_command(hwnd: HWND, command: crate::integration::Command) {
 
 /// Keys in Quick view. Returns true when handled; the window's own key
 /// handling runs otherwise.
+/// The Quick view window, when it is in front and a preview handler in
+/// another process has the keyboard focus. Such handlers get Space and Esc
+/// instead of this window, so the keyboard hook sends those keys here.
+pub(super) fn foreign_focus() -> Option<HWND> {
+    use windows::Win32::{
+        System::Threading::GetCurrentProcessId,
+        UI::WindowsAndMessaging::{GetGUIThreadInfo, GetWindowThreadProcessId, IsChild, GUITHREADINFO},
+    };
+    let window = HWND(WINDOW.load(Ordering::SeqCst) as *mut _);
+    unsafe {
+        if window.is_invalid() || GetForegroundWindow() != window {
+            return None;
+        }
+        let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        GetGUIThreadInfo(0, &mut info).ok()?;
+        let mut process = 0;
+        GetWindowThreadProcessId(info.hwndFocus, Some(&mut process));
+        (IsChild(window, info.hwndFocus).as_bool() && process != GetCurrentProcessId()).then_some(window)
+    }
+}
+
 pub(super) unsafe fn key(hwnd: HWND, vk: u16, repeat: bool) -> bool {
     let Some((grid, closing, chrome_focus, other)) = with_state(|s| {
         let q = s.quick.as_ref().filter(|_| s.sheet.is_none())?;
