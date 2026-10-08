@@ -16,7 +16,7 @@ Speed: first frame under 100 ms from the key press ([NN/g 0.1 s limit](https://w
 | --- | --- |
 | Space in an Explorer file list or on the desktop, with a file selected | Open Quick view for the selection |
 | Space or Esc in Quick view | Close. Focus returns to Explorer with the same selection. |
-| Left, Right, Up, Down | Next or previous file. With 2 or more files selected, move through the selection only. With 1 file selected, move through supported siblings in Explorer view order, and move Explorer's selection to match. |
+| Left, Right, Up, Down | Next or previous file. With 2 or more files selected, move through the selection only. With 1 item selected, move through every item in Explorer view order, and move Explorer's selection to match. |
 | Enter | Turn Quick view into the full editor, on the same page and zoom |
 | The **Open** button | Open the file in its default app, named on the button ("Open in Microsoft Edge"). When this app is the default, the button says **Open** and acts like Enter. |
 | Right-click | Copy and Open |
@@ -51,7 +51,7 @@ One executable. `preview.exe --resident` starts at sign-in from `HKCU\Software\M
    - `GetGUIThreadInfo` for that thread: `hwndFocus` class is `DirectUIHWND` or `SysListView32`, and `hwndCaret` is null.
 3. On a match, it posts to the UI thread and returns 1 to swallow the key. No COM work in the hook.
 4. The UI thread reads the selection: `IShellWindows`, match `IWebBrowserApp::HWND` to the foreground window, `IServiceProvider::QueryService(SID_STopLevelBrowser)`, `IShellBrowser::QueryActiveShellView`, `IFolderView2::Items(SVGIO_SELECTION)`. The desktop uses `FindWindowSW` with `SWC_DESKTOP`, then the same chain. Peek uses this chain (link above).
-5. If nothing supported is selected, re-send Space with `SendInput`. The hook skips injected keys, so Explorer gets its normal Space.
+5. If no file or folder is selected, re-send Space with `SendInput`. The hook skips injected keys, so Explorer gets its normal Space.
 
 ### Warm state and memory
 

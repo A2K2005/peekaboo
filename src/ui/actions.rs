@@ -663,7 +663,7 @@ fn civil(seconds: i64) -> String {
 }
 
 /// A file time in the PC's time zone.
-fn local_time(time: std::io::Result<std::time::SystemTime>) -> String {
+pub(super) fn local_time(time: std::io::Result<std::time::SystemTime>) -> String {
     use windows::Win32::{Foundation::FILETIME, Storage::FileSystem::FileTimeToLocalFileTime};
     let Some(since) = time.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) else {
         return String::new();
