@@ -436,6 +436,9 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
         MovePageUp | MovePageDown => super::organize::step(hwnd, &request, count, command == MovePageDown),
         InsertImagePage => super::organize::insert_images(hwnd, &request),
         Undo => edit(hwnd, |s, edits| {
+            if s.path.clone().is_some_and(|path| s.marks.undo(&path, edits)) {
+                return;
+            }
             if pdf {
                 let undone = edits.pdf.pop();
                 s.page = page_after_undo(s.page, count, undone.as_ref());
@@ -444,6 +447,9 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             }
         }),
         Revert => edit(hwnd, |s, edits| {
+            if let Some(path) = s.path.clone() {
+                s.marks.forget(&path);
+            }
             edits.pdf.clear();
             edits.image.clear();
             s.page = 0;

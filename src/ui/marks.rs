@@ -43,12 +43,46 @@ pub(super) struct Marks {
     pub(super) style: MarkStyle,
     selected: Option<Selected>,
     drag: Option<Drag>,
+    /// Recipes from before each in-place change (move, resize, restyle,
+    /// delete). Undo pops the last step, which would remove a changed mark
+    /// instead of changing it back, so it restores these first.
+    restore: Vec<Restore>,
+}
+
+struct Restore {
+    path: PathBuf,
+    /// Recipe lengths right after the change; the restore applies only
+    /// while the recipe is back at that point.
+    lengths: (usize, usize),
+    image: Vec<ImageEdit>,
+    pdf: Vec<PdfEdit>,
 }
 
 impl Marks {
     pub(super) fn deselect(&mut self) {
         self.selected = None;
         self.drag = None;
+    }
+
+    /// Undoes the last in-place change to `path`'s recipe, if the recipe is
+    /// at the point right after it. Returns false when Undo should pop a step.
+    pub(super) fn undo(&mut self, path: &Path, edits: &mut super::worker::Edits) -> bool {
+        let lengths = (edits.image.len(), edits.pdf.len());
+        let Some(at) = self.restore.iter().rposition(|r| r.path == path) else {
+            return false;
+        };
+        if self.restore[at].lengths != lengths {
+            return false;
+        }
+        let restore = self.restore.remove(at);
+        edits.image = restore.image;
+        edits.pdf = restore.pdf;
+        self.deselect();
+        true
+    }
+
+    pub(super) fn forget(&mut self, path: &Path) {
+        self.restore.retain(|r| r.path != path);
     }
 }
 
@@ -215,6 +249,7 @@ unsafe fn replace(hwnd: HWND, state: &mut State, mark: Mark) {
         return;
     };
     let edits = state.sessions.entry(selected.path.clone()).or_default();
+    let before = (edits.image.clone(), edits.pdf.clone());
     let Mark { page, kind, points, text, style } = mark.clone();
     if is_pdf(&selected.path) {
         if let Some(edit) = edits.pdf.get_mut(selected.index) {
@@ -224,6 +259,8 @@ unsafe fn replace(hwnd: HWND, state: &mut State, mark: Mark) {
         *edit = ImageEdit::Mark { kind, points, text, style };
     }
     edits.dirty = true;
+    let lengths = (edits.image.len(), edits.pdf.len());
+    state.marks.restore.push(Restore { path: selected.path.clone(), lengths, image: before.0, pdf: before.1 });
     state.edited_for_save(&selected.path, Instant::now());
     state.marks.selected = Some(Selected { mark, ..selected });
     schedule(hwnd, state, 0);
@@ -234,12 +271,15 @@ unsafe fn remove(hwnd: HWND, state: &mut State) {
         return;
     };
     let edits = state.sessions.entry(selected.path.clone()).or_default();
+    let before = (edits.image.clone(), edits.pdf.clone());
     if is_pdf(&selected.path) {
         edits.pdf.remove(selected.index);
     } else {
         edits.image.remove(selected.index);
     }
     edits.dirty = true;
+    let lengths = (edits.image.len(), edits.pdf.len());
+    state.marks.restore.push(Restore { path: selected.path.clone(), lengths, image: before.0, pdf: before.1 });
     state.edited_for_save(&selected.path, Instant::now());
     schedule(hwnd, state, 0);
 }

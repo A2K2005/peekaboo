@@ -133,10 +133,14 @@ fn text(role: Role, label: &str, r: super::widgets::Rect) -> Node {
 pub(super) fn tree(s: &State) -> TreeUpdate {
     let layout = s.layout();
     let mut nodes: Vec<(NodeId, Node)> = Vec::new();
+    // A command can sit in two bars at once (toolbar and markup bar). AccessKit
+    // aborts the process on a node listed twice, so only the first one is exposed.
+    let mut seen = std::collections::HashSet::new();
+    let widgets: Vec<&Widget> = layout.widgets.iter().filter(|w| seen.insert(node_id(w.id))).collect();
     let ids = |pred: &dyn Fn(&Widget) -> bool| -> Vec<NodeId> {
-        layout.widgets.iter().filter(|w| pred(w)).map(|w| node_id(w.id)).collect()
+        widgets.iter().filter(|w| pred(w)).map(|w| node_id(w.id)).collect()
     };
-    for w in &layout.widgets {
+    for w in &widgets {
         if w.role != WidgetRole::Field {
             nodes.push((node_id(w.id), widget_node(w)));
         }
