@@ -240,6 +240,7 @@ pub(super) struct State {
     pub(super) markup_text: String,
     pub(super) signature: Option<super::files::Signature>,
     pub(super) forms: super::forms::Forms,
+    pub(super) marks: super::marks::Marks,
     pub(super) cancel: Option<Arc<AtomicBool>>,
     pub(super) slideshow: Option<Instant>,
     pub(super) tabs: Vec<PathBuf>,
@@ -388,6 +389,7 @@ impl State {
             markup_text: String::new(),
             signature: None,
             forms: Default::default(),
+            marks: Default::default(),
             cancel: None,
             slideshow: None,
             tabs: Vec::new(),
@@ -479,6 +481,9 @@ impl State {
         if self.signature.is_some() {
             return Some(Command::PlaceSignature);
         }
+        if self.crop {
+            return self.tools.select.map(|ellipse| if ellipse { Command::SelectEllipse } else { Command::SelectRectangle });
+        }
         let kind = self.markup?;
         commands::ALL.iter().copied().find(|c| commands::annotation(*c) == Some(kind))
     }
@@ -498,6 +503,8 @@ impl State {
             self.ink.clear();
             self.crop = false;
             self.tools.crop = None;
+            self.tools.select = None;
+            self.marks.deselect();
         }
         if open != self.markup_open {
             self.markup_from = self.markup_progress();
@@ -540,14 +547,14 @@ impl State {
                 .is_some_and(|edits| !edits.image.is_empty() || !edits.pdf.is_empty()),
         }
     }
-    /// The editor bar's second line: the page count of a PDF and whether
-    /// edits are still saving.
+    /// The editor bar's second line: the page count of a PDF, and "Edited"
+    /// once the file has changes, which autosave keeps in the file.
     pub(super) fn title_detail(&self) -> String {
         let page = if self.is_pdf() { self.subtitle() } else { String::new() };
         let save = match self.path.as_ref().and_then(|path| self.saves.get(path)).map(|save| &save.status) {
-            Some(SaveStatus::Edited | SaveStatus::Saving) => "Edited",
             Some(SaveStatus::Conflict) => "Autosave paused",
             Some(SaveStatus::Failed(_)) => "Not saved",
+            _ if self.ctx().can_undo => "Edited",
             _ => "",
         };
         [page.as_str(), save].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ")

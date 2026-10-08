@@ -18,7 +18,7 @@ use super::{
     widgets::{self, Rect},
     worker::{Item, Key, Note, Work, doc_id},
 };
-use crate::model::{AnnotationKind, ImageEdit, OutlineItem, PdfEdit};
+use crate::model::{AnnotationKind, OutlineItem, PdfEdit};
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -751,9 +751,19 @@ pub(super) fn paint(p: &Painter, bitmap: Option<&ID2D1Bitmap>, state: &mut State
             p.line((pair[0][0], pair[0][1]), (pair[1][0], pair[1][1]), Rgba::hex(0x1b1b1b), 2.0 * s);
         }
     } else if let Some((x1, y1, x2, y2)) = state.selection {
-        let r = Rect { x0: x1.min(x2), y0: y1.min(y2), x1: x1.max(x2), y1: y1.max(y2) };
-        p.stroke_round(r, 0.0, theme.accent, 2.0 * s);
+        let page = state.image_rect;
+        match state.markup {
+            Some(kind) if page.width() > 0.0 && page.height() > 0.0 => {
+                let at = |x: f32, y: f32| [(x - page.x0) / page.width(), (y - page.y0) / page.height()];
+                super::marks::shape(p, kind, &[at(x1, y1), at(x2, y2)], page, theme.accent, 2.0 * s);
+            }
+            _ => {
+                let r = Rect { x0: x1.min(x2), y0: y1.min(y2), x1: x1.max(x2), y1: y1.max(y2) };
+                p.stroke_round(r, 0.0, theme.accent, 2.0 * s);
+            }
+        }
     }
+    super::marks::paint(p, state);
     super::imagetools::paint_crop(p, state);
     p.pop_clip();
     drew
@@ -1184,29 +1194,30 @@ unsafe fn finish_markup(hwnd: HWND, state: &mut State) {
         return;
     }
     let normalized = |x: f32, y: f32| [((x - rect.x0) / width).clamp(0.0, 1.0), ((y - rect.y0) / height).clamp(0.0, 1.0)];
-    let first = normalized(x1, y1);
+    let mut first = normalized(x1, y1);
     let mut last = normalized(x2, y2);
+    let click = (x1 - x2).abs() < 4.0 * state.scale && (y1 - y2).abs() < 4.0 * state.scale;
     if matches!(kind, AnnotationKind::Note | AnnotationKind::Text) && (x1 - x2).abs() < 3.0 {
         last = [(first[0] + 0.25).min(1.0), (first[1] + 0.08).min(1.0)];
+    } else if click {
+        // A click places the shape at a default size, a sixth of the page
+        // wide, centered on the click.
+        let half = [0.08, if matches!(kind, AnnotationKind::Line | AnnotationKind::Arrow) { 0.0 } else { 0.08 * width / height }];
+        let center = [first[0].clamp(half[0], 1.0 - half[0]), first[1].clamp(half[1], 1.0 - half[1])];
+        first = [center[0] - half[0], center[1] - half[1]];
+        last = [center[0] + half[0], center[1] + half[1]];
     }
-    let points = if kind == AnnotationKind::Ink {
+    let points: Vec<[f32; 2]> = if kind == AnnotationKind::Ink {
         state.ink.iter().map(|p| normalized(p[0], p[1])).collect()
     } else {
         vec![first, last]
     };
-    let pdf = state.is_pdf();
-    let page = state.page;
-    let text = state.markup_text.clone();
-    let edits = state.sessions.entry(path.clone()).or_default();
-    if pdf {
-        edits.pdf.push(PdfEdit::Annotate { page, kind, points, text });
-    } else {
-        edits.image.push(ImageEdit::Annotate { kind, points, text });
-    }
-    edits.dirty = true;
-    state.edited_for_save(&path, Instant::now());
     state.ink.clear();
-    schedule(hwnd, state, 0);
+    if points.len() < 2 {
+        return;
+    }
+    let (page, text) = (state.page, state.markup_text.clone());
+    super::marks::add(hwnd, state, &path, page, kind, points, text);
 }
 
 unsafe fn finish_crop(hwnd: HWND, state: &mut State) {

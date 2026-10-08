@@ -5,9 +5,9 @@
 //! `track` works like TrackPopupMenu with TPM_RETURNCMD: it runs a nested
 //! message loop and returns the chosen command.
 use super::{
-    commands::{access_key, glyph, MenuItem, Pick},
+    commands::{access_key, glyph, MenuItem, Pick, Preview},
     render::{fonts, measure, Align, Painter},
-    theme::Theme,
+    theme::{Rgba, Theme},
     widgets::{control_height, Rect},
 };
 use accesskit::{Action, ActionHandler, ActionRequest, ActivationHandler, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
@@ -134,7 +134,7 @@ fn measure_items(items: &[MenuItem], scale: f32, text_scale: f32) -> (f32, f32, 
         if let Some(fonts) = &fonts {
             let label = measure(&label_text(&item.label).0, &fonts.body, 10_000.0).0;
             let keys = measure(&item.shortcut, &fonts.body, 10_000.0).0;
-            width = width.max(36.0 * scale + label + 32.0 * scale + keys + 32.0 * scale);
+            width = width.max(36.0 * scale + preview_width(item, scale) + label + 32.0 * scale + keys + 32.0 * scale);
         }
     }
     let width = width.min(480.0 * scale).ceil();
@@ -143,6 +143,46 @@ fn measure_items(items: &[MenuItem], scale: f32, text_scale: f32) -> (f32, f32, 
         r.x1 = width;
     }
     (width, (y + 4.0 * scale).ceil(), rows)
+}
+
+/// Room the item's preview takes before its label.
+fn preview_width(item: &MenuItem, s: f32) -> f32 {
+    match item.preview {
+        Some(Preview::Color(_)) => 24.0 * s,
+        Some(Preview::Width(_) | Preview::Ink(..)) => 72.0 * s,
+        None => 0.0,
+    }
+}
+
+fn draw_preview(painter: &Painter, theme: &Theme, preview: &Preview, r: Rect, s: f32, color: Rgba) {
+    let line = s.max(1.0).floor();
+    match preview {
+        Preview::Color(c) => {
+            let swatch = Rect::new(r.x0, (r.y0 + r.y1) / 2.0 - 8.0 * s, 16.0 * s, 16.0 * s);
+            let [red, green, blue, alpha] = crate::model::rgba(*c);
+            if alpha > 0.0 {
+                painter.fill_round(swatch, 3.0 * s, Rgba(red, green, blue, 1.0));
+            } else {
+                painter.line((swatch.x0, swatch.y1), (swatch.x1, swatch.y0), Rgba::hex(0xE81123), 1.5 * s);
+            }
+            painter.stroke_round(swatch, 3.0 * s, theme.control_border, line);
+        }
+        Preview::Width(width) => {
+            let y = (r.y0 + r.y1) / 2.0;
+            painter.line((r.x0, y), (r.x0 + 56.0 * s, y), color, (width * s).max(1.0));
+        }
+        Preview::Ink(strokes, aspect) => {
+            let (w, h) = (56.0 * s, 20.0 * s);
+            let k = w.min(h / aspect.max(0.01));
+            let origin = (r.x0, (r.y0 + r.y1) / 2.0 - k * aspect / 2.0);
+            let at = |p: &[f32; 3]| (origin.0 + p[0] * k, origin.1 + p[1] * k * aspect);
+            for stroke in strokes {
+                for pair in stroke.windows(2) {
+                    painter.line(at(&pair[0]), at(&pair[1]), color, 1.2 * s);
+                }
+            }
+        }
+    }
 }
 
 /// Keeps a popup inside the monitor work area. Submenus flip to the left of
@@ -410,8 +450,11 @@ fn draw_level(
         if item.checked == Some(true) {
             painter.glyph(glyph::CHECK, Rect { x0: row.x0 + 8.0 * s, y0: row.y0, x1: row.x0 + 32.0 * s, y1: row.y1 }, &fonts.icon, color);
         }
+        if let Some(preview) = &item.preview {
+            draw_preview(painter, theme, preview, Rect { x0: row.x0 + 36.0 * s, ..*row }, s, color);
+        }
         let (text, underline) = label_text(&item.label);
-        let label = Rect { x0: row.x0 + 36.0 * s, y0: row.y0, x1: row.x1 - 28.0 * s, y1: row.y1 };
+        let label = Rect { x0: row.x0 + 36.0 * s + preview_width(item, s), y0: row.y0, x1: row.x1 - 28.0 * s, y1: row.y1 };
         let (_, text_h) = measure(&text, &fonts.body, label.width());
         let label = Rect { y0: row.y0 + (row.height() - text_h) / 2.0, ..label };
         painter.text_underlined(&text, underline, label, &fonts.body, color);

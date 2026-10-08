@@ -26,7 +26,7 @@ use windows::{
     Win32::{
         Foundation::HWND,
         UI::{
-            Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_ESCAPE, VK_RETURN},
+            Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_ESCAPE, VK_RETURN},
             Shell::ShellExecuteW,
             WindowsAndMessaging::SW_SHOWNORMAL,
         },
@@ -34,6 +34,7 @@ use windows::{
 };
 
 pub(super) const CROP_HINT: &str = "Drag over the image to choose the area to keep. Escape cancels.";
+const SELECT_HINT: &str = "Drag to select an area. Ctrl+K crops to it, and Delete clears it. Escape cancels.";
 const ADJUST_HINT: &str = "Drag the edges or corners to adjust. Press Enter to crop or Escape to cancel.";
 /// Typing pauses this long before a size estimate starts.
 const ESTIMATE_DELAY: Duration = Duration::from_millis(300);
@@ -43,6 +44,9 @@ const CANCELED: &str = "Canceled.";
 #[derive(Default)]
 pub(super) struct Tools {
     pub(super) crop: Option<CropBox>,
+    /// The selection tool uses the crop box: Some(true) for an ellipse,
+    /// Some(false) for a rectangle, None for the crop tool.
+    pub(super) select: Option<bool>,
     /// Files from the Explorer Convert or Resize verb; true for Resize.
     pub(super) verb: Option<(bool, Vec<PathBuf>)>,
     estimate: Estimate,
@@ -740,15 +744,80 @@ pub(super) unsafe fn crop_pointer(hwnd: HWND, state: &mut State, e: &PointerEven
                     state.tools.crop = None;
                 }
             }
-            state.status = if state.tools.crop.is_some() { ADJUST_HINT } else { CROP_HINT }.into();
+            state.status = match (state.tools.select, state.tools.crop) {
+                (Some(_), _) => SELECT_HINT,
+                (None, Some(_)) => ADJUST_HINT,
+                (None, None) => CROP_HINT,
+            }
+            .into();
             true
         }
     }
 }
 
-/// Enter crops to the box; Escape leaves crop mode. Returns true when handled.
+/// Turns the rectangular or elliptical selection tool on, or off when it
+/// is already on.
+pub(super) unsafe fn select(hwnd: HWND, ellipse: bool) {
+    with_state(|s| {
+        let on = s.crop && s.tools.select == Some(ellipse);
+        s.markup = None;
+        s.signature = None;
+        s.marks.deselect();
+        s.zoom_select = false;
+        s.tools.crop = None;
+        s.crop = !on;
+        s.tools.select = (!on).then_some(ellipse);
+        if !on {
+            s.set_markup(true);
+        }
+        s.status = if on { "Selection is off." } else { SELECT_HINT }.into();
+    });
+    invalidate(hwnd);
+}
+
+/// True while a selection on the image can be cropped to or cleared.
+pub(super) fn has_selection(state: &State) -> bool {
+    state.crop && state.pdf.is_none() && state.tools.select.is_some() && state.tools.crop.is_some()
+}
+
+/// Crops to the selection, or clears it when `clear`. An elliptical crop
+/// keeps the ellipse and clears the corners.
+pub(super) unsafe fn apply(hwnd: HWND, clear: bool) {
+    let Some((r, ellipse, white)) = with_state(|s| {
+        let r = s.tools.crop?.rect;
+        let ellipse = s.tools.select?;
+        let alpha = matches!(s.path.as_deref().and_then(crate::imaging::format_for), Some(ImageFormat::Png | ImageFormat::WebP | ImageFormat::Tiff));
+        s.crop = false;
+        s.tools.crop = None;
+        s.tools.select = None;
+        s.drag = None;
+        Some((r, ellipse, !alpha))
+    })
+    .flatten() else {
+        return;
+    };
+    let _ = ReleaseCapture();
+    actions::edit(hwnd, |_, edits| {
+        if clear {
+            edits.image.push(ImageEdit::Clear { rect: r, ellipse, outside: false, white });
+            return;
+        }
+        edits.image.push(ImageEdit::Crop { left: r[0], top: r[1], right: r[2], bottom: r[3] });
+        if ellipse {
+            edits.image.push(ImageEdit::Clear { rect: [0.0, 0.0, 1.0, 1.0], ellipse, outside: true, white });
+        }
+    });
+    invalidate(hwnd);
+}
+
+/// Enter crops to the box; Escape leaves crop mode; Delete clears a
+/// selection. Returns true when handled.
 pub(super) unsafe fn crop_key(hwnd: HWND, vk: u16) -> bool {
     let key = VIRTUAL_KEY(vk);
+    if matches!(key, VK_DELETE | VK_BACK) && with_state(|s| has_selection(s)) == Some(true) {
+        apply(hwnd, true);
+        return true;
+    }
     if !matches!(key, VK_RETURN | VK_ESCAPE) {
         return false;
     }
@@ -759,13 +828,18 @@ pub(super) unsafe fn crop_key(hwnd: HWND, vk: u16) -> bool {
         return false;
     }
     if key == VK_RETURN && rect.is_none() {
-        with_state(|s| s.status = CROP_HINT.into());
+        with_state(|s| s.status = if s.tools.select.is_some() { SELECT_HINT } else { CROP_HINT }.into());
         invalidate(hwnd);
+        return true;
+    }
+    if key == VK_RETURN && with_state(|s| s.tools.select.is_some()) == Some(true) {
+        apply(hwnd, false);
         return true;
     }
     with_state(|s| {
         s.crop = false;
         s.tools.crop = None;
+        s.tools.select = None;
         s.drag = None;
         s.status = if key == VK_ESCAPE { "Crop canceled." } else { "Cropping..." }.into();
     });
@@ -779,7 +853,8 @@ pub(super) unsafe fn crop_key(hwnd: HWND, vk: u16) -> bool {
     true
 }
 
-/// Shades the area outside the crop box and draws the box with handles.
+/// Shades the area outside the crop box and draws the box with handles. A
+/// selection is drawn as its outline only.
 pub(super) fn paint_crop(p: &Painter, state: &State) {
     let Some(crop) = state.tools.crop.filter(|_| state.crop && state.pdf.is_none()) else {
         return;
@@ -792,12 +867,18 @@ pub(super) fn paint_crop(p: &Painter, state: &State) {
         x1: image.x0 + r[2] * image.width(),
         y1: image.y0 + r[3] * image.height(),
     };
-    let shade = Rgba(0.0, 0.0, 0.0, 0.5);
-    p.fill(Rect { y1: b.y0, ..image }, shade);
-    p.fill(Rect { y0: b.y1, ..image }, shade);
-    p.fill(Rect { x1: b.x0, y0: b.y0, y1: b.y1, ..image }, shade);
-    p.fill(Rect { x0: b.x1, y0: b.y0, y1: b.y1, ..image }, shade);
-    p.stroke_round(b.inset(-2.0 * s), 0.0, theme.accent, 2.0 * s);
+    match state.tools.select {
+        Some(true) => p.stroke_ellipse(b, theme.accent, 2.0 * s),
+        Some(false) => p.stroke_round(b, 0.0, theme.accent, 2.0 * s),
+        None => {
+            let shade = Rgba(0.0, 0.0, 0.0, 0.5);
+            p.fill(Rect { y1: b.y0, ..image }, shade);
+            p.fill(Rect { y0: b.y1, ..image }, shade);
+            p.fill(Rect { x1: b.x0, y0: b.y0, y1: b.y1, ..image }, shade);
+            p.fill(Rect { x0: b.x1, y0: b.y0, y1: b.y1, ..image }, shade);
+            p.stroke_round(b.inset(-2.0 * s), 0.0, theme.accent, 2.0 * s);
+        }
+    }
     let side = 10.0 * s;
     let (mx, my) = ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0);
     for (x, y) in [(b.x0, b.y0), (mx, b.y0), (b.x1, b.y0), (b.x1, my), (b.x1, b.y1), (mx, b.y1), (b.x0, b.y1), (b.x0, my)] {

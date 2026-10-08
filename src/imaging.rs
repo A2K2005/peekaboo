@@ -1,6 +1,6 @@
 use crate::model::{
-    fit_size, frame_bytes, AnnotationKind, BatchJob, BatchResize, BatchResult, ExportOptions,
-    Frame, ImageEdit, ImageFormat,
+    fit_size, frame_bytes, outline, rgba, AnnotationKind, BatchJob, BatchResize, BatchResult,
+    ExportOptions, Frame, ImageEdit, ImageFormat, MarkFont, MarkStyle, NormRect,
 };
 use std::{
     os::windows::ffi::OsStrExt,
@@ -217,6 +217,7 @@ unsafe fn edited_source(
             ImageEdit::FlipHorizontal => {
                 rotated(factory, &source, WICBitmapTransformFlipHorizontal)?
             }
+            ImageEdit::FlipVertical => rotated(factory, &source, WICBitmapTransformFlipVertical)?,
             ImageEdit::Crop {
                 left,
                 top,
@@ -238,8 +239,20 @@ unsafe fn edited_source(
                 scaler.cast().map_err(err)?
             }
             ImageEdit::Annotate { kind, points, text } => {
-                annotated(factory, &source, kind, &points, &text)?
+                annotated(factory, &source, kind, &points, &text, MarkStyle::default())?
             }
+            ImageEdit::Mark {
+                kind,
+                points,
+                text,
+                style,
+            } => annotated(factory, &source, kind, &points, &text, style)?,
+            ImageEdit::Clear {
+                rect,
+                ellipse,
+                outside,
+                white,
+            } => cleared(factory, &source, rect, ellipse, outside, white)?,
         };
     }
     let full = match full {
@@ -335,10 +348,12 @@ unsafe fn annotated(
     kind: AnnotationKind,
     points: &[[f32; 2]],
     text: &str,
+    style: MarkStyle,
 ) -> Result<IWICBitmapSource, String> {
     use windows::Win32::Graphics::{
         Direct2D::Common::*, Direct2D::*, DirectWrite::*, Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
     };
+    let style = style.visible(kind);
     let (width, height) = size(source)?;
     if width as u64 * height as u64 > 50_000_000 {
         return Err("Resize images above 50 megapixels before marking them up.".into());
@@ -388,7 +403,11 @@ unsafe fn annotated(
             },
         )
         .map_err(err)?;
-    let color = if kind == AnnotationKind::Highlight {
+    let color = |c: u32| {
+        let [r, g, b, a] = rgba(c);
+        D2D1_COLOR_F { r, g, b, a }
+    };
+    let line = if kind == AnnotationKind::Highlight {
         D2D1_COLOR_F {
             r: 1.0,
             g: 0.85,
@@ -396,14 +415,13 @@ unsafe fn annotated(
             a: 0.35,
         }
     } else {
-        D2D1_COLOR_F {
-            r: 0.06,
-            g: 0.25,
-            b: 0.78,
-            a: 1.0,
-        }
+        color(style.stroke)
     };
-    let brush = target.CreateSolidColorBrush(&color, None).map_err(err)?;
+    let brush = target.CreateSolidColorBrush(&line, None).map_err(err)?;
+    // A fill of alpha 0 paints nothing, so shapes always fill.
+    let fill = target
+        .CreateSolidColorBrush(&color(style.fill), None)
+        .map_err(err)?;
     let to_point = |p: [f32; 2]| windows_numerics::Vector2 {
         X: p[0] * width as f32,
         Y: p[1] * height as f32,
@@ -416,7 +434,47 @@ unsafe fn annotated(
         right: a.X.max(b.X),
         bottom: a.Y.max(b.Y),
     };
-    let thickness = (width.max(height) as f32 * 0.003).max(1.0);
+    // A 2 point line is 0.3% of the longer side, and 12 point text 3% of the
+    // width, as if the image were a page about 667 points long.
+    let thickness = (width.max(height) as f32 * 0.0015 * style.width).max(1.0);
+    let ellipse = D2D1_ELLIPSE {
+        point: windows_numerics::Vector2 {
+            X: (rect.left + rect.right) / 2.0,
+            Y: (rect.top + rect.bottom) / 2.0,
+        },
+        radiusX: (rect.right - rect.left) / 2.0,
+        radiusY: (rect.bottom - rect.top) / 2.0,
+    };
+    let lens =if kind == AnnotationKind::Loupe {
+        let picture = target
+            .CreateBitmapFromWicBitmap(
+                &converter,
+                Some(&D2D1_BITMAP_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                }),
+            )
+            .map_err(err)?;
+        let lens = target
+            .CreateBitmapBrush(&picture, None, None)
+            .map_err(err)?;
+        let center = ellipse.point;
+        lens.SetTransform(&windows_numerics::Matrix3x2 {
+            M11: LOUPE_POWER,
+            M12: 0.0,
+            M21: 0.0,
+            M22: LOUPE_POWER,
+            M31: center.X * (1.0 - LOUPE_POWER),
+            M32: center.Y * (1.0 - LOUPE_POWER),
+        });
+        Some(lens)
+    } else {
+        None
+    };
     target.BeginDraw();
     match kind {
         AnnotationKind::Ink => {
@@ -431,20 +489,57 @@ unsafe fn annotated(
             }
         }
         AnnotationKind::Highlight => target.FillRectangle(&rect, &brush),
-        AnnotationKind::Rectangle => target.DrawRectangle(&rect, &brush, thickness, None),
-        AnnotationKind::Ellipse => target.DrawEllipse(
-            &D2D1_ELLIPSE {
-                point: windows_numerics::Vector2 {
-                    X: (rect.left + rect.right) / 2.0,
-                    Y: (rect.top + rect.bottom) / 2.0,
-                },
-                radiusX: (rect.right - rect.left) / 2.0,
-                radiusY: (rect.bottom - rect.top) / 2.0,
-            },
-            &brush,
-            thickness,
-            None,
-        ),
+        AnnotationKind::Rectangle => {
+            target.FillRectangle(&rect, &fill);
+            target.DrawRectangle(&rect, &brush, thickness, None);
+        }
+        AnnotationKind::Ellipse => {
+            target.FillEllipse(&ellipse, &fill);
+            target.DrawEllipse(&ellipse, &brush, thickness, None);
+        }
+        AnnotationKind::Line => target.DrawLine(a, b, &brush, thickness, None),
+        AnnotationKind::RoundedRectangle
+        | AnnotationKind::Bubble
+        | AnnotationKind::Star
+        | AnnotationKind::Polygon => {
+            let shape = outline(kind, points[0], points[points.len() - 1], width as f32 / height as f32)
+                .unwrap_or_default();
+            let geometry = d2d.CreatePathGeometry().map_err(err)?;
+            let sink = geometry.Open().map_err(err)?;
+            sink.BeginFigure(to_point(shape[0]), D2D1_FIGURE_BEGIN_FILLED);
+            let rest: Vec<_> = shape[1..].iter().map(|p| to_point(*p)).collect();
+            sink.AddLines(&rest);
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close().map_err(err)?;
+            target.FillGeometry(&geometry, &fill, None);
+            target.DrawGeometry(&geometry, &brush, thickness, None);
+        }
+        AnnotationKind::Loupe => {
+            let radius = ellipse.radiusX.min(ellipse.radiusY);
+            let circle = D2D1_ELLIPSE {
+                radiusX: radius,
+                radiusY: radius,
+                ..ellipse
+            };
+            if let Some(lens) = &lens {
+                target.FillEllipse(&circle, lens);
+            }
+            target.DrawEllipse(&circle, &brush, thickness, None);
+        }
+        AnnotationKind::Mask => {
+            let dim = target
+                .CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.5 }, None)
+                .map_err(err)?;
+            let (w, h) = (width as f32, height as f32);
+            for band in [
+                D2D_RECT_F { left: 0.0, top: 0.0, right: w, bottom: rect.top },
+                D2D_RECT_F { left: 0.0, top: rect.bottom, right: w, bottom: h },
+                D2D_RECT_F { left: 0.0, top: rect.top, right: rect.left, bottom: rect.bottom },
+                D2D_RECT_F { left: rect.right, top: rect.top, right: w, bottom: rect.bottom },
+            ] {
+                target.FillRectangle(&band, &dim);
+            }
+        }
         AnnotationKind::Underline | AnnotationKind::Strikeout => {
             let y = if kind == AnnotationKind::Underline {
                 rect.bottom
@@ -465,7 +560,7 @@ unsafe fn annotated(
         AnnotationKind::Arrow => {
             target.DrawLine(a, b, &brush, thickness, None);
             let angle = (b.Y - a.Y).atan2(b.X - a.X);
-            let length = (width.max(height) as f32 * 0.025).max(8.0);
+            let length = (width.max(height) as f32 * 0.025).max(8.0).max(thickness * 4.0);
             for offset in [-0.5f32, 0.5] {
                 let tip = windows_numerics::Vector2 {
                     X: b.X - length * (angle + offset).cos(),
@@ -477,14 +572,19 @@ unsafe fn annotated(
         AnnotationKind::Text | AnnotationKind::Note => {
             let dwrite: IDWriteFactory =
                 DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).map_err(err)?;
+            let family = match style.font {
+                MarkFont::Sans => w!("Segoe UI"),
+                MarkFont::Serif => w!("Georgia"),
+                MarkFont::Mono => w!("Consolas"),
+            };
             let format = dwrite
                 .CreateTextFormat(
-                    w!("Segoe UI"),
+                    family,
                     None,
                     DWRITE_FONT_WEIGHT_NORMAL,
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
-                    (width as f32 * 0.03).max(12.0),
+                    (width as f32 * 0.0025 * style.size).max(12.0),
                     w!("en-us"),
                 )
                 .map_err(err)?;
@@ -494,12 +594,18 @@ unsafe fn annotated(
                 right: (a.X + width as f32 * 0.6).min(width as f32),
                 bottom: height as f32,
             };
+            if kind == AnnotationKind::Text && points.len() > 1 {
+                target.FillRectangle(&rect, &fill);
+            }
+            let ink = target
+                .CreateSolidColorBrush(&color(style.text), None)
+                .map_err(err)?;
             let text: Vec<u16> = text.encode_utf16().collect();
             target.DrawText(
                 &text,
                 &format,
                 &bounds,
-                &brush,
+                if kind == AnnotationKind::Text { &ink } else { &brush },
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
@@ -508,6 +614,73 @@ unsafe fn annotated(
     target.EndDraw(None, None).map_err(err)?;
     bitmap.cast().map_err(err)
 }
+
+// Known limit: the power is fixed; no handle changes it yet.
+const LOUPE_POWER: f32 = 2.0;
+
+unsafe fn cleared(
+    factory: &IWICImagingFactory,
+    source: &IWICBitmapSource,
+    rect: NormRect,
+    ellipse: bool,
+    outside: bool,
+    white: bool,
+) -> Result<IWICBitmapSource, String> {
+    if !rect.iter().all(|n| n.is_finite() && (0.0..=1.0).contains(n))
+        || rect[0] >= rect[2]
+        || rect[1] >= rect[3]
+    {
+        return Err("Select an area inside the image.".into());
+    }
+    let (width, height) = size(source)?;
+    if width as u64 * height as u64 > 50_000_000 {
+        return Err("Resize images above 50 megapixels before clearing an area.".into());
+    }
+    let converter = factory.CreateFormatConverter().map_err(err)?;
+    converter
+        .Initialize(
+            source,
+            &GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone,
+            None,
+            0.0,
+            WICBitmapPaletteTypeCustom,
+        )
+        .map_err(err)?;
+    let bitmap = factory
+        .CreateBitmapFromSource(&converter, WICBitmapCacheOnLoad)
+        .map_err(err)?;
+    {
+        let lock = bitmap
+            .Lock(std::ptr::null(), WICBitmapLockWrite.0 as u32)
+            .map_err(err)?;
+        let stride = lock.GetStride().map_err(err)? as usize;
+        let (mut length, mut data) = (0, std::ptr::null_mut());
+        lock.GetDataPointer(&mut length, &mut data).map_err(err)?;
+        let pixels = std::slice::from_raw_parts_mut(data, length as usize);
+        let (w, h) = (width as f32, height as f32);
+        let (l, t, r, b) = (rect[0] * w, rect[1] * h, rect[2] * w, rect[3] * h);
+        let (cx, cy, rx, ry) = ((l + r) / 2.0, (t + b) / 2.0, (r - l) / 2.0, (b - t) / 2.0);
+        let value = if white { [255; 4] } else { [0; 4] };
+        for y in 0..height as usize {
+            let py = y as f32 + 0.5;
+            for x in 0..width as usize {
+                let px = x as f32 + 0.5;
+                let inside = if ellipse {
+                    ((px - cx) / rx).powi(2) + ((py - cy) / ry).powi(2) <= 1.0
+                } else {
+                    px >= l && px < r && py >= t && py < b
+                };
+                if inside != outside {
+                    let i = y * stride + x * 4;
+                    pixels[i..i + 4].copy_from_slice(&value);
+                }
+            }
+        }
+    }
+    bitmap.cast().map_err(err)
+}
+
 fn crop_rect(
     width: u32,
     height: u32,

@@ -1,4 +1,4 @@
-use crate::model::{frame_bytes, AnnotationKind, Frame, NormRect, PdfEdit};
+use crate::model::{frame_bytes, outline, rgba, AnnotationKind, Frame, MarkStyle, NormRect, PdfEdit};
 use std::{
     collections::HashMap,
     ffi::c_void,
@@ -784,6 +784,7 @@ impl PdfEngine {
                         permissions & (1 << 8) != 0 || permissions & (1 << 5) != 0
                     }
                     PdfEdit::Annotate { .. }
+                    | PdfEdit::Mark { .. }
                     | PdfEdit::Sign { .. }
                     | PdfEdit::DeleteAnnotation { .. }
                     | PdfEdit::SetAnnotationText { .. } => permissions & (1 << 5) != 0,
@@ -810,6 +811,7 @@ impl PdfEngine {
                 PdfEdit::RotateRight { page }
                 | PdfEdit::Delete { page }
                 | PdfEdit::Annotate { page, .. }
+                | PdfEdit::Mark { page, .. }
                 | PdfEdit::FillField { page, .. }
                 | PdfEdit::Crop { page, .. }
                 | PdfEdit::Sign { page, .. }
@@ -951,7 +953,17 @@ impl PdfEngine {
                     ..
                 } => {
                     let page = self.api.page(handle, page_index)?;
-                    self.annotate(page.handle, kind, points, text)?;
+                    self.annotate(page.handle, kind, points, text, MarkStyle::default())?;
+                }
+                PdfEdit::Mark {
+                    kind,
+                    ref points,
+                    ref text,
+                    style,
+                    ..
+                } => {
+                    let page = self.api.page(handle, page_index)?;
+                    self.annotate(page.handle, kind, points, text, style)?;
                 }
                 PdfEdit::Sign {
                     rect, ref strokes, ..
@@ -1239,8 +1251,13 @@ impl PdfEngine {
         kind: AnnotationKind,
         input: &[[f32; 2]],
         text: &str,
+        style: MarkStyle,
     ) -> Result<(), String> {
         use AnnotationKind::*;
+        let style = style.visible(kind);
+        if kind == Loupe {
+            return Err("The magnifier works on images only.".into());
+        }
         if input.is_empty()
             || input.len() > 100_000
             || input
@@ -1303,6 +1320,44 @@ impl PdfEngine {
                     (l, r, t, b) = (l.min(p[0]), r.max(p[0]), t.min(p[1]), b.max(p[1]));
                 }
             }
+            let check = |result| {
+                if result != 0 {
+                    Ok(())
+                } else {
+                    Err("Could not create the PDF annotation.".to_string())
+                }
+            };
+            let bound = |points: &[Point], pad: f32| Rect {
+                left: points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min) - pad,
+                right: points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max) + pad,
+                bottom: points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min) - pad,
+                top: points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max) + pad,
+            };
+            // A mask is four black Square annotations around the box at 50%
+            // opacity (/CA), which PDFium's generated appearance applies, as
+            // it does for highlights.
+            if kind == Mask {
+                for [bl, bt, br, bb] in [[0.0, 0.0, 1.0, t], [0.0, b, 1.0, 1.0], [0.0, t, l, b], [r, t, 1.0, b]] {
+                    if br - bl < 1e-4 || bb - bt < 1e-4 {
+                        continue;
+                    }
+                    let band = [convert([bl, bt])?, convert([br, bt])?, convert([bl, bb])?, convert([br, bb])?];
+                    let handle = (self.api.annot_create)(page, 5);
+                    if handle.is_null() {
+                        return Err("This annotation type is unavailable.".into());
+                    }
+                    let annotation = NativeHandle {
+                        handle,
+                        close: self.api.annot_close,
+                    };
+                    check((self.api.annot_rect)(handle, &bound(&band, 0.0)))?;
+                    check((self.api.annot_flags)(handle, 4))?;
+                    check((self.api.annot_color)(handle, 1, 0, 0, 0, 128))?;
+                    check((self.api.annot_border)(handle, 0.0, 0.0, 0.0))?;
+                    self.generate_appearance(page, annotation.handle)?;
+                }
+                return Ok(());
+            }
             let corners = [
                 convert([l, t])?,
                 convert([r, t])?,
@@ -1325,7 +1380,7 @@ impl PdfEngine {
                 if length < 1.0 {
                     return Err("Draw a longer arrow.".into());
                 }
-                let head = 12.0f32.min(length * 0.3);
+                let head = 12.0f32.max(style.width * 4.0).min(length * 0.3);
                 let ux = dx / length;
                 let uy = dy / length;
                 points = vec![
@@ -1342,33 +1397,43 @@ impl PdfEngine {
                     },
                 ];
             }
-            let bounds = if matches!(kind, Ink | Arrow) {
-                &points[..]
+            if kind == Line {
+                points = vec![points[0], points[points.len() - 1]];
+            }
+            // PDFium cannot create Polygon annotations, and PDF has none for
+            // rounded rectangles or bubbles. These save as Ink (star,
+            // polygon) or Square (rounded rectangle, bubble) with their own
+            // appearance stream, as arrows save as Ink (D17).
+            let shape: Vec<Point> = if matches!(kind, RoundedRectangle | Bubble | Star | Polygon) {
+                let display = self.api.display(page)?;
+                outline(kind, first, last, (display.width / display.height) as f32)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(&convert)
+                    .collect::<Result<_, _>>()?
             } else {
-                &corners[..]
+                Vec::new()
             };
-            let pad = if matches!(kind, Ink | Arrow) {
-                2.0
+            let lines = matches!(kind, Ink | Arrow | Line);
+            let (bounds, pad) = if !shape.is_empty() {
+                (&shape[..], style.width / 2.0 + 1.0)
+            } else if lines {
+                (&points[..], (style.width / 2.0 + 1.0).max(2.0))
             } else {
-                0.0
+                (&corners[..], 0.0)
             };
-            let rect = Rect {
-                left: bounds.iter().map(|p| p.x).fold(f32::INFINITY, f32::min) - pad,
-                right: bounds.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max) + pad,
-                bottom: bounds.iter().map(|p| p.y).fold(f32::INFINITY, f32::min) - pad,
-                top: bounds.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max) + pad,
-            };
+            let rect = bound(bounds, pad);
             if rect.right - rect.left < 0.2 || rect.top - rect.bottom < 0.2 {
                 return Err("Draw a larger annotation.".into());
             }
             let subtype = match kind {
-                Ink | Arrow => 15,
+                Ink | Arrow | Line | Star | Polygon => 15,
                 Highlight => 9,
                 Underline => 10,
                 Strikeout => 12,
                 Note => 1,
-                Rectangle => 5,
-                Ellipse => 6,
+                Rectangle | RoundedRectangle | Bubble | Mask => 5,
+                Ellipse | Loupe => 6,
                 Text => 3,
             };
             let handle = (self.api.annot_create)(page, subtype);
@@ -1379,31 +1444,36 @@ impl PdfEngine {
                 handle,
                 close: self.api.annot_close,
             };
-            let check = |result| {
-                if result != 0 {
-                    Ok(())
-                } else {
-                    Err("Could not create the PDF annotation.".to_string())
-                }
-            };
             check((self.api.annot_rect)(handle, &rect))?;
             check((self.api.annot_flags)(handle, 4))?;
-            let (red, green, blue, alpha) = if kind == Highlight {
-                (255, 220, 0, 96)
-            } else {
-                (20, 70, 180, 255)
+            let stroked = style.stroke & 0xFF != 0;
+            let filled = style.fill & 0xFF != 0;
+            let color = |c: u32| c.to_be_bytes().map(u32::from);
+            let ([red, green, blue, _], [fr, fg, fb, _]) = (color(style.stroke), color(style.fill));
+            // For free text, /C is the box fill, so it stays unset without a
+            // fill and the text from /DA stays readable on the page.
+            if kind == Highlight {
+                check((self.api.annot_color)(handle, 0, 255, 220, 0, 96))?;
+            } else if kind == Text {
+                if filled {
+                    check((self.api.annot_color)(handle, 0, fr, fg, fb, 255))?;
+                }
+            } else if stroked {
+                check((self.api.annot_color)(handle, 0, red, green, blue, 255))?;
+            }
+            if filled && matches!(kind, Rectangle | Ellipse) {
+                check((self.api.annot_color)(handle, 1, fr, fg, fb, 255))?;
+            }
+            if lines || !shape.is_empty() || matches!(kind, Rectangle | Ellipse) {
+                let width = if stroked { style.width } else { 0.0 };
+                check((self.api.annot_border)(handle, 0.0, 0.0, width))?;
+            }
+            let stroke: Vec<Point> = match kind {
+                Star | Polygon => shape.iter().chain(shape.first()).copied().collect(),
+                _ if lines => points.clone(),
+                _ => Vec::new(),
             };
-            // For free text, /C is the box fill. Leave it unset so the blue
-            // text from /DA stays readable on the page.
-            if kind != Text {
-                check((self.api.annot_color)(handle, 0, red, green, blue, alpha))?;
-            }
-            if matches!(kind, Ink | Arrow | Rectangle | Ellipse) {
-                check((self.api.annot_border)(handle, 0.0, 0.0, 2.0))?;
-            }
-            if matches!(kind, Ink | Arrow)
-                && (self.api.annot_ink)(handle, points.as_ptr(), points.len()) < 0
-            {
+            if !stroke.is_empty() && (self.api.annot_ink)(handle, stroke.as_ptr(), stroke.len()) < 0 {
                 return Err("Cannot save the drawn stroke.".into());
             }
             if text_markup {
@@ -1424,12 +1494,35 @@ impl PdfEngine {
                 content.as_ptr(),
             ))?;
             if kind == Text {
-                let appearance = wide("/Helv 12 Tf 0.08 0.27 0.7 rg");
+                let [r, g, b, _] = rgba(style.text);
+                let size = style.size.clamp(4.0, 144.0);
+                let appearance = wide(&format!("/Helv {size:.1} Tf {r:.3} {g:.3} {b:.3} rg"));
                 check((self.api.annot_string)(
                     handle,
                     b"DA\0".as_ptr(),
                     appearance.as_ptr(),
                 ))?;
+            }
+            if !shape.is_empty() {
+                let [sr, sg, sb, _] = rgba(style.stroke);
+                let [fr, fg, fb, _] = rgba(style.fill);
+                let mut stream = format!(
+                    "q 1 j {:.2} w {sr:.3} {sg:.3} {sb:.3} RG {fr:.3} {fg:.3} {fb:.3} rg ",
+                    style.width
+                );
+                for (index, p) in shape.iter().enumerate() {
+                    let op = if index == 0 { "m" } else { "l" };
+                    stream.push_str(&format!("{:.2} {:.2} {op} ", p.x, p.y));
+                }
+                stream.push_str(match (stroked, filled) {
+                    (true, true) => "h B Q",
+                    (true, false) => "h S Q",
+                    _ => "h f Q",
+                });
+                let appearance = wide(&stream);
+                if (self.api.annot_set_ap)(handle, 0, appearance.as_ptr()) != 0 {
+                    return Ok(());
+                }
             }
             self.generate_appearance(page, annotation.handle)
         }

@@ -24,6 +24,7 @@ pub(super) enum Command {
     FindPrevious,
     Rotate,
     Flip,
+    FlipVertical,
     Crop,
     Resize,
     RemoveBackground,
@@ -74,6 +75,21 @@ pub(super) enum Command {
     Rectangle,
     Ellipse,
     Arrow,
+    Line,
+    RoundedRectangle,
+    SpeechBubble,
+    Star,
+    Polygon,
+    Magnifier,
+    DimOutside,
+    /// Image selections. Crop keeps the selected area; Delete clears it.
+    SelectRectangle,
+    SelectEllipse,
+    /// Markup bar menus that set the look of the selected mark and the next ones.
+    LineWidthMenu,
+    BorderColorMenu,
+    FillColorMenu,
+    TextStyleMenu,
     SaveSignature,
     PlaceSignature,
     FillForm,
@@ -144,6 +160,10 @@ pub(super) mod glyph {
     pub(in crate::ui) const CANCEL: u16 = 0xE711;
     pub(in crate::ui) const FULL_SCREEN: u16 = 0xE740;
     pub(in crate::ui) const VIEW_ALL: u16 = 0xE8A9;
+    pub(in crate::ui) const SELECT_RECTANGLE: u16 = 0xF407;
+    pub(in crate::ui) const LINES: u16 = 0xE700;
+    pub(in crate::ui) const FILLED_SQUARE: u16 = 0xE73B;
+    pub(in crate::ui) const FONT: u16 = 0xE8D2;
     #[cfg(test)]
     pub(in crate::ui) const ALL: &[u16] = &[
         OPEN_PANE, ZOOM_IN, ZOOM_OUT, INFO, PAGE, LIST, GRID, CHARACTERS, SELECT_ALL, EDIT, ROTATE, SHARE, SEARCH, MORE,
@@ -177,6 +197,7 @@ pub(super) fn info(command: Command) -> Info {
         FindPrevious => i("Previous search result", "Find pre&vious", None, None),
         Rotate => i("Rotate right", "Rotate righ&t", Some(ROTATE), Some('R')),
         Flip => i("Flip horizontally", "F&lip horizontally", Some(FLIP), Some('L')),
+        FlipVertical => i("Flip vertically", "Flip verticall&y", None, None),
         Crop => i("Crop", "Cr&op", Some(CROP), Some('C')),
         Resize => i("Resize", "Re&size...", Some(RESIZE), Some('Z')),
         RemoveBackground => i("Remove background", "Remove &background...", Some(SELECT_ALL), Some('B')),
@@ -224,7 +245,20 @@ pub(super) fn info(command: Command) -> Info {
         Rectangle => i("Rectangle", "&Rectangle", Some(SQUARE), Some('P')),
         Ellipse => i("Ellipse", "&Ellipse", Some(CIRCLE), Some('E')),
         Arrow => i("Arrow", "&Arrow", Some(ARROW), Some('A')),
-        SaveSignature => i("Draw a new signature", "Draw a ne&w signature", Some(ADD), Some('V')),
+        Line => i("Line", "&Line", None, None),
+        RoundedRectangle => i("Rounded rectangle", "R&ounded rectangle", None, None),
+        SpeechBubble => i("Speech bubble", "Speech &bubble", None, None),
+        Star => i("Star", "S&tar", None, None),
+        Polygon => i("Polygon", "&Polygon", None, None),
+        Magnifier => i("Magnifier", "Ma&gnifier", None, None),
+        DimOutside => i("Dim outside", "&Dim outside", None, None),
+        SelectRectangle => i("Rectangular selection", "&Rectangular selection", Some(SELECT_RECTANGLE), Some('S')),
+        SelectEllipse => i("Elliptical selection", "&Elliptical selection", Some(CIRCLE), Some('E')),
+        LineWidthMenu => i("Line width", "&Line width", Some(LINES), Some('W')),
+        BorderColorMenu => i("Border color", "&Border color", Some(SQUARE), Some('K')),
+        FillColorMenu => i("Fill color", "F&ill color", Some(FILLED_SQUARE), Some('I')),
+        TextStyleMenu => i("Text style", "Text st&yle", Some(FONT), Some('A')),
+        SaveSignature => i("Create signature", "&Create signature", Some(ADD), Some('V')),
         PlaceSignature => i("Sign", "&Sign", Some(SIGNATURE), Some('G')),
         FillForm => i("Fill form", "Fill f&orm", Some(DOCUMENT), Some('F')),
         AppMenu => i("More", "More", Some(MORE), Some('O')),
@@ -241,19 +275,19 @@ pub(super) const TOOLBAR_DROP: &[Command] = &[Share, Highlight, Rotate, FileInfo
 /// Markup bar tools in Preview's order. Commands for the other document
 /// type are left out (`for_type`).
 pub(super) const MARKUP_TOOLS: &[Command] = &[
-    SelectText, RemoveBackground, Draw, ShapesMenu, TextBox, HighlightMenu, SignMenu, Note, Resize, Flip, Rotate, Crop,
-    FillForm,
+    SelectText, SelectRectangle, SelectEllipse, RemoveBackground, Draw, ShapesMenu, TextBox, HighlightMenu, SignMenu, Note,
+    Resize, Flip, Rotate, Crop, FillForm, LineWidthMenu, BorderColorMenu, FillColorMenu, TextStyleMenu,
 ];
 
 /// Buttons that start a new group get a wider gap before them.
 pub(super) fn starts_group(command: Command) -> bool {
-    matches!(command, ZoomOut | Share | Highlight | Find | AppMenu | Draw | Note | Resize)
+    matches!(command, ZoomOut | Share | Highlight | Find | AppMenu | Draw | Note | Resize | LineWidthMenu)
 }
 
 /// The tools a menu button holds.
 pub(super) fn tool_group(command: Command) -> &'static [Command] {
     match command {
-        ShapesMenu => &[Rectangle, Ellipse, Arrow],
+        ShapesMenu => &[Line, Arrow, Rectangle, RoundedRectangle, Ellipse, SpeechBubble, Star, Polygon, DimOutside, Magnifier],
         HighlightMenu => &[Highlight, Underline, Strikethrough],
         SignMenu => &[PlaceSignature, SaveSignature],
         _ => &[],
@@ -263,10 +297,15 @@ pub(super) fn tool_group(command: Command) -> &'static [Command] {
 /// False for commands that never apply to this document type.
 pub(super) fn for_type(command: Command, pdf: bool) -> bool {
     match command {
-        Flip | Resize | RemoveBackground => !pdf,
+        Flip | Resize | RemoveBackground | SelectRectangle | SelectEllipse => !pdf,
         FillForm => pdf,
         _ => true,
     }
+}
+
+/// Menu buttons that set the look of marks (`marks::style_menu`).
+pub(super) fn style_menu(command: Command) -> bool {
+    matches!(command, LineWidthMenu | BorderColorMenu | FillColorMenu | TextStyleMenu)
 }
 
 pub(super) fn annotation(command: Command) -> Option<crate::model::AnnotationKind> {
@@ -281,6 +320,13 @@ pub(super) fn annotation(command: Command) -> Option<crate::model::AnnotationKin
         Rectangle => K::Rectangle,
         Ellipse => K::Ellipse,
         Arrow => K::Arrow,
+        Line => K::Line,
+        RoundedRectangle => K::RoundedRectangle,
+        SpeechBubble => K::Bubble,
+        Star => K::Star,
+        Polygon => K::Polygon,
+        Magnifier => K::Loupe,
+        DimOutside => K::Mask,
         _ => return None,
     })
 }
@@ -454,7 +500,7 @@ pub(super) fn enabled(command: Command, x: &Ctx) -> bool {
         Tab(_) | CloseTab => x.tabs > 0,
         Undo | Revert => x.has_frame && !x.pending && x.can_undo,
         _ if !ready => false,
-        Flip | Resize | RemoveBackground | BatchFolder => !x.pdf,
+        Flip | FlipVertical | Resize | RemoveBackground | BatchFolder | SelectRectangle | SelectEllipse | Magnifier => !x.pdf,
         ExtractPage | Combine | DeletePage | FillForm | MovePage | InsertPage | InsertImagePage | ViewContinuous | ViewSingle | ViewTwoPages => x.pdf,
         MovePageUp => x.pdf && x.can_previous,
         MovePageDown => x.pdf && x.can_next,
@@ -477,7 +523,7 @@ pub(super) fn checked(command: Command, x: &Ctx) -> Option<bool> {
         ToggleMarkup => Some(x.markup_open),
         SelectText => Some(x.tool.is_none() && !x.crop),
         ShapesMenu | HighlightMenu | SignMenu => Some(x.tool.is_some_and(|tool| tool_group(command).contains(&tool))),
-        Crop => Some(x.crop),
+        Crop => Some(x.crop && x.tool.is_none()),
         ZoomToSelection => Some(x.zoom_select),
         Fit => Some(x.zoom == Zoom::Fit),
         FitWidth => Some(x.zoom == Zoom::FitWidth),
@@ -485,7 +531,7 @@ pub(super) fn checked(command: Command, x: &Ctx) -> Option<bool> {
         ViewContinuous => Some(x.view == ViewMode::Continuous),
         ViewSingle => Some(x.view == ViewMode::Single),
         ViewTwoPages => Some(x.view == ViewMode::TwoPages),
-        c if annotation(c).is_some() || c == PlaceSignature => Some(x.tool == Some(c)),
+        c if annotation(c).is_some() || matches!(c, PlaceSignature | SelectRectangle | SelectEllipse) => Some(x.tool == Some(c)),
         _ => None,
     }
 }
@@ -505,11 +551,31 @@ pub(super) struct MenuItem {
     pub(super) enabled: bool,
     pub(super) checked: Option<bool>,
     pub(super) children: Vec<MenuItem>,
+    pub(super) preview: Option<Preview>,
+}
+
+/// A picture before a menu item's label.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Preview {
+    /// A swatch of a `0xRRGGBBAA` color; alpha 0 shows "none".
+    Color(u32),
+    /// A line this many points wide.
+    Width(f32),
+    /// A saved signature: strokes in 0..1 of its box, and the box height over its width.
+    Ink(Vec<Vec<[f32; 3]>>, f32),
 }
 
 impl MenuItem {
     pub(super) fn separator() -> Self {
-        Self { label: String::new(), shortcut: String::new(), pick: None, enabled: false, checked: None, children: Vec::new() }
+        Self {
+            label: String::new(),
+            shortcut: String::new(),
+            pick: None,
+            enabled: false,
+            checked: None,
+            children: Vec::new(),
+            preview: None,
+        }
     }
     pub(super) fn is_separator(&self) -> bool {
         self.pick.is_none() && self.children.is_empty()
@@ -523,6 +589,7 @@ impl MenuItem {
             enabled: true,
             checked: None,
             children: Vec::new(),
+            preview: None,
         }
     }
     fn for_command(command: Command, x: &Ctx) -> Self {
@@ -533,10 +600,11 @@ impl MenuItem {
             enabled: enabled(command, x),
             checked: checked(command, x),
             children: Vec::new(),
+            preview: None,
         }
     }
-    fn submenu(label: &str, children: Vec<MenuItem>) -> Self {
-        Self { label: label.into(), shortcut: String::new(), pick: None, enabled: true, checked: None, children }
+    pub(super) fn submenu(label: &str, children: Vec<MenuItem>) -> Self {
+        Self { label: label.into(), shortcut: String::new(), pick: None, enabled: true, checked: None, children, preview: None }
     }
 }
 
@@ -569,7 +637,7 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
         items(
             &[
                 Some(Undo), Some(Revert), None, Some(CopyText), Some(Find), Some(FindNext), Some(FindPrevious), None, Some(Rotate), Some(Flip),
-                Some(Crop), Some(Resize), Some(RemoveBackground), None, Some(DeletePage), Some(MovePage),
+                Some(FlipVertical), Some(Crop), Some(Resize), Some(RemoveBackground), None, Some(DeletePage), Some(MovePage),
                 Some(MovePageUp), Some(MovePageDown), Some(InsertPage), Some(InsertImagePage),
             ],
             x,
@@ -585,17 +653,17 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
     view.push(MenuItem::submenu("Si&debar", items(&[Some(SidebarHide), None, Some(SidebarThumbnails), Some(SidebarContents), Some(SidebarNotes), Some(SidebarSheet)], x)));
     view.extend(items(&[Some(ToggleMarkup), Some(FullScreen), Some(Slideshow), None, Some(NextTab), Some(PreviousTab)], x));
     menu.push(MenuItem::submenu("&View", view));
-    menu.push(MenuItem::submenu(
-        "Mar&kup",
-        items(
-            &[
-                Some(SelectText), None, Some(Draw), Some(Highlight), Some(Underline), Some(Strikethrough), Some(Note), Some(TextBox),
-                Some(Rectangle), Some(Ellipse), Some(Arrow), None, Some(SaveSignature), Some(PlaceSignature),
-                Some(FillForm),
-            ],
-            x,
-        ),
+    let mut markup = items(&[Some(SelectText), Some(SelectRectangle), Some(SelectEllipse), None, Some(Draw)], x);
+    markup.push(MenuItem::submenu("Sha&pes", tool_menu(ShapesMenu, x)));
+    markup.extend(items(
+        &[
+            Some(Highlight), Some(Underline), Some(Strikethrough), Some(Note), Some(TextBox), None, Some(LineWidthMenu),
+            Some(BorderColorMenu), Some(FillColorMenu), Some(TextStyleMenu), None, Some(SaveSignature), Some(PlaceSignature),
+            Some(FillForm),
+        ],
+        x,
     ));
+    menu.push(MenuItem::submenu("Mar&kup", markup));
     menu
 }
 
@@ -603,7 +671,7 @@ pub(super) fn app_menu(x: &Ctx, overflow: &[Command]) -> Vec<MenuItem> {
 pub(super) fn document_menu(x: &Ctx) -> Vec<MenuItem> {
     let list = [
         Some(CopyText), Some(Find), Some(FindNext), Some(FindPrevious), None, Some(Highlight), Some(Note), Some(TextBox), Some(PlaceSignature),
-        Some(FillForm), None, Some(Rotate), Some(Crop), Some(Flip), Some(Resize), Some(RemoveBackground), None,
+        Some(FillForm), None, Some(Rotate), Some(Crop), Some(Flip), Some(FlipVertical), Some(Resize), Some(RemoveBackground), None,
         Some(DeletePage), Some(InsertPage), Some(MovePage), None, Some(ZoomIn), Some(ZoomOut), Some(Fit),
         Some(ZoomToSelection), None,
         Some(SaveCopy), Some(Print), Some(FileInfo),
@@ -627,6 +695,24 @@ pub(super) fn document_menu(x: &Ctx) -> Vec<MenuItem> {
 /// A markup bar menu button's tools.
 pub(super) fn tool_menu(command: Command, x: &Ctx) -> Vec<MenuItem> {
     items(&tool_group(command).iter().copied().map(Some).collect::<Vec<_>>(), x)
+}
+
+/// The Sign button's menu: each saved signature, then Create signature.
+pub(super) fn sign_menu(x: &Ctx, saved: &[super::files::Signature]) -> Vec<MenuItem> {
+    let mut menu: Vec<MenuItem> = saved
+        .iter()
+        .enumerate()
+        .map(|(index, s)| MenuItem {
+            preview: Some(Preview::Ink(s.strokes.clone(), s.aspect)),
+            enabled: enabled(PlaceSignature, x),
+            ..MenuItem::choice(&format!("Signature {}", index + 1), index)
+        })
+        .collect();
+    if !menu.is_empty() {
+        menu.push(MenuItem::separator());
+    }
+    menu.extend(items(&[Some(SaveSignature)], x));
+    menu
 }
 
 /// Right-click on a page thumbnail.
@@ -672,7 +758,9 @@ pub(super) const ALL: &[Command] = &[
     ViewTwoPages, Slideshow, ToggleSidebar, SidebarHide, SidebarThumbnails, SidebarContents, SidebarNotes, SidebarSheet,
     FullScreen, ToggleMarkup, NextTab, PreviousTab, Tab(0), NextPane, PreviousPane, SelectText, ShapesMenu, HighlightMenu,
     SignMenu, Draw, Highlight, Underline, Strikethrough, Note, TextBox, Rectangle, Ellipse, Arrow, SaveSignature,
-    PlaceSignature, FillForm, AppMenu, MoreTools, OpenInEditor, IndexSheet,
+    PlaceSignature, FillForm, AppMenu, MoreTools, OpenInEditor, IndexSheet, FlipVertical, Line, RoundedRectangle,
+    SpeechBubble, Star, Polygon, Magnifier, DimOutside, SelectRectangle, SelectEllipse, LineWidthMenu, BorderColorMenu,
+    FillColorMenu, TextStyleMenu,
 ];
 
 #[cfg(test)]

@@ -158,7 +158,15 @@ pub(super) unsafe fn execute(hwnd: HWND, command: Command, keyboard: bool) {
             invalidate(hwnd);
             return;
         }
-        AppMenu | MoreTools | ShapesMenu | HighlightMenu | SignMenu => {
+        SignMenu => {
+            super::forms::sign_menu(hwnd, keyboard);
+            return;
+        }
+        _ if commands::style_menu(command) => {
+            super::marks::style_menu(hwnd, command, keyboard);
+            return;
+        }
+        AppMenu | MoreTools | ShapesMenu | HighlightMenu => {
             let overflow = with_state(|s| {
                 let layout = s.layout();
                 (layout.toolbar_overflow, layout.markup_overflow)
@@ -266,15 +274,16 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
         SaveCopy if !pdf => super::imagetools::export(hwnd, request, width, height),
         SaveSignature => super::forms::new_signature(hwnd),
         FillForm => super::forms::start_form(hwnd),
-        PlaceSignature | Draw | Highlight | Underline | Strikethrough | Note | TextBox | Rectangle | Ellipse | Arrow => {
-            choose_tool(hwnd, command)
-        }
+        PlaceSignature | Draw | Highlight | Underline | Strikethrough | Note | TextBox | Rectangle | Ellipse | Arrow | Line
+        | RoundedRectangle | SpeechBubble | Star | Polygon | Magnifier | DimOutside => choose_tool(hwnd, command),
+        SelectRectangle | SelectEllipse => super::imagetools::select(hwnd, command == SelectEllipse),
         SelectText => {
             with_state(|s| {
                 s.markup = None;
                 s.signature = None;
                 s.crop = false;
                 s.tools.crop = None;
+                s.tools.select = None;
                 s.zoom_select = false;
             });
             invalidate(hwnd);
@@ -389,12 +398,16 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             });
             invalidate(hwnd);
         }
+        Crop if with_state(|s| super::imagetools::has_selection(s)) == Some(true) => super::imagetools::apply(hwnd, false),
         Crop => {
             with_state(|s| {
+                // Crop with the selection tool on but nothing selected switches to the crop tool.
+                let selecting = s.tools.select.take().is_some() && s.crop;
                 s.markup = None;
                 s.signature = None;
+                s.marks.deselect();
                 s.zoom_select = false;
-                s.crop = !s.crop;
+                s.crop = selecting || !s.crop;
                 s.tools.crop = None;
                 s.status = if !s.crop {
                     "Crop is off.".into()
@@ -414,6 +427,7 @@ unsafe fn document_command(hwnd: HWND, command: Command) {
             }
         }),
         Flip => edit(hwnd, |_, edits| edits.image.push(ImageEdit::FlipHorizontal)),
+        FlipVertical => edit(hwnd, |_, edits| edits.image.push(ImageEdit::FlipVertical)),
         InsertPage => edit(hwnd, |s, edits| {
             let at = s.page + 1;
             edits.pdf.push(PdfEdit::InsertBlank { at });
