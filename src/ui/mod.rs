@@ -32,6 +32,9 @@
 //! | empty | Empty window: New from clipboard and recent files |
 //! | pan | Space+drag panning |
 //! | quickview | Quick view: peek window, hover strip, index sheet, handoff to the editor |
+//! | textview | Quick view of text files |
+//! | handler | Quick view through system preview handlers |
+//! | infocard | Quick view's info card for folders and files with no preview |
 mod a11y;
 mod actions;
 mod app;
@@ -45,8 +48,10 @@ mod empty;
 mod files;
 mod findbar;
 mod forms;
+mod handler;
 mod imagetools;
 mod infobar;
+mod infocard;
 mod marks;
 mod menu;
 mod organize;
@@ -57,6 +62,7 @@ mod render;
 mod sheet;
 mod sidebar;
 mod text;
+mod textview;
 mod theme;
 mod view;
 mod widgets;

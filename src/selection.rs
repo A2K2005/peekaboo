@@ -2,7 +2,7 @@
 //! shell's own view objects. PowerToys Peek reads the selection the same way:
 //! https://github.com/microsoft/PowerToys/blob/main/src/modules/peek/Peek.UI/Helpers/FileExplorerHelper.cs
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use windows::core::Interface;
 use windows::Win32::{
     Foundation::HWND,
@@ -20,11 +20,11 @@ use windows::Win32::{
     },
 };
 
-/// Returns the file to show and the files to step through, in view order.
-/// With 2 or more supported files selected, those are the files to step
-/// through; with 1, every supported file in the view. Returns None when no
-/// supported file is selected or the shell does not answer, for example an
-/// elevated Explorer. Call on a COM apartment thread.
+/// Returns the item to show and the items to step through, in view order.
+/// With 2 or more items selected, those are the items to step through; with
+/// 1, every item in the view. Returns None when no file system item is
+/// selected or the shell does not answer, for example an elevated
+/// Explorer. Call on a COM apartment thread.
 pub unsafe fn read(window: HWND, desktop: bool) -> Option<(PathBuf, Vec<PathBuf>)> {
     let windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL).ok()?;
     let browser = if desktop { desktop_browser(&windows)? } else { explorer_browser(&windows, window)? };
@@ -70,7 +70,7 @@ unsafe fn top_browser(object: &IDispatch) -> Option<IShellBrowser> {
     object.cast::<IServiceProvider>().ok()?.QueryService(&SID_STopLevelBrowser).ok()
 }
 
-/// Supported files only: folders, virtual items, and other types are skipped.
+/// Files and folders; virtual items such as This PC have no path and are skipped.
 unsafe fn paths(view: &IFolderView2, which: _SVGIO) -> Vec<PathBuf> {
     let Ok(items) = view.Items::<IShellItemArray>(_SVGIO(which.0 | SVGIO_FLAG_VIEWORDER.0)) else {
         return Vec::new();
@@ -80,14 +80,9 @@ unsafe fn paths(view: &IFolderView2, which: _SVGIO) -> Vec<PathBuf> {
             let name = items.GetItemAt(index).ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
             let path = PathBuf::from(name.to_hstring().to_os_string());
             CoTaskMemFree(Some(name.0 as _));
-            supported(&path).then_some(path)
+            Some(path)
         })
         .collect()
-}
-
-fn supported(path: &Path) -> bool {
-    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-    crate::integration::FILE_TYPES.iter().any(|(known, ..)| known[1..].eq_ignore_ascii_case(extension))
 }
 
 fn int_variant(value: i32) -> VARIANT {

@@ -2,16 +2,20 @@
 //! content under a header that stays above it, a page rail for multi-page
 //! PDFs, arrow keys through the selection or the folder, an index sheet,
 //! and Open, which hands the file to its default app or turns the same
-//! window into the editor with the page and zoom kept. Docs:
-//! docs/quicklook-spec.md sections 1, 5, and 7.
+//! window into the editor with the page and zoom kept. Files the editor does
+//! not open show as text, through their system preview handler, or as an
+//! info card. Docs: docs/quicklook-spec.md sections 1, 5, and 7.
 use super::{
     a11y, actions,
     app::{add_tabs, display_path, file_name, invalidate, open, with_state, State, EMPTY_STATUS},
     commands::{self, glyph, Chord, Command, MenuItem, Pick},
     document,
+    handler::{self, Host},
+    infocard::{self, Card},
     paint::{icon_button, text_button, Look},
     render::{fonts, measure, Align},
     sheet,
+    textview::{self, TextView},
     theme::{Mode, Rgba, Theme},
     view::{self, ViewMode, Zoom},
     widgets::{self, plain_widget, Layout, Rect, Region, Role, Widget, WidgetId},
@@ -31,7 +35,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::{
-    core::{w, BOOL, HSTRING},
+    core::{w, BOOL, GUID, HSTRING},
     Win32::{
         Foundation::{COLORREF, HWND, LPARAM, POINT, RECT, SIZE, WPARAM},
         Graphics::{
@@ -151,6 +155,8 @@ pub(super) struct Quick {
     thumbs: Vec<Option<Frame>>,
     bitmaps: Vec<Option<ID2D1Bitmap>>,
     thumbs_rx: Option<mpsc::Receiver<(usize, Option<Frame>)>>,
+    /// The current file when the editor does not open its type.
+    other: Option<Other>,
 }
 
 /// The window moving between two window rectangles, in screen pixels.
@@ -188,6 +194,7 @@ impl Quick {
             thumbs: vec![None; count],
             bitmaps: vec![None; count],
             thumbs_rx: None,
+            other: None,
         }
     }
     fn closing(&self) -> bool {
@@ -196,7 +203,127 @@ impl Quick {
     /// Bitmaps belong to one render target; a new target uploads again.
     pub(super) fn forget_bitmaps(&mut self) {
         self.bitmaps.iter_mut().for_each(|b| *b = None);
+        if let Some(other) = &mut self.other {
+            other.icon = None;
+        }
     }
+}
+
+/// A file or folder the editor does not open: text, a system preview
+/// handler, or the info card. It loads off the window thread.
+pub(super) struct Other {
+    path: PathBuf,
+    rx: mpsc::Receiver<Loaded>,
+    text: Option<TextView>,
+    host: Option<Host>,
+    card: Option<Card>,
+    icon: Option<ID2D1Bitmap>,
+}
+
+enum Loaded {
+    Text(String),
+    Handler(GUID, Card),
+    /// The card, then again with its icon.
+    Card(Card),
+}
+
+impl Other {
+    fn new(hwnd: HWND, path: PathBuf, icon_side: i32) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let (window, item) = (hwnd.0 as isize, path.clone());
+        std::thread::spawn(move || unsafe {
+            let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+            let wake = || {
+                let _ = PostMessageW(Some(HWND(window as *mut _)), WM_APP_WAKE, WPARAM(0), LPARAM(0));
+            };
+            let first = classify(&item);
+            let card = match &first {
+                Loaded::Handler(_, card) | Loaded::Card(card) => Some(card.clone()),
+                Loaded::Text(_) => None,
+            };
+            if tx.send(first).is_ok() {
+                wake();
+                if let Some(mut card) = card {
+                    card.icon = shell_thumbnail(&item, icon_side);
+                    if tx.send(Loaded::Card(card)).is_ok() {
+                        wake();
+                    }
+                }
+            }
+            if com {
+                CoUninitialize();
+            }
+        });
+        Self { path, rx, text: None, host: None, card: None, icon: None }
+    }
+
+    fn ready(&self) -> bool {
+        self.text.is_some() || self.card.is_some()
+    }
+
+    /// Takes what the loader sent. Returns true when the view changed.
+    fn receive(&mut self, hwnd: HWND, doc: Rect) -> bool {
+        let mut changed = false;
+        while let Ok(loaded) = self.rx.try_recv() {
+            changed = true;
+            match loaded {
+                Loaded::Text(text) => self.text = Some(TextView::new(text)),
+                Loaded::Handler(clsid, card) => {
+                    self.host = Some(Host::start(hwnd, clsid, PathBuf::from(display_path(&self.path)), doc));
+                    self.card = Some(card);
+                }
+                Loaded::Card(card) => {
+                    self.card = Some(card);
+                    self.icon = None;
+                }
+            }
+        }
+        changed
+    }
+
+    /// The content size in pixels for a work area of `work`.
+    fn size(&self, scale: f32, work: (f32, f32)) -> (f32, f32) {
+        match (&self.text, &self.host) {
+            (Some(_), _) => (0.45 * work.0, 0.75 * work.1),
+            (None, Some(_)) => (0.6 * work.0, 0.8 * work.1),
+            (None, None) => (infocard::SIZE.0 * scale, infocard::SIZE.1 * scale),
+        }
+    }
+
+    fn paint(&mut self, l: &Look, r: Rect, text_scale: f32) {
+        if let Some(text) = &mut self.text {
+            return text.paint(l, r, text_scale);
+        }
+        // The handler's own window covers `r`.
+        if self.host.as_ref().is_some_and(Host::ready) {
+            return;
+        }
+        let Some(card) = &self.card else {
+            return;
+        };
+        if self.icon.is_none() {
+            self.icon = card.icon.as_ref().and_then(|frame| l.p.upload(frame).ok());
+        }
+        card.paint(l, self.icon.as_ref(), r);
+    }
+}
+
+/// Folders and unreadable files get the card. Text types show as text even
+/// when a handler is registered; other types prefer their handler.
+fn classify(path: &Path) -> Loaded {
+    let Some(head) = (!path.is_dir()).then(|| textview::head(path)).flatten() else {
+        return Loaded::Card(Card::read(path));
+    };
+    let known = textview::known(path) && textview::is_text(&head, true);
+    if let Some(clsid) = (!known).then(|| handler::find(path)).flatten() {
+        return Loaded::Handler(clsid, Card::read(path));
+    }
+    if known || textview::is_text(&head, false) {
+        if let Ok(text) = textview::read(path) {
+            return Loaded::Text(text);
+        }
+    }
+    Loaded::Card(Card::read(path))
 }
 
 /// Queues a peek from any thread and wakes the window thread.
@@ -261,19 +388,17 @@ pub(super) unsafe fn incoming(hwnd: HWND) {
     }
 }
 
-/// Supported files next to `path`, by name.
+/// The items next to `path`: folders, then files, each by name.
 fn folder_files(path: &Path) -> Vec<PathBuf> {
     let Some(Ok(entries)) = path.parent().map(std::fs::read_dir) else {
         return Vec::new();
     };
-    let mut files: Vec<PathBuf> = entries
+    let mut items: Vec<(bool, String, PathBuf)> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .map(|e| e.path())
-        .filter(|p| super::organize::can_insert(p))
+        .map(|e| (!e.file_type().is_ok_and(|t| t.is_dir()), e.file_name().to_string_lossy().to_lowercase(), e.path()))
         .collect();
-    files.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
-    files
+    items.sort();
+    items.into_iter().map(|(.., path)| path).collect()
 }
 
 unsafe fn start(hwnd: HWND, path: PathBuf, siblings: Vec<PathBuf>) {
@@ -286,7 +411,14 @@ unsafe fn start(hwnd: HWND, path: PathBuf, siblings: Vec<PathBuf>) {
     let foreground = GetForegroundWindow();
     let mode = with_state(|s| (s.quick.as_ref().map(Quick::closing), s.tabs.is_empty()));
     match mode {
-        // The editor holds documents: the file opens there as a tab.
+        // The editor holds documents: the file opens there as a tab, or
+        // in its own app when the editor cannot open it.
+        Some((None, false)) if visible && !super::organize::can_insert(&path) => {
+            if let Err(error) = crate::integration::open_with_default(&path) {
+                sheet::alert(hwnd, "Open", &error);
+            }
+            return;
+        }
         Some((None, false)) if visible => {
             with_state(|s| add_tabs(s, std::slice::from_ref(&path)));
             open(hwnd, path);
@@ -344,6 +476,20 @@ unsafe fn show_file(hwnd: HWND) {
         return;
     };
     look_up_app(hwnd, &path);
+    if !super::organize::can_insert(&path) {
+        let title: Vec<u16> = format!("{} - Preview for Windows", file_name(&path)).encode_utf16().chain(Some(0)).collect();
+        let _ = SetWindowTextW(hwnd, windows::core::PCWSTR(title.as_ptr()));
+        with_state(|s| {
+            forget_document(s);
+            let side = (infocard::ICON * s.scale) as i32;
+            if let Some(q) = s.quick.as_mut() {
+                q.other = Some(Other::new(hwnd, path, side));
+            }
+        });
+        invalidate(hwnd);
+        return;
+    }
+    with_state(|s| s.quick.as_mut().map(|q| q.other = None));
     let pdf = is_pdf(&path);
     open(hwnd, path);
     with_state(|s| {
@@ -356,16 +502,26 @@ unsafe fn show_file(hwnd: HWND) {
     invalidate(hwnd);
 }
 
-/// Back to an empty, hidden window with no documents.
-fn reset(s: &mut State) {
+/// No document on screen; late worker results for the last one are dropped.
+fn forget_document(s: &mut State) {
     s.generation = s.generation.wrapping_add(1);
-    s.quick = None;
     s.path = None;
     s.frame = None;
     s.pdf = None;
     s.displayed = None;
     s.pending = false;
     s.render_failed = false;
+    s.selection = None;
+    s.text_selection = None;
+    if let Some(renderer) = s.renderer.as_mut() {
+        renderer.bitmap = None;
+    }
+}
+
+/// Back to an empty, hidden window with no documents.
+fn reset(s: &mut State) {
+    forget_document(s);
+    s.quick = None;
     s.tabs.clear();
     s.sessions.clear();
     s.saves.clear();
@@ -381,8 +537,6 @@ fn reset(s: &mut State) {
     s.crop = false;
     s.signature = None;
     s.slideshow = None;
-    s.selection = None;
-    s.text_selection = None;
     s.focus = None;
     s.document_ring = false;
     s.zoom = Zoom::Fit;
@@ -393,9 +547,6 @@ fn reset(s: &mut State) {
     s.status = EMPTY_STATUS.into();
     s.messages = Default::default();
     s.recent = super::empty::load();
-    if let Some(renderer) = s.renderer.as_mut() {
-        renderer.bitmap = None;
-    }
 }
 
 fn work_area(monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> RECT {
@@ -585,15 +736,17 @@ fn content_size(s: &State, work: (f32, f32)) -> (f32, f32) {
     let (ww, wh) = work;
     let (header, rail, gap) = (header_height(s), rail_width(s), document::gap(s));
     let room = |height: f32| (0.8 * ww - rail - 2.0 * gap, height * wh - header - 2.0 * gap);
-    let size = match (&s.pdf, &s.frame) {
-        (Some(v), _) => {
+    let other = s.quick.as_ref().and_then(|q| q.other.as_ref());
+    let size = match (other, &s.pdf, &s.frame) {
+        (Some(other), ..) => other.size(s.scale, work),
+        (None, Some(v), _) => {
             let (room_w, room_h) = room(0.85);
             let widest = v.sizes.iter().map(|p| p[0]).fold(1.0, f32::max);
             let tallest = v.sizes.iter().map(|p| p[1]).fold(1.0, f32::max);
             let scale = view::actual(s.scale).min(room_w / widest).min(room_h / tallest).max(0.0);
             (widest * scale, tallest * scale)
         }
-        (None, Some(f)) => {
+        (None, None, Some(f)) => {
             let (room_w, room_h) = room(0.8);
             let (w, h) = (f.source_width.max(1) as f32, f.source_height.max(1) as f32);
             let k = (room_w / w).min(room_h / h).clamp(0.0, 1.0);
@@ -662,8 +815,18 @@ pub(super) unsafe fn tick(hwnd: HWND) {
         let shown_path = s.displayed.as_ref().map(|(p, _)| p.clone());
         let failed = s.render_failed;
         let strip_focus = strip_has(s, s.hover) || strip_has(s, s.caption_hover) || (s.focus_visible && strip_has(s, s.focus));
+        let doc = s.layout().document;
         let q = s.quick.as_mut()?;
         let mut repaint = false;
+        let mut target = shown_path.filter(|_| ready);
+        let visible = !moving() && q.grid.is_none() && !q.closing();
+        if let Some(other) = q.other.as_mut() {
+            repaint |= other.receive(hwnd, doc);
+            target = other.ready().then(|| other.path.clone());
+            if let Some(host) = other.host.as_mut() {
+                host.place(doc, visible);
+            }
+        }
         if let Some(rx) = &q.thumbs_rx {
             while let Ok((index, frame)) = rx.try_recv() {
                 if let Some(slot) = q.thumbs.get_mut(index) {
@@ -676,8 +839,8 @@ pub(super) unsafe fn tick(hwnd: HWND) {
             q.origin = Some(rect);
         }
         let mut placement = None;
-        if !q.closing() && ((ready && shown_path.is_some() && shown_path != q.sized) || (failed && !q.shown)) {
-            q.sized = shown_path;
+        if !q.closing() && ((target.is_some() && target != q.sized) || (failed && !q.shown)) {
+            q.sized = target;
             placement = Some(!std::mem::replace(&mut q.shown, true));
         }
         if strip_focus {
@@ -955,13 +1118,15 @@ fn open_label(q: &Quick) -> String {
 /// Quick view commands, and Markup, which leaves Quick view. Returns true
 /// when handled.
 pub(super) unsafe fn command(hwnd: HWND, command: Command, keyboard: bool) -> bool {
-    let quick = with_state(|s| s.quick.is_some()).unwrap_or(false);
+    let (quick, other) = with_state(|s| (s.quick.is_some(), s.quick.as_ref().is_some_and(|q| q.other.is_some()))).unwrap_or_default();
     if quick {
         settle(hwnd);
     }
     match command {
         Command::OpenInEditor => open_default(hwnd),
         Command::IndexSheet => toggle_grid(hwnd),
+        // The editor cannot mark up a type it does not open.
+        Command::ToggleMarkup if other => {}
         Command::ToggleMarkup if quick => open_editor(hwnd, true),
         Command::AppMenu if quick => more_menu(hwnd, keyboard),
         _ => return false,
@@ -972,10 +1137,14 @@ pub(super) unsafe fn command(hwnd: HWND, command: Command, keyboard: bool) -> bo
 /// The Open button: the file's default app, or the editor in this window
 /// when that app is this one.
 unsafe fn open_default(hwnd: HWND) {
-    let Some(path) = with_state(|s| s.quick.as_ref().and_then(current).map(Path::to_path_buf)).flatten() else {
+    let Some((path, other)) = with_state(|s| {
+        let q = s.quick.as_ref()?;
+        Some((current(q)?.to_path_buf(), q.other.is_some()))
+    })
+    .flatten() else {
         return;
     };
-    if default_app(&path).is_none() {
+    if !other && default_app(&path).is_none() {
         return open_editor(hwnd, false);
     }
     match crate::integration::open_with_default(Path::new(&display_path(&path))) {
@@ -989,27 +1158,33 @@ unsafe fn open_default(hwnd: HWND) {
 /// More: the commands the header leaves out, so it stays as short as the
 /// reference frames' header.
 unsafe fn more_menu(hwnd: HWND, keyboard: bool) {
-    let Some((ctx, many, elsewhere)) = with_state(|s| {
+    let Some((ctx, many, elsewhere, other)) = with_state(|s| {
         let q = s.quick.as_ref()?;
-        Some((s.ctx(), q.files.len() > 1, current(q).and_then(default_app).is_some()))
+        Some((s.ctx(), q.files.len() > 1, current(q).and_then(default_app).is_some(), q.other.is_some()))
     })
     .flatten() else {
         return;
     };
-    let mut markup = MenuItem::for_command(Command::ToggleMarkup, &ctx);
-    markup.label = "&Markup".into();
-    markup.checked = None;
-    let mut items = vec![markup];
-    if !ctx.pdf {
-        items.push(MenuItem::for_command(Command::Rotate, &ctx));
+    let mut items = Vec::new();
+    if !other {
+        let mut markup = MenuItem::for_command(Command::ToggleMarkup, &ctx);
+        markup.label = "&Markup".into();
+        markup.checked = None;
+        items.push(markup);
+        if !ctx.pdf {
+            items.push(MenuItem::for_command(Command::Rotate, &ctx));
+        }
     }
     if many {
         items.push(MenuItem::for_command(Command::IndexSheet, &ctx));
     }
-    if elsewhere {
+    if elsewhere && !other {
         let mut editor = MenuItem::for_command(Command::OpenInEditor, &ctx);
         editor.pick = Some(Pick::Index(0));
         items.push(editor);
+    }
+    if items.is_empty() {
+        return;
     }
     match actions::popup(hwnd, items, Some(WidgetId::Command(Command::AppMenu)), None, keyboard) {
         Some(Pick::Command(command)) => actions::execute(hwnd, command, keyboard),
@@ -1049,9 +1224,7 @@ unsafe fn open_editor(hwnd: HWND, markup: bool) {
         if has_content && s.zoom != Zoom::Ratio(ratio) {
             s.zoom = Zoom::Ratio(ratio);
         }
-        if let Some((path, _)) = &s.displayed {
-            s.tabs = vec![path.clone()];
-        }
+        s.tabs = s.displayed.iter().map(|(path, _)| path.clone()).collect();
         s.focus = Some(WidgetId::Document);
         if markup {
             s.set_markup(true);
@@ -1110,10 +1283,10 @@ unsafe fn open_command(hwnd: HWND, command: crate::integration::Command) {
 /// Keys in Quick view. Returns true when handled; the window's own key
 /// handling runs otherwise.
 pub(super) unsafe fn key(hwnd: HWND, vk: u16, repeat: bool) -> bool {
-    let Some((grid, closing, chrome_focus)) = with_state(|s| {
+    let Some((grid, closing, chrome_focus, other)) = with_state(|s| {
         let q = s.quick.as_ref().filter(|_| s.sheet.is_none())?;
         let rail = matches!(s.focus, Some(WidgetId::SidebarItem(_)));
-        Some((q.grid.as_ref().map(|g| g.focus), q.closing(), s.focus_visible && (rail || strip_has(s, s.focus))))
+        Some((q.grid.as_ref().map(|g| g.focus), q.closing(), s.focus_visible && (rail || strip_has(s, s.focus)), q.other.is_some()))
     })
     .flatten() else {
         return false;
@@ -1147,6 +1320,7 @@ pub(super) unsafe fn key(hwnd: HWND, vk: u16, repeat: bool) -> bool {
         VK_RETURN if chrome_focus => return false,
         VK_RETURN => match grid {
             Some(focus) => pick(hwnd, focus),
+            None if other => open_default(hwnd),
             None => open_editor(hwnd, false),
         },
         VK_TAB => {
@@ -1154,7 +1328,10 @@ pub(super) unsafe fn key(hwnd: HWND, vk: u16, repeat: bool) -> bool {
             return false;
         }
         VK_PRIOR | VK_NEXT | VK_HOME | VK_END if !ctrl && grid.is_none() => {
-            with_state(|s| document::key(s, vk, shift));
+            with_state(|s| match s.quick.as_mut().and_then(|q| q.other.as_mut()).and_then(|o| o.text.as_mut()) {
+                Some(text) => text.key(VIRTUAL_KEY(vk)),
+                None => document::key(s, vk, shift),
+            });
         }
         _ => match commands::lookup(Chord { key: vk, ctrl, shift, alt }) {
             Some(command) if KEYS.contains(&command) => actions::execute(hwnd, command, true),
@@ -1244,11 +1421,14 @@ unsafe fn move_grid(hwnd: HWND, key: VIRTUAL_KEY) {
     invalidate(hwnd);
 }
 
-/// The wheel scrolls the index sheet. Returns true when it did.
+/// The wheel scrolls the index sheet or a text file. Returns true when it did.
 pub(super) fn wheel(s: &mut State, delta: f32) -> bool {
     let c = cells(s);
-    let Some(grid) = s.quick.as_mut().and_then(|q| q.grid.as_mut()) else {
+    let Some(q) = s.quick.as_mut() else {
         return false;
+    };
+    let Some(grid) = q.grid.as_mut() else {
+        return q.other.as_mut().and_then(|o| o.text.as_mut()).map(|text| text.wheel(delta)).is_some();
     };
     let max = (c.total - c.area.height()).max(0.0);
     grid.scroll = (grid.scroll - delta / 120.0 * c.cell.1 / 2.0).clamp(0.0, max);
@@ -1438,8 +1618,12 @@ pub(super) fn paint(l: &Look, bitmap: Option<&ID2D1Bitmap>, s: &mut State, layou
     let tint = tint(&l.t);
     l.p.fill(Rect::new(0.0, 0.0, s.size.0, s.size.1), if full_screen { l.t.canvas } else { tint });
     let grid = s.quick.as_ref().is_some_and(|q| q.grid.is_some());
+    let text_scale = s.text_scale;
     let drew = if grid {
         paint_grid(l, s);
+        false
+    } else if let Some(other) = s.quick.as_mut().and_then(|q| q.other.as_mut()) {
+        other.paint(l, layout.document, text_scale);
         false
     } else {
         // Pages and images sit on the window color, with no canvas or halo around them.

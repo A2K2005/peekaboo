@@ -156,7 +156,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
 }
 
 /// Shows the selection of `window` if it is Explorer or the desktop. A Space
-/// the hook took goes back to Explorer when nothing supported is selected.
+/// the hook took goes back to Explorer when nothing is selected.
 unsafe fn peek(window: HWND, space: bool) {
     if READING.replace(true) {
         return;
