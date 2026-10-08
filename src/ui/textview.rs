@@ -82,17 +82,27 @@ fn decode(bytes: &[u8]) -> String {
     }
 }
 
-/// Byte ranges of the rows of `text` hard-wrapped at `columns` characters.
+/// Byte ranges of the rows of `text` wrapped at `columns` characters, at the
+/// last space when the row has one, else mid-word.
 fn wrap(text: &str, columns: usize) -> Vec<Range<usize>> {
     let mut rows = Vec::new();
     let mut base = 0;
     for line in text.split('\n') {
         let mut start = 0;
-        for (count, (at, _)) in line.char_indices().enumerate() {
-            if count > 0 && count % columns == 0 {
-                rows.push(base + start..base + at);
-                start = at;
+        let mut count = 0;
+        let mut space = None;
+        for (at, c) in line.char_indices() {
+            if count == columns {
+                let end = space.filter(|&s| s > start).unwrap_or(at);
+                rows.push(base + start..base + end);
+                start = end;
+                count = line[start..at].chars().count();
+                space = None;
             }
+            if c == ' ' {
+                space = Some(at + 1);
+            }
+            count += 1;
         }
         rows.push(base + start..base + line.len());
         base += line.len() + 1;

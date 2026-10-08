@@ -1109,7 +1109,7 @@ fn current(q: &Quick) -> Option<&Path> {
 }
 
 fn open_label(q: &Quick) -> String {
-    match current(q).and_then(default_app) {
+    match current(q).filter(|path| !path.is_dir()).and_then(default_app) {
         Some(app) => format!("Open in {app}"),
         None => "Open".into(),
     }

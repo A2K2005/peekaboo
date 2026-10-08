@@ -691,7 +691,13 @@ pub fn default_app_name(extension: &str) -> Option<String> {
     if is_default_for(extension) {
         return None;
     }
-    association(&HSTRING::from(extension), ASSOCSTR_FRIENDLYAPPNAME).filter(|name| !name.is_empty())
+    let extension = HSTRING::from(extension);
+    // Types with no app resolve to the "Pick an app" dialog, which is not an app to name.
+    let executable = association(&extension, ASSOCSTR_EXECUTABLE).unwrap_or_default();
+    if executable.to_ascii_lowercase().ends_with("openwith.exe") {
+        return None;
+    }
+    association(&extension, ASSOCSTR_FRIENDLYAPPNAME).filter(|name| !name.is_empty())
 }
 
 /// Opens `path` with the default verb of its type.
